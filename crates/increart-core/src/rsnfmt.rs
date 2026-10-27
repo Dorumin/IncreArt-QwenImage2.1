@@ -1,0 +1,48 @@
+//! RSN reading and writing in the library's style: 4-space indentation and
+//! `Option` values written bare (DESIGN.md, File format: RSN).
+
+use std::fs;
+use std::path::Path;
+
+use serde::de::DeserializeOwned;
+use serde::{Serialize, Serializer};
+
+use crate::error::{Error, IoContext, Result};
+use crate::fsutil;
+
+pub fn to_string<T: Serialize>(value: &T) -> String {
+    let mut config = rsn::ser::Config::new();
+    config.writer = rsn::writer::Config::Pretty { indentation: "    ".into(), newline: "\n".into() };
+    config.serialize(value).expect("serializing to a String can't fail")
+}
+
+pub fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, rsn::de::Error> {
+    rsn::from_str(text)
+}
+
+pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let text = fs::read_to_string(path).at(path)?;
+    rsn::from_str(&text).map_err(|e| Error::format(path, describe(&text, &e)))
+}
+
+/// Writes `value` atomically (temporary file + rename).
+pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    fsutil::write_atomic(path, format!("{}\n", to_string(value)).as_bytes())
+}
+
+/// `line:col: error` for an RSN parse error.
+pub fn describe(text: &str, e: &rsn::de::Error) -> String {
+    let at = e.location.start.min(text.len());
+    let line = text[..at].matches('\n').count() + 1;
+    let col = at - text[..at].rfind('\n').map_or(0, |i| i + 1) + 1;
+    format!("{line}:{col}: {:?}", e.kind)
+}
+
+/// `serialize_with` for `Option` fields: `Some(x)` is written as `x`, `None`
+/// as `None`. rsn reads a bare value back as `Some`.
+pub fn bare<T: Serialize, S: Serializer>(value: &Option<T>, s: S) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(v) => v.serialize(s),
+        None => s.serialize_none(),
+    }
+}

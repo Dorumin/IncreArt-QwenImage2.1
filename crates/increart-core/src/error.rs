@@ -1,0 +1,52 @@
+use std::io;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{}: {source}", path.display())]
+    Io { path: PathBuf, source: io::Error },
+    /// A file that exists but can't be parsed (RSN, JSON, PNG structure).
+    #[error("{}: {msg}", path.display())]
+    Format { path: PathBuf, msg: String },
+    #[error("{}: {source}", path.display())]
+    Image { path: PathBuf, source: image::ImageError },
+    #[error("library {} is already open in another instance", .0.display())]
+    Locked(PathBuf),
+    #[error("{} is not an IncreArt library (no library.rsn)", .0.display())]
+    NotALibrary(PathBuf),
+    #[error("library format {0} is not supported by this version")]
+    UnsupportedFormat(u32),
+    #[error("invalid id {0:?}")]
+    InvalidId(String),
+    #[error("invalid name {name:?}: {reason}")]
+    InvalidName { name: String, reason: &'static str },
+    #[error("{0} not found")]
+    NotFound(String),
+    /// An operation that is well formed but not allowed (e.g. moving a folder
+    /// into itself, nesting a project in a project).
+    #[error("{0}")]
+    Refused(String),
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Attaches a path to `io::Error`s.
+pub trait IoContext<T> {
+    fn at(self, path: impl AsRef<Path>) -> Result<T>;
+}
+
+impl<T> IoContext<T> for io::Result<T> {
+    fn at(self, path: impl AsRef<Path>) -> Result<T> {
+        self.map_err(|source| Error::Io { path: path.as_ref().to_path_buf(), source })
+    }
+}
+
+impl Error {
+    pub fn format(path: impl AsRef<Path>, msg: impl ToString) -> Self {
+        Error::Format { path: path.as_ref().to_path_buf(), msg: msg.to_string() }
+    }
+
+    pub fn image(path: impl AsRef<Path>, source: image::ImageError) -> Self {
+        Error::Image { path: path.as_ref().to_path_buf(), source }
+    }
+}

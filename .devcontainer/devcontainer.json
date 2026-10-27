@@ -1,0 +1,59 @@
+{
+	"name": "increart-qwenimage21",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		// Also installs pnpm, which builds sd-server's embedded web UI.
+		"ghcr.io/devcontainers/features/node:1": {},
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+	},
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+	"workspaceFolder": "/workspace",
+	"remoteUser": "vscode",
+	"containerEnv": {
+		"RUST_TEST_THREADS": "8",
+		"CARGO_BUILD_JOBS": "16",
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"CLAUDE_CONFIG_DIR": "/home/vscode/.claude-config",
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
+		"PULSE_SERVER": "unix:/run/pulse/native",
+		"HF_HOME": "/mnt/storage/huggingface",
+		"CCACHE_DIR": "/mnt/storage/sdcpp/.ccache"
+	},
+	"runArgs": [
+		"--name=devcontainer-increart-qwenimage21",
+		"--network=host",
+		"--memory=120g",
+		"--cpus=24",
+		"--cap-drop=ALL",
+		"--device=/dev/dri",
+		"--device=/dev/kfd",
+		"--group-add=keep-groups"
+	],
+	"mounts": [
+		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+		// Host PipeWire's PulseAudio socket. The directory, not the socket file,
+		// so a restarted audio server is still reachable.
+		"source=${localEnv:XDG_RUNTIME_DIR:/run/user/1000}/pulse,target=/run/pulse,type=bind",
+		"source=${localWorkspaceFolder}/.devcontainer/devcontainer.json,target=/workspace/.devcontainer/devcontainer.json,type=bind,readonly",
+		"source=${localWorkspaceFolder}/.devcontainer/Dockerfile,target=/workspace/.devcontainer/Dockerfile,type=bind,readonly",
+		// sd.cpp source + builds, ccache, and the IncreArt library root.
+		"source=/mnt/storage/sdcpp,target=/mnt/storage/sdcpp,type=bind",
+		// Existing ComfyUI model tree; sd-server reads it directly via --model-dir.
+		"source=/mnt/storage/comfy-new/ComfyUI/models,target=/mnt/storage/comfy-new/ComfyUI/models,type=bind,readonly",
+		"source=/mnt/storage/huggingface,target=/mnt/storage/huggingface,type=bind",
+		// IncreArt image library.
+		"source=/mnt/storage/home/Documents/increart_library,target=/mnt/storage/increart_library,type=bind",
+		"source=increart-claude-config,target=/home/vscode/.claude-config,type=volume",
+		"source=cargo-registry-cache,target=/usr/local/cargo/registry,type=volume"
+	],
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"claudeCode.allowDangerouslySkipPermissions": true,
+				"claudeCode.initialPermissionMode": "bypassPermissions"
+			}
+		}
+	}
+}

@@ -1,0 +1,3062 @@
+//! Everything the GUI shows, and the lists derived from the library index.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use increart_core::HistoryKey;
+use increart_core::config::{Config, RecipePreset, Resolution, ServerPreset};
+use increart_core::history::{HistoryEntry, HistoryKind};
+use increart_core::id::Timestamp;
+use increart_core::model::IdeaSource;
+use increart_core::model::{GenerateDraft, GenerateImage, IdeaDraftFile};
+use increart_core::model::{Recipe, SourceInfo};
+use increart_core::prompts::{PromptPreset, PromptPresets, Sweep};
+use increart_core::scan::{IdeaEntry, OutputLink, ProjectEntry};
+use increart_core::{Id, IdeaLoc, ImageRef, Index, Tree, Verdict};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    IdeaInbox,
+    InputLibrary,
+    Projects,
+    Review,
+    OutputLibrary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InboxTab {
+    NewIdea,
+    Grid,
+    Folder,
+    Import,
+    Discarded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibTab {
+    Grid,
+    Folder,
+    Discarded,
+}
+
+/// Input library Grid filters (they apply on top of the folder).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibFilter {
+    /// Matches title, text and tags.
+    pub text: String,
+    pub starred_only: bool,
+    pub with_images_only: bool,
+    /// `Some(true)`: promoted ideas only; `Some(false)`: not yet promoted.
+    pub promoted: Option<bool>,
+    /// Most used first (as ref or start image), instead of newest first.
+    pub most_used: bool,
+}
+
+/// An input image's metadata from its file: where it was imported from, and
+/// its pixel hash.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InputMeta {
+    pub source: Option<SourceInfo>,
+    pub blake3: Option<String>,
+}
+
+/// The right-side details panels; each starts shown (every session) and
+/// can be hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InfoPanel {
+    /// The Idea inbox Grid's current idea.
+    Inbox,
+    /// The Input library's idea.
+    Library,
+    /// The Output library's selected image (its lineage).
+    Output,
+}
+
+/// Where an idea came from, as the Idea inbox's source filter groups it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaOrigin {
+    Typed,
+    Clipboard,
+    InboxFolder,
+    DroppedFile,
+    /// From Review: an output, or a tile of several.
+    FromOutput,
+}
+
+impl IdeaOrigin {
+    pub const ALL: [IdeaOrigin; 5] = [
+        IdeaOrigin::Typed,
+        IdeaOrigin::Clipboard,
+        IdeaOrigin::InboxFolder,
+        IdeaOrigin::DroppedFile,
+        IdeaOrigin::FromOutput,
+    ];
+
+    pub fn of(source: &IdeaSource) -> IdeaOrigin {
+        match source {
+            IdeaSource::Manual => IdeaOrigin::Typed,
+            IdeaSource::Clipboard => IdeaOrigin::Clipboard,
+            IdeaSource::InboxFolder => IdeaOrigin::InboxFolder,
+            IdeaSource::DroppedFile { .. } => IdeaOrigin::DroppedFile,
+            IdeaSource::FromOutput { .. } | IdeaSource::Tiled { .. } => IdeaOrigin::FromOutput,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdeaOrigin::Typed => "typed",
+            IdeaOrigin::Clipboard => "clipboard",
+            IdeaOrigin::InboxFolder => "inbox folder",
+            IdeaOrigin::DroppedFile => "dropped file",
+            IdeaOrigin::FromOutput => "from outputs",
+        }
+    }
+}
+
+/// How long ago an idea was added, as the Idea inbox's age filter groups it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaAge {
+    /// The last 24 hours.
+    Day,
+    /// The last 7 days (the last day included).
+    Week,
+    /// Before that.
+    Older,
+}
+
+impl IdeaAge {
+    pub const ALL: [IdeaAge; 3] = [IdeaAge::Day, IdeaAge::Week, IdeaAge::Older];
+
+    /// Whether an idea added at `created` is in this group at `now`.
+    pub fn holds(self, created: Timestamp, now: Timestamp) -> bool {
+        let age = now - created;
+        match self {
+            IdeaAge::Day => age <= chrono::Duration::days(1),
+            IdeaAge::Week => age <= chrono::Duration::days(7),
+            IdeaAge::Older => age > chrono::Duration::days(7),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdeaAge::Day => "last 24 hours",
+            IdeaAge::Week => "last 7 days",
+            IdeaAge::Older => "older",
+        }
+    }
+}
+
+/// Idea inbox Grid search and filters; they narrow the triage queue (the
+/// cursor and the rating keys go through what's shown).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InboxFilter {
+    /// Matches title, text, variants and tags.
+    pub text: String,
+    /// Only ideas with this tag.
+    pub tag: Option<String>,
+    /// `Some(true)`: with images only; `Some(false)`: text only.
+    pub images: Option<bool>,
+    pub origin: Option<IdeaOrigin>,
+    pub age: Option<IdeaAge>,
+    /// Oldest first, instead of newest first.
+    pub oldest_first: bool,
+}
+
+impl InboxFilter {
+    /// Whether any filter hides ideas (the order doesn't).
+    pub fn narrows(&self) -> bool {
+        !self.text.trim().is_empty()
+            || self.tag.is_some()
+            || self.images.is_some()
+            || self.origin.is_some()
+            || self.age.is_some()
+    }
+
+    /// Whether the idea passes, `now` for the age filter.
+    pub fn matches(&self, i: &increart_core::model::Idea, now: Timestamp) -> bool {
+        let q = self.text.trim().to_lowercase();
+        (q.is_empty()
+            || i.title.to_lowercase().contains(&q)
+            || i.text.to_lowercase().contains(&q)
+            || i.variants.iter().any(|v| v.text.to_lowercase().contains(&q))
+            || i.tags.iter().any(|t| t.to_lowercase().contains(&q)))
+            && self.tag.as_ref().is_none_or(|t| i.tags.contains(t))
+            && self.images.is_none_or(|w| w == !i.images.is_empty())
+            && self.origin.is_none_or(|o| o == IdeaOrigin::of(&i.source))
+            && self.age.is_none_or(|a| a.holds(i.created, now))
+    }
+}
+
+/// How often an image was used to make others, from the run records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Runs that name it as a reference (`<imageN>`).
+    pub ref_runs: usize,
+    /// Runs that start from it (img2img).
+    pub start_runs: usize,
+    /// Images those runs made so far.
+    pub images: usize,
+}
+
+impl Usage {
+    pub fn runs(&self) -> usize {
+        self.ref_runs + self.start_runs
+    }
+
+    /// "ref in 3 runs · start in 1 run · 14 images"; `None` if never used.
+    pub fn label(&self) -> Option<String> {
+        if self.runs() == 0 {
+            return None;
+        }
+        let runs = |n: usize| if n == 1 { "1 run".to_string() } else { format!("{n} runs") };
+        let mut parts = vec![];
+        if self.ref_runs > 0 {
+            parts.push(format!("ref in {}", runs(self.ref_runs)));
+        }
+        if self.start_runs > 0 {
+            parts.push(format!("start in {}", runs(self.start_runs)));
+        }
+        parts.push(if self.images == 1 { "1 image".into() } else { format!("{} images", self.images) });
+        Some(parts.join(" · "))
+    }
+
+    fn add(&mut self, o: Usage) {
+        self.ref_runs += o.ref_runs;
+        self.start_runs += o.start_runs;
+        self.images += o.images;
+    }
+}
+
+/// Output library Grid filters.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutputFilter {
+    /// Matches the run's prompt.
+    pub text: String,
+    pub has_refs: bool,
+    pub transparent: bool,
+    /// The ratings shown (the preset tabs set them).
+    pub ratings: Ratings,
+}
+
+impl OutputFilter {
+    /// Whether a filter besides the ratings hides images.
+    pub fn narrows(&self) -> bool {
+        *self != OutputFilter { ratings: self.ratings, ..OutputFilter::default() }
+    }
+}
+
+/// Generate's From library… picker: a full-window browser of the input
+/// library's and the output library's images, to add as references.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefPicker {
+    pub source: RefSource,
+    /// Matches an idea's title, text and tags, or an output's prompt.
+    pub text: String,
+    /// Outputs: which ratings.
+    pub ratings: Ratings,
+    /// Chosen to add, in the order clicked.
+    pub chosen: Vec<ImageRef>,
+}
+
+/// The title dialog: an output image and the title being typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleEdit {
+    pub image: ImageRef,
+    pub text: String,
+}
+
+/// Where the reference picker is browsing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RefSource {
+    /// The input library, or one of its folders (relative to
+    /// `input/library/`).
+    Inputs(Option<PathBuf>),
+    Outputs(OutputSource),
+}
+
+/// An image the reference picker shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefCandidate {
+    pub image: ImageRef,
+    /// The idea's title, or "project · run · seed".
+    pub title: String,
+    /// The idea's text, or the run's prompt.
+    pub text: String,
+    /// Outputs: the rating.
+    pub verdict: Option<Option<Verdict>>,
+}
+
+/// Which ratings the Output library Grid shows; kept (good + neutral) by
+/// default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ratings {
+    pub good: bool,
+    pub neutral: bool,
+    pub bad: bool,
+    pub unreviewed: bool,
+}
+
+impl Ratings {
+    pub const KEPT: Ratings = Ratings { good: true, neutral: true, bad: false, unreviewed: false };
+    pub const ALL: Ratings = Ratings { good: true, neutral: true, bad: true, unreviewed: true };
+
+    pub fn allows(&self, v: Option<Verdict>) -> bool {
+        match v {
+            Some(Verdict::Good) => self.good,
+            Some(Verdict::Neutral) => self.neutral,
+            Some(Verdict::Bad) => self.bad,
+            None => self.unreviewed,
+        }
+    }
+}
+
+impl Default for Ratings {
+    fn default() -> Self {
+        Ratings::KEPT
+    }
+}
+
+/// The Output library Grid's preset tabs: a click sets the filters to the
+/// preset's (its ratings, nothing else).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputPreset {
+    #[default]
+    Kept,
+    Good,
+    Rejected,
+    Unreviewed,
+    All,
+}
+
+impl OutputPreset {
+    pub const EVERY: [OutputPreset; 5] =
+        [OutputPreset::Kept, OutputPreset::Good, OutputPreset::Rejected, OutputPreset::Unreviewed, OutputPreset::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OutputPreset::Kept => "Kept",
+            OutputPreset::Good => "Good",
+            OutputPreset::Rejected => "Rejected",
+            OutputPreset::Unreviewed => "Unreviewed",
+            OutputPreset::All => "All",
+        }
+    }
+
+    pub fn ratings(self) -> Ratings {
+        let none = Ratings { good: false, neutral: false, bad: false, unreviewed: false };
+        match self {
+            OutputPreset::Kept => Ratings::KEPT,
+            OutputPreset::Good => Ratings { good: true, ..none },
+            OutputPreset::Rejected => Ratings { bad: true, ..none },
+            OutputPreset::Unreviewed => Ratings { unreviewed: true, ..none },
+            OutputPreset::All => Ratings::ALL,
+        }
+    }
+
+    pub fn filter(self) -> OutputFilter {
+        OutputFilter { ratings: self.ratings(), ..OutputFilter::default() }
+    }
+}
+
+/// Computed, read-only views of the kept images.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Smart {
+    /// One day, from the image IDs (`YYYY.MM.DD`).
+    Day(String),
+    /// Made from runs promoted from this idea.
+    Idea(Id),
+    /// Runs with Transparent on.
+    Transparent,
+}
+
+/// The history window (Generate history, or an idea's text history).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryView {
+    pub key: HistoryKey,
+    /// Newest first.
+    pub entries: Vec<HistoryEntry>,
+    /// By entry: the runs it was queued as (stored, or for older entries
+    /// found by their label).
+    pub runs: Vec<Vec<Id>>,
+    /// By entry: the project's newest run before it (stored, or for older
+    /// entries found by time).
+    pub after: Vec<Option<Id>>,
+    pub selected: usize,
+    pub search: String,
+    pub checkpoints_only: bool,
+    /// Entries whose settings differ from the entry before.
+    pub settings_only: bool,
+    /// Only the entries that led to this run: (the run, the run before it).
+    pub run_filter: Option<(Id, Option<Id>)>,
+    /// One row per entry, instead of one per run of identical texts.
+    pub every_entry: bool,
+}
+
+/// A row of the history window: one entry, or a run of entries in a row
+/// with the same text (e.g. the same prompt queued several times).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryRow<'a> {
+    /// The newest entry's index (the one selected / restored).
+    pub index: usize,
+    pub entry: &'a HistoryEntry,
+    /// Every entry in the row, newest first.
+    pub indexes: Vec<usize>,
+    /// Their kinds, oldest first, without repeats.
+    pub kinds: Vec<&'a HistoryKind>,
+}
+
+impl HistoryView {
+    pub fn new(key: HistoryKey) -> HistoryView {
+        HistoryView {
+            key,
+            entries: vec![],
+            runs: vec![],
+            after: vec![],
+            selected: 0,
+            search: String::new(),
+            checkpoints_only: false,
+            settings_only: false,
+            run_filter: None,
+            every_entry: false,
+        }
+    }
+
+    /// The form of the entry before `i` (older) that has one.
+    pub fn previous_form(&self, i: usize) -> Option<&GenerateDraft> {
+        self.entries.get(i + 1..)?.iter().find_map(|e| e.form.as_deref())
+    }
+
+    /// What changed in entry `i`'s settings since the entry before.
+    pub fn changes(&self, i: usize) -> Vec<String> {
+        match (self.previous_form(i), self.entries.get(i).and_then(|e| e.form.as_deref())) {
+            (Some(a), Some(b)) => settings_changes(a, b),
+            _ => vec![],
+        }
+    }
+
+    /// The runs of entry `i`.
+    pub fn runs_of(&self, i: usize) -> &[Id] {
+        self.runs.get(i).map_or(&[], Vec::as_slice)
+    }
+
+    /// The rows shown (search and filters applied).
+    pub fn shown(&self) -> Vec<HistoryRow<'_>> {
+        let q = self.search.to_lowercase();
+        let mut rows: Vec<HistoryRow> = vec![];
+        let entries = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !self.checkpoints_only || e.kind.is_checkpoint())
+            .filter(|(i, _)| !self.settings_only || !self.changes(*i).is_empty())
+            .filter(|(i, _)| {
+                self.run_filter.as_ref().is_none_or(|(run, before)| {
+                    // the entries since the run before, up to this run's checkpoint
+                    let queued = self.runs_of(*i);
+                    if queued.is_empty() { self.after.get(*i) == Some(before) } else { queued.contains(run) }
+                })
+            })
+            .filter(|(_, e)| q.is_empty() || e.text.to_lowercase().contains(&q) || e.extra.to_lowercase().contains(&q));
+        for (i, e) in entries {
+            match rows.last_mut() {
+                Some(r) if !self.every_entry && r.entry.same_content(e) => {
+                    r.indexes.push(i);
+                    if !r.kinds.contains(&&e.kind) {
+                        r.kinds.insert(0, &e.kind);
+                    }
+                }
+                _ => rows.push(HistoryRow { index: i, entry: e, indexes: vec![i], kinds: vec![&e.kind] }),
+            }
+        }
+        rows
+    }
+}
+
+/// What differs between two Generate forms' settings, e.g. "steps 20 → 30",
+/// "+1 image" (the prompt, label and first seed aside).
+pub fn settings_changes(a: &GenerateDraft, b: &GenerateDraft) -> Vec<String> {
+    let mut v = vec![];
+    if (a.width, a.height) != (b.width, b.height) {
+        v.push(format!("{}×{}", b.width, b.height));
+    }
+    if a.preset != b.preset {
+        v.push(format!("model {}", b.preset));
+    }
+    if a.steps != b.steps {
+        v.push(format!("steps {} → {}", a.steps, b.steps));
+    }
+    if a.cfg != b.cfg {
+        v.push(format!("cfg {} → {}", a.cfg, b.cfg));
+    }
+    if a.flow_shift != b.flow_shift {
+        let s = |f: Option<f32>| f.map_or("default".into(), |f| f.to_string());
+        v.push(format!("flow shift {} → {}", s(a.flow_shift), s(b.flow_shift)));
+    }
+    if a.seeds != b.seeds {
+        v.push(format!("seeds {} → {}", a.seeds, b.seeds));
+    }
+    let images = |d: &GenerateDraft| {
+        if d.images.is_empty() { images_of(&d.refs, d.init.as_ref()) } else { d.images.clone() }
+    };
+    let (ia, ib) = (images(a), images(b));
+    let added = ib.iter().filter(|x| !ia.iter().any(|y| y.image == x.image)).count();
+    let removed = ia.iter().filter(|x| !ib.iter().any(|y| y.image == x.image)).count();
+    if added > 0 {
+        v.push(format!("+{added} image{}", if added == 1 { "" } else { "s" }));
+    }
+    if removed > 0 {
+        v.push(format!("−{removed} image{}", if removed == 1 { "" } else { "s" }));
+    }
+    if added == 0 && removed == 0 && ia != ib {
+        let order = |l: &[GenerateImage]| l.iter().map(|x| x.image.clone()).collect::<Vec<_>>();
+        v.push(if order(&ia) != order(&ib) { "image order".into() } else { "image roles".into() });
+    }
+    if a.strength != b.strength && (a.init.is_some() || b.init.is_some() || ib.iter().any(|x| x.start)) {
+        v.push(format!("strength {} → {}", a.strength, b.strength));
+    }
+    if a.source_idea != b.source_idea {
+        v.push("source idea".into());
+    }
+    if a.sweep.on != b.sweep.on {
+        v.push(if b.sweep.on { "sweep on".into() } else { "sweep off".into() });
+    } else if a.sweep != b.sweep {
+        v.push("sweep settings".into());
+    }
+    if a.alpha != b.alpha {
+        v.push(if b.alpha { "transparent".into() } else { "opaque".into() });
+    }
+    v
+}
+
+/// What the reducer remembers of a history's newest entry (to merge edits).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LastEntry {
+    pub at: f64,
+    pub entry: HistoryEntry,
+}
+
+/// The Edit idea window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdeaEdit {
+    pub id: Id,
+    pub title: String,
+    pub text: String,
+    pub tags: String,
+    pub images: Vec<Id>,
+}
+
+/// The Export… dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportDialog {
+    pub images: Vec<ImageRef>,
+    /// What is being exported, for the title ("3 images", "collection animals").
+    pub what: String,
+    pub dest: String,
+    pub keep_metadata: bool,
+    /// Name files by image ID (else run / revision / seed).
+    pub by_id: bool,
+}
+
+/// The Tile dialog: picked images on a grid (DESIGN.md, Tiling); its
+/// settings are `config.tile`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileDialog {
+    pub layout: crate::tile::TileLayout,
+    /// The tile whose caption and span are edited.
+    pub selected: Option<usize>,
+    /// Compositions under way.
+    pub working: usize,
+}
+
+/// What "Captions from" fills every tile's caption with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionFill {
+    Clear,
+    /// The sweep row (its style or setting: "cfg 3"), else the run label.
+    Style,
+    Seed,
+    Title,
+    Run,
+    Prompt,
+    /// "20 steps · cfg 3", and flow shift and strength when set.
+    Settings,
+    /// The sweep row and the seed: "cfg 3 · seed 5".
+    StyleSeed,
+}
+
+/// What a caption's `{placeholders}` can be (DESIGN.md, Tiling).
+pub const CAPTION_FIELDS: [(&str, &str); 12] = [
+    ("n", "the tile's number"),
+    ("style", "the sweep row (style or setting), else the run label"),
+    ("seed", "the seed"),
+    ("settings", "\"20 steps · cfg 3 · …\""),
+    ("steps", "steps"),
+    ("cfg", "cfg"),
+    ("shift", "flow shift (if set)"),
+    ("strength", "edit strength (if an edit)"),
+    ("title", "the image's title"),
+    ("run", "the run label"),
+    ("prompt", "the prompt"),
+    ("project", "the project's name"),
+];
+
+/// A run's settings in a line: "20 steps · cfg 3 · shift 3.1 · strength 0.6".
+pub fn settings_line(r: &increart_core::model::Run) -> String {
+    let fmt = crate::update::fmt_value;
+    let mut v = vec![format!("{} steps", r.sample.steps), format!("cfg {}", fmt(r.sample.cfg))];
+    if let Some(x) = r.sample.flow_shift {
+        v.push(format!("shift {}", fmt(x)));
+    }
+    if let increart_core::model::Mode::Edit { strength, init: Some(_) } = &r.mode {
+        v.push(format!("strength {}", fmt(*strength)));
+    }
+    v.join(" · ")
+}
+
+impl CaptionFill {
+    pub const EVERY: [CaptionFill; 8] = [
+        CaptionFill::Style,
+        CaptionFill::StyleSeed,
+        CaptionFill::Seed,
+        CaptionFill::Settings,
+        CaptionFill::Title,
+        CaptionFill::Run,
+        CaptionFill::Prompt,
+        CaptionFill::Clear,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CaptionFill::Clear => "none",
+            CaptionFill::Style => "style / setting",
+            CaptionFill::StyleSeed => "style / setting · seed",
+            CaptionFill::Settings => "settings",
+            CaptionFill::Seed => "seed",
+            CaptionFill::Title => "title",
+            CaptionFill::Run => "run label",
+            CaptionFill::Prompt => "prompt",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectsTab {
+    Grid,
+    Folder,
+    Generate,
+    Jobs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FvMode {
+    Icons,
+    /// Small icons and names in columns.
+    Compact,
+    Details,
+}
+
+/// Which of the four folder views (DESIGN.md, Folder view): one per tab
+/// that has a Folder subtab, each with its own location and history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FvPlace {
+    Projects,
+    /// The Output library: collections and the virtual `smart/` folder.
+    Collections,
+    InputLibrary,
+    /// The Idea inbox: `input/` without the library (`inbox_drop/`,
+    /// `unreviewed/`, `discarded/`).
+    Inbox,
+}
+
+impl FvPlace {
+    pub const ALL: [FvPlace; 4] = [FvPlace::Projects, FvPlace::Collections, FvPlace::InputLibrary, FvPlace::Inbox];
+
+    /// Its top folder, relative to the library root.
+    pub fn root(self) -> &'static str {
+        match self {
+            FvPlace::Projects => "projects",
+            FvPlace::Collections => "collections",
+            FvPlace::InputLibrary => "input/library",
+            FvPlace::Inbox => "input",
+        }
+    }
+
+    /// The library tree its folders are (the inbox isn't one).
+    pub fn tree(self) -> Option<Tree> {
+        match self {
+            FvPlace::Projects => Some(Tree::Projects),
+            FvPlace::Collections => Some(Tree::Collections),
+            FvPlace::InputLibrary => Some(Tree::InputLibrary),
+            FvPlace::Inbox => None,
+        }
+    }
+}
+
+/// What a folder-view entry is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Folder,
+    Project,
+    /// `runs/<run-id>/`.
+    Run,
+    /// A link to a store image.
+    Image(ImageRef),
+    /// `*.rsn`, `*.jsonl` (shown with Ctrl+H).
+    Meta,
+    File,
+    /// A folder of the Output library's virtual, read-only `smart/` tree.
+    Smart,
+    /// An idea's folder (`idea.rsn` and links to its images).
+    Idea(Id),
+}
+
+impl EntryKind {
+    pub fn is_dir(&self) -> bool {
+        matches!(self, EntryKind::Folder | EntryKind::Project | EntryKind::Run | EntryKind::Smart | EntryKind::Idea(_))
+    }
+}
+
+/// The Output library folder view's virtual folder of smart folders.
+pub const SMART_DIR: &str = "collections/smart";
+
+/// Whether `path` (relative to the library root) is in the virtual
+/// `smart/` tree.
+pub fn is_smart(path: &Path) -> bool {
+    path.starts_with(SMART_DIR)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FvEntry {
+    pub name: String,
+    pub kind: EntryKind,
+    /// Bytes for a file, entries for a directory.
+    pub size: u64,
+    pub modified: Option<chrono::DateTime<chrono::Utc>>,
+    /// A short description (run label, verdict, …).
+    pub info: String,
+}
+
+/// The nearest multiple of 32 (sd.cpp's latent grid for Qwen-Image), at
+/// least 32.
+pub fn round32(v: u32) -> u32 {
+    ((v + 16) / 32 * 32).max(32)
+}
+
+/// An output size with the aspect of a `w` × `h` image: kept within
+/// 256…2048 on both sides, rounded to multiples of 32.
+pub fn fit_size(w: u32, h: u32) -> (u32, u32) {
+    let (wf, hf) = (w.max(1) as f32, h.max(1) as f32);
+    let down = (2048.0 / wf.max(hf)).min(1.0);
+    let up = (256.0 / (wf * down).min(hf * down)).max(1.0);
+    let s = down * up;
+    let side = |v: f32| round32((v * s).round() as u32).clamp(256, 2048);
+    (side(wf), side(hf))
+}
+
+/// What the Scale dialog resizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleTarget {
+    /// The Generate form's size.
+    Generate,
+    /// A row of the resolutions editor.
+    Resolution(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleBy {
+    Megapixels,
+    Width,
+    Height,
+}
+
+/// The Scale dialog: a new size with the same aspect, from a megapixel
+/// count or one side.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScaleDialog {
+    pub target: ScaleTarget,
+    /// The size being scaled.
+    pub width: u32,
+    pub height: u32,
+    pub by: ScaleBy,
+    pub megapixels: f32,
+    /// The width or height asked for.
+    pub side: u32,
+}
+
+impl ScaleDialog {
+    pub fn new(target: ScaleTarget, width: u32, height: u32) -> ScaleDialog {
+        let megapixels = (width as f32 * height as f32 / 1e6 * 100.0).round() / 100.0;
+        ScaleDialog { target, width, height, by: ScaleBy::Megapixels, megapixels, side: width }
+    }
+
+    /// The smallest and largest side allowed for the target.
+    pub fn limits(&self) -> (u32, u32) {
+        match self.target {
+            ScaleTarget::Generate => (256, 2048),
+            ScaleTarget::Resolution(_) => (32, 4096),
+        }
+    }
+
+    pub fn result(&self) -> (u32, u32) {
+        let value = match self.by {
+            ScaleBy::Megapixels => self.megapixels as f64,
+            _ => self.side as f64,
+        };
+        scaled(self.width, self.height, self.by, value, self.limits())
+    }
+}
+
+/// `w` × `h` scaled, keeping its aspect, to `value` megapixels or to that
+/// width / height; both sides rounded to multiples of 32 within `limits`.
+pub fn scaled(w: u32, h: u32, by: ScaleBy, value: f64, limits: (u32, u32)) -> (u32, u32) {
+    let r = w.max(1) as f64 / h.max(1) as f64;
+    let (nw, nh) = match by {
+        ScaleBy::Megapixels => {
+            let nh = (value.max(0.0) * 1e6 / r).sqrt();
+            (nh * r, nh)
+        }
+        ScaleBy::Width => (value, value / r),
+        ScaleBy::Height => (value * r, value),
+    };
+    let side = |v: f64| round32(v.round() as u32).clamp(limits.0, limits.1);
+    (side(nw), side(nh))
+}
+
+impl FvEntry {
+    /// What the view shows: an idea's title (its folder is named by its
+    /// ID), else the name.
+    pub fn label(&self) -> &str {
+        match self.kind {
+            EntryKind::Idea(_) if !self.info.is_empty() && self.info != "idea" => &self.info,
+            _ => &self.name,
+        }
+    }
+}
+
+/// A file-manager view of part of the library (DESIGN.md, Projects → Folder).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FolderView {
+    pub place: FvPlace,
+    /// The top it can't go above (relative to the library root).
+    pub root: PathBuf,
+    /// Where it is (relative to the library root).
+    pub path: PathBuf,
+    pub back: Vec<PathBuf>,
+    pub forward: Vec<PathBuf>,
+    pub entries: Vec<FvEntry>,
+    /// The path `entries` were listed for (`None`: list again).
+    pub listed: Option<PathBuf>,
+    pub selected: BTreeSet<String>,
+    /// For Shift-click ranges.
+    pub anchor: Option<String>,
+    pub mode: FvMode,
+    pub icon_size: f32,
+    pub show_meta: bool,
+    /// Ctrl+L: the typed path.
+    pub path_edit: Option<String>,
+    /// A few images from inside each folder, drawn behind its icon. Asked
+    /// for only once a folder's tile is on screen.
+    pub previews: BTreeMap<String, Vec<ImageRef>>,
+    pub previews_asked: BTreeSet<String>,
+    /// The folder `previews` are for.
+    pub previews_for: PathBuf,
+    /// Where the arrow keys move from (the last entry clicked or reached).
+    pub cursor: Option<String>,
+    /// Typed letters jump to the first matching name; a pause starts over.
+    pub typeahead: String,
+    pub typeahead_at: f64,
+}
+
+impl FolderView {
+    pub fn new(place: FvPlace) -> FolderView {
+        FolderView {
+            place,
+            root: place.root().into(),
+            path: place.root().into(),
+            back: vec![],
+            forward: vec![],
+            entries: vec![],
+            listed: None,
+            selected: BTreeSet::new(),
+            anchor: None,
+            mode: FvMode::Icons,
+            icon_size: 112.0,
+            show_meta: false,
+            path_edit: None,
+            previews: BTreeMap::new(),
+            previews_asked: BTreeSet::new(),
+            previews_for: PathBuf::new(),
+            cursor: None,
+            typeahead: String::new(),
+            typeahead_at: f64::NEG_INFINITY,
+        }
+    }
+
+    pub fn tree(&self) -> Option<Tree> {
+        self.place.tree()
+    }
+
+    /// `path` relative to the tree's top (for the tree operations).
+    pub fn tree_rel(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.root).map(Path::to_path_buf).unwrap_or_default()
+    }
+
+    /// Entries shown (metadata files only with Ctrl+H).
+    pub fn shown(&self) -> Vec<&FvEntry> {
+        self.entries.iter().filter(|e| self.show_meta || e.kind != EntryKind::Meta).collect()
+    }
+}
+
+/// Copied or cut entries (library-relative paths).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FvClipboard {
+    pub paths: Vec<PathBuf>,
+    pub cut: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewView {
+    Single,
+    Grid,
+    /// A (pinned) next to B (the current image).
+    Compare,
+    /// A sweep's contact sheet: a row per style, a column per seed.
+    Sheet,
+}
+
+/// The contact sheet's cell sizes (points); the largest is the thumbnails'
+/// own size, so cells stay sharp.
+pub const SHEET_CELL_MIN: u32 = 64;
+pub const SHEET_CELL_DEFAULT: u32 = 128;
+pub const SHEET_CELL_MAX: u32 = increart_core::thumbs::SIZE;
+
+/// The interface zoom (percent): its range, and the step of the status
+/// bar's buttons and Ctrl + / Ctrl −.
+pub const UI_ZOOM_MIN: u32 = 70;
+pub const UI_ZOOM_MAX: u32 = 300;
+pub const UI_ZOOM_STEP: u32 = 10;
+
+/// A sweep as a table (Review → Sheet): rows in run order, columns the
+/// seeds of any of its runs.
+#[derive(Debug)]
+pub struct Sheet<'a> {
+    pub seeds: Vec<u64>,
+    /// The rows the name filter shows.
+    pub rows: Vec<SheetRow<'a>>,
+    /// Rows the name filter hides.
+    pub hidden: usize,
+}
+
+#[derive(Debug)]
+pub struct SheetRow<'a> {
+    pub run: &'a increart_core::model::Run,
+    pub cells: Vec<SheetCell<'a>>,
+}
+
+#[derive(Debug)]
+pub enum SheetCell<'a> {
+    /// The newest revision's image of that seed.
+    Image(&'a OutputLink),
+    /// Asked for, not generated yet.
+    Pending,
+    /// Not asked for, cancelled or failed.
+    Empty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputTab {
+    Grid,
+    Folder,
+}
+
+/// What the Output library's Grid shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputSource {
+    AllProjects,
+    Project(Id),
+    /// Every project under a project folder (relative to `projects/`,
+    /// empty = all projects).
+    ProjectFolder(PathBuf),
+    /// A collection folder (relative to `collections/`, empty = all).
+    Collection(PathBuf),
+    Smart(Smart),
+    /// One run's images (from the history window).
+    Run(Id),
+}
+
+/// A question with Yes / Cancel; Yes sends `then`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Confirm {
+    pub text: String,
+    pub then: Box<crate::Msg>,
+}
+
+/// Start-up: pick a library, then servers, then the main window.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Phase {
+    Library(LibraryDialog),
+    Servers(ServerDialog),
+    Main,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibraryDialog {
+    pub path: String,
+    pub error: Option<String>,
+    pub busy: bool,
+    /// The wizard open over the dialog: create a library at `path`, or open
+    /// the one there.
+    pub wizard: Option<LibraryWizard>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryWizard {
+    Create,
+    Open,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerDialog {
+    /// What the editor is working on, while it is open.
+    pub editing: Option<Editing>,
+    /// The editor's working copy, and the servers being opened.
+    pub draft: ServerPreset,
+    /// `sd-server --list-devices`, once asked.
+    pub devices: Option<Result<Vec<String>, String>>,
+    /// Per server of the draft while opening and after.
+    pub progress: Vec<ServerProgress>,
+    pub opening: bool,
+    /// When opening started (`AppState::now`), for "starting — 12 s".
+    pub started: f64,
+    /// The setup wizard (no presets yet): builds `draft` from the listed
+    /// devices, or a server to connect to.
+    pub wizard: bool,
+    /// Opened from the main window: it can be closed again, keeping the
+    /// servers in use.
+    pub from_main: bool,
+    /// The sd-server settings window (binary, models, devices).
+    pub settings: bool,
+    /// Why the command line's `--servers` didn't skip this screen.
+    pub notice: Option<String>,
+}
+
+/// The command line's choice for the servers screen, applied (if valid)
+/// once the library opens.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StartupServers {
+    /// A preset by name (any case), or `last` for the last one opened.
+    Preset(String),
+    Without,
+}
+
+/// The server dialog's editor: a preset (index into
+/// `config.server_presets`), or a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Editing {
+    Preset(usize),
+    New,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerProgress {
+    Opening,
+    Up,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IdeaDraft {
+    pub title: String,
+    pub text: String,
+    /// Comma-separated.
+    pub tags: String,
+    pub images: Vec<Id>,
+}
+
+/// Seconds without edits before a draft is autosaved.
+pub const AUTOSAVE_DELAY: f64 = 2.0;
+/// Prompt history: an edit within this many seconds of the previous edit…
+pub const HISTORY_MERGE_SECS: f64 = 60.0;
+/// …changing fewer characters than this replaces it instead of adding one.
+pub const HISTORY_MERGE_CHARS: usize = 20;
+
+impl IdeaDraft {
+    pub fn to_file(&self) -> IdeaDraftFile {
+        IdeaDraftFile {
+            title: self.title.clone(),
+            text: self.text.clone(),
+            tags: self.tags.clone(),
+            images: self.images.clone(),
+        }
+    }
+
+    pub fn from_file(f: &IdeaDraftFile) -> IdeaDraft {
+        IdeaDraft { title: f.title.clone(), text: f.text.clone(), tags: f.tags.clone(), images: f.images.clone() }
+    }
+
+    pub fn tag_list(&self) -> Vec<String> {
+        self.tags.split(',').map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.title.trim().is_empty() && self.text.trim().is_empty() && self.images.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerateForm {
+    pub label: String,
+    pub prompt: String,
+    pub negative: String,
+    pub width: u32,
+    pub height: u32,
+    /// Index into `config.recipes`.
+    pub preset: usize,
+    pub steps: u32,
+    pub cfg: f32,
+    pub flow_shift: Option<f32>,
+    pub seeds: u64,
+    pub first_seed: u64,
+    /// The run's images in order, each a reference (`<image1>`, `<image2>`,
+    /// … numbered in this order), the img2img start image (at most one),
+    /// both, or neither (parked: kept here, not sent).
+    pub images: Vec<GenerateImage>,
+    /// For the start image.
+    pub strength: f32,
+    pub source_idea: Option<Id>,
+    /// Sweep mode: a run per chosen prompt preset.
+    pub sweep: Sweep,
+}
+
+/// Whether a run of this project belongs to the named sweep.
+/// A row of Review's scope panel under a project.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReviewRun<'a> {
+    Single(&'a increart_core::model::Run),
+    Sweep(&'a str),
+}
+
+fn in_sweep(p: &ProjectEntry, run: &Id, sweep: &str) -> bool {
+    p.runs.iter().any(|r| &r.id == run && r.sweep.as_ref().is_some_and(|s| s.name == sweep))
+}
+
+/// The image list for references and a start image (older drafts and runs
+/// keep them apart): the references in order, the start image marked on its
+/// reference or added after them.
+pub fn images_of(refs: &[ImageRef], init: Option<&ImageRef>) -> Vec<GenerateImage> {
+    let mut v: Vec<GenerateImage> =
+        refs.iter().map(|r| GenerateImage { image: r.clone(), reference: true, start: Some(r) == init }).collect();
+    if let Some(i) = init
+        && !refs.contains(i)
+    {
+        v.push(GenerateImage { image: i.clone(), reference: false, start: true });
+    }
+    v
+}
+
+/// The `<imageN>` tags in a prompt: (byte range, N). Accepts `<image2>`,
+/// `<Image 2>` and the like.
+pub fn image_tags(prompt: &str) -> Vec<(std::ops::Range<usize>, usize)> {
+    let lower = prompt.to_ascii_lowercase();
+    let mut out = vec![];
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("<image").map(|i| i + from) {
+        let rest = &lower[at + 6..];
+        let digits_at = rest.len() - rest.trim_start_matches(' ').len();
+        let digits: String = rest[digits_at..].chars().take_while(char::is_ascii_digit).collect();
+        let end = at + 6 + digits_at + digits.len();
+        if !digits.is_empty() && lower[end..].starts_with('>') {
+            if let Ok(n) = digits.parse() {
+                out.push((at..end + 1, n));
+            }
+            from = end + 1;
+        } else {
+            from = at + 6;
+        }
+    }
+    out
+}
+
+/// The prompt with its tags renumbered by `map` (old N → new N, or `None`
+/// for an image that's no longer a reference: "[removed image]").
+pub fn retag(prompt: &str, map: &std::collections::BTreeMap<usize, Option<usize>>) -> String {
+    let mut s = String::new();
+    let mut last = 0;
+    for (range, n) in image_tags(prompt) {
+        s.push_str(&prompt[last..range.start]);
+        match map.get(&n) {
+            Some(Some(m)) => s.push_str(&format!("<image{m}>")),
+            Some(None) => s.push_str("[removed image]"),
+            None => s.push_str(&prompt[range.clone()]),
+        }
+        last = range.end;
+    }
+    s.push_str(&prompt[last..]);
+    s
+}
+
+/// A prompt edit waiting for confirmation: the image list changed the
+/// `<imageN>` numbers the prompt uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retag {
+    /// (old N, new N or `None` when that image is no longer a reference),
+    /// for the tags the prompt uses that change.
+    pub changes: Vec<(usize, Option<usize>)>,
+    pub prompt: String,
+}
+
+/// The name for the project "New project from this image" (`N`) or
+/// "Duplicate project with this image" (`D`) makes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewProjectDialog {
+    pub image: ImageRef,
+    pub target: UseTarget,
+    pub name: String,
+}
+
+/// Naming the project that promoting ideas makes (always asked: an idea's
+/// title needn't suit a project).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromoteDialog {
+    /// The ideas; empty: the New idea form's draft (Add and promote).
+    pub ideas: Vec<Id>,
+    /// Where the project goes, relative to `projects/` (step 2 picks it).
+    pub parent: PathBuf,
+    pub name: String,
+    /// Step 2: choosing where.
+    pub choosing: bool,
+    /// A new folder to make in `parent` (on Create) and put the project in;
+    /// an existing one of that name (any case) is used. It starts as the
+    /// project's name and follows it while they match (`None`: in `parent`
+    /// itself).
+    pub new_folder: Option<String>,
+    /// Step 2's folder filter.
+    pub filter: String,
+}
+
+impl PromoteDialog {
+    pub fn new(ideas: Vec<Id>, parent: PathBuf, name: String) -> PromoteDialog {
+        let new_folder = Some(name.trim().to_string());
+        PromoteDialog { ideas, parent, name, choosing: false, new_folder, filter: String::new() }
+    }
+
+    /// The project goes in a new folder named after it.
+    pub fn own_folder(&self) -> bool {
+        self.new_folder.as_deref().map(str::trim) == Some(self.name.trim())
+    }
+}
+
+/// Naming the copy a project's Duplicate makes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateDialog {
+    /// The project, relative to `projects/`.
+    pub path: PathBuf,
+    pub name: String,
+}
+
+/// The Generate form's **Presets** window.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PresetsPanel {
+    pub view: PresetsView,
+    pub search: String,
+}
+
+/// What the Presets window lists (when not searching).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PresetsView {
+    #[default]
+    Favourites,
+    /// The sweep's ticked presets (sweep mode): those ticked on choosing the
+    /// view, which stay listed when unticked (to tick again) until another
+    /// view, and any ticked since.
+    Ticked(Vec<increart_core::prompts::PresetKey>),
+    Task(usize),
+}
+
+impl PresetsView {
+    pub fn task(&self) -> Option<usize> {
+        match self {
+            PresetsView::Task(t) => Some(*t),
+            _ => None,
+        }
+    }
+}
+
+/// **Edit presets…**: a working copy, saved or dropped as a whole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetsEditor {
+    pub list: PromptPresets,
+    pub task: usize,
+    pub preset: Option<usize>,
+    pub error: Option<String>,
+}
+
+/// **Save as preset…**: the Generate prompt as a new preset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavePresetDialog {
+    pub task: usize,
+    pub preset: PromptPreset,
+    pub error: Option<String>,
+}
+
+/// Switching to another library from the main window.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LibrarySwitch {
+    /// The engine was stopped for it (restarted on Cancel).
+    pub stopped: bool,
+}
+
+/// Where an output image is used (Review / Output library actions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseTarget {
+    /// The selected project's Generate form.
+    CurrentProject,
+    /// `E`: a fresh form in the image's own project.
+    Edit,
+    /// `N`: a new project next to the image's project.
+    NewProject,
+    /// `D`: a copy of the image's project, starting from the image's run.
+    DuplicateProject,
+}
+
+/// Max reference images Qwen-Image 2.1 is meant to take (more are sent,
+/// with a warning).
+pub const MAX_REFS: usize = 9;
+
+impl GenerateForm {
+    pub fn new(config: &Config) -> GenerateForm {
+        let (width, height) = config.default_resolution().map_or((1024, 1024), |r| (r.width, r.height));
+        let mut f = GenerateForm {
+            label: String::new(),
+            prompt: String::new(),
+            negative: String::new(),
+            width,
+            height,
+            preset: 0,
+            steps: 20,
+            cfg: 2.0,
+            flow_shift: None,
+            seeds: 4,
+            first_seed: 0,
+            images: vec![],
+            strength: increart_core::model::default_strength(),
+            source_idea: None,
+            sweep: Sweep::default(),
+        };
+        if let Some(p) = config.recipes.first() {
+            f.apply_preset(0, p);
+        }
+        f
+    }
+
+    pub fn to_draft(&self, config: &Config) -> GenerateDraft {
+        GenerateDraft {
+            label: self.label.clone(),
+            prompt: self.prompt.clone(),
+            negative_prompt: self.negative.clone(),
+            width: self.width,
+            height: self.height,
+            preset: config.recipes.get(self.preset).map(|r| r.name.clone()).unwrap_or_default(),
+            steps: self.steps,
+            cfg: self.cfg,
+            flow_shift: self.flow_shift,
+            seeds: self.seeds,
+            first_seed: self.first_seed,
+            // transparency is asked for in the prompt; never wrapped
+            alpha: false,
+            refs: self.refs(),
+            init: self.init(),
+            images: self.images.clone(),
+            strength: self.strength,
+            source_idea: self.source_idea.clone(),
+            sweep: self.sweep.clone(),
+        }
+    }
+
+    /// The form from a saved draft (the model preset by name, else the first).
+    pub fn from_draft(d: &GenerateDraft, config: &Config) -> GenerateForm {
+        GenerateForm {
+            label: d.label.clone(),
+            prompt: d.prompt.clone(),
+            negative: d.negative_prompt.clone(),
+            width: d.width,
+            height: d.height,
+            preset: config.recipes.iter().position(|r| r.name == d.preset).unwrap_or(0),
+            steps: d.steps,
+            cfg: d.cfg,
+            flow_shift: d.flow_shift,
+            seeds: d.seeds,
+            first_seed: d.first_seed,
+            images: if d.images.is_empty() { images_of(&d.refs, d.init.as_ref()) } else { d.images.clone() },
+            strength: d.strength,
+            source_idea: d.source_idea.clone(),
+            sweep: d.sweep.clone(),
+        }
+    }
+
+    /// The form a run was made with (for Duplicate with an image): prompt,
+    /// sizes, sampling, transparency and refs; label and seeds start afresh.
+    pub fn from_run(run: &increart_core::model::Run, config: &Config) -> GenerateForm {
+        let mut f = GenerateForm::new(config);
+        f.prompt = run.prompt.clone();
+        f.negative = run.negative_prompt.clone();
+        (f.width, f.height) = (run.width, run.height);
+        f.steps = run.sample.steps;
+        f.cfg = run.sample.cfg;
+        f.flow_shift = run.sample.flow_shift;
+        let init = match &run.mode {
+            increart_core::model::Mode::Edit { init, strength } => {
+                f.strength = *strength;
+                init.clone()
+            }
+            increart_core::model::Mode::Generate => None,
+        };
+        f.images = images_of(&run.refs, init.as_ref());
+        f.source_idea = run.source_idea.clone();
+        f.preset = config.recipes.iter().position(|r| r.recipe == run.model.recipe).unwrap_or(0);
+        f
+    }
+
+    /// The references, in order (`<image1>` first).
+    pub fn refs(&self) -> Vec<ImageRef> {
+        self.images.iter().filter(|i| i.reference).map(|i| i.image.clone()).collect()
+    }
+
+    /// The img2img start image, if any.
+    pub fn init(&self) -> Option<ImageRef> {
+        self.images.iter().find(|i| i.start).map(|i| i.image.clone())
+    }
+
+    /// The `<imageN>` number of the list's `i`th image, if it's a reference.
+    pub fn tag_of(&self, i: usize) -> Option<usize> {
+        self.images.get(i).filter(|x| x.reference).map(|_| self.images[..i].iter().filter(|x| x.reference).count() + 1)
+    }
+
+    /// Adds an image as the next reference (or makes it one, if it's in the
+    /// list already).
+    pub fn add_reference(&mut self, image: ImageRef) {
+        match self.images.iter_mut().find(|i| i.image == image) {
+            Some(i) => i.reference = true,
+            None => self.images.push(GenerateImage { image, reference: true, start: false }),
+        }
+    }
+
+    /// Makes an image the start image (at most one); returns the one it
+    /// replaced.
+    pub fn set_start(&mut self, image: ImageRef) -> Option<ImageRef> {
+        let old = self.init().filter(|o| *o != image);
+        for i in &mut self.images {
+            i.start = i.image == image;
+        }
+        if !self.images.iter().any(|i| i.start) {
+            self.images.push(GenerateImage { image, reference: false, start: true });
+        }
+        old
+    }
+
+    pub fn apply_preset(&mut self, i: usize, p: &RecipePreset) {
+        self.preset = i;
+        self.steps = p.steps;
+        self.cfg = p.cfg;
+        self.flow_shift = p.flow_shift;
+    }
+}
+
+/// What a file picker is for; its result comes back as [`crate::Msg::Picked`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickKind {
+    /// A library folder (existing, or empty for a new library).
+    LibraryFolder,
+    /// Images and text files to import as new ideas.
+    ImportFiles,
+    /// Images to attach to the New idea draft.
+    IdeaImages,
+    /// Images to add as references in the Generate form.
+    GenerateRefs,
+    /// The Export dialog's destination folder.
+    ExportDir,
+    /// Where Tile… saves its PNG.
+    TileFile,
+    SdServerBinary,
+    ModelDir,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerStatus {
+    pub name: String,
+    pub device: String,
+    pub state: String,
+    pub model: Option<String>,
+    /// Since when it's been ready with no job (`AppState::now`).
+    pub idle_since: Option<f64>,
+    /// Has had a job since it was last idle (its queue clearing is news).
+    pub worked: bool,
+}
+
+/// The notification alerts' state (DESIGN.md, Notifications).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Alerts {
+    /// When each alert last sounded; `None` while its condition doesn't hold.
+    pub idle_played: Option<f64>,
+    pub backlog_played: Option<f64>,
+    /// What holds now (for the bell), e.g. "GPU 0 idle for 7 min".
+    pub idle_text: Option<String>,
+    pub backlog_text: Option<String>,
+    /// Servers whose queue just cleared, for the next check.
+    pub cleared: Vec<usize>,
+    /// The last queue clearing, e.g. "GPU 0 finished its queue", until the
+    /// window has the focus or a GPU gets work again.
+    pub cleared_text: Option<String>,
+    /// No sound until then.
+    pub snooze_until: Option<f64>,
+    /// No sound until the app restarts.
+    pub muted: bool,
+    /// The app's window has the focus.
+    pub focused: bool,
+    /// For the window: ask the window manager for attention (taken there).
+    pub attention: bool,
+    /// The last sound that couldn't play.
+    pub sound_error: Option<String>,
+    /// The Test button's last result.
+    pub test_result: Option<Result<String, String>>,
+    /// When the conditions were last checked (once a second).
+    pub checked: f64,
+}
+
+impl Alerts {
+    pub fn snoozed(&self, now: f64) -> bool {
+        self.muted || self.snooze_until.is_some_and(|t| now < t)
+    }
+
+    /// No sound now: snoozed, or focused when it should sound only while not.
+    pub fn held(&self, now: f64, only_unfocused: bool) -> bool {
+        self.snoozed(now) || (only_unfocused && self.focused)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Message {
+    pub text: String,
+    pub error: bool,
+}
+
+/// An inline rename in a tree: which node, and the edited name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Renaming {
+    pub tree: Tree,
+    pub path: PathBuf,
+    pub name: String,
+    /// New project: nothing made yet; `path` is where it would go, and
+    /// Cancel leaves no project behind.
+    pub creating: bool,
+}
+
+/// Where the user is, for the top-left back / forward: the tabs and what
+/// is selected in their side panels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub tab: Tab,
+    pub inbox_tab: InboxTab,
+    pub lib_tab: LibTab,
+    pub lib_folder: Option<PathBuf>,
+    pub projects_tab: ProjectsTab,
+    pub project: Option<Id>,
+    pub proj_folder: Option<PathBuf>,
+    pub review_scope: Option<Id>,
+    pub review_folder: Option<PathBuf>,
+    pub output_tab: OutputTab,
+    pub output_source: OutputSource,
+}
+
+/// The places visited, around the current one.
+#[derive(Clone, Debug, Default)]
+pub struct NavHistory {
+    pub back: Vec<Place>,
+    pub forward: Vec<Place>,
+    pub current: Option<Place>,
+    /// Nesting of `update` (only a whole message makes a step).
+    pub(crate) depth: u32,
+    /// Going back or forward: its own steps aren't recorded.
+    pub(crate) restoring: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppState {
+    pub config: Config,
+    /// Where `config` is saved (`None`: not saved, e.g. in tests).
+    pub config_path: Option<PathBuf>,
+    pub phase: Phase,
+    pub library: Option<PathBuf>,
+    pub index: Index,
+    pub tab: Tab,
+    pub inbox_tab: InboxTab,
+    pub projects_tab: ProjectsTab,
+    pub draft: IdeaDraft,
+    /// Selected card in the Idea inbox grid (index into `inbox_queue`).
+    pub inbox_cursor: usize,
+    pub inbox_filter: InboxFilter,
+    /// Details panels hidden this session (all are shown at start).
+    pub info_hidden: BTreeSet<InfoPanel>,
+    /// Input library folder shown (`None`: all ideas).
+    pub lib_folder: Option<PathBuf>,
+    pub lib_selected: BTreeSet<Id>,
+    /// The idea in the Input library's side panel.
+    pub lib_info: Option<Id>,
+    pub project: Option<Id>,
+    /// Projects tree selection when a folder is selected (relative to `projects/`).
+    pub proj_folder: Option<PathBuf>,
+    /// The grid's folder kept when a project was selected without narrowing
+    /// it (see [`Self::project_scope`]).
+    pub proj_scope_kept: Option<PathBuf>,
+    pub generate: GenerateForm,
+    pub servers: Vec<ServerStatus>,
+    pub engine_running: bool,
+    /// Numbers server-opening attempts; reports from older ones are ignored.
+    pub open_attempt: u32,
+    /// Servers still opening after **Continue in background**.
+    pub background: Option<Vec<ServerProgress>>,
+    /// Per starting server: its log's latest line ("loading tensors …").
+    pub start_log: Vec<String>,
+    /// Servers being stopped (until [`Msg::ServersStopped`](crate::Msg)).
+    pub stopping: Vec<String>,
+    /// Runs with seeds in the engine.
+    pub active_runs: BTreeSet<Id>,
+    /// Active runs stopped with Finish & stop: their generating images are
+    /// still coming.
+    pub finishing: BTreeSet<Id>,
+    /// (run, seed) → (step, total) of seeds being generated.
+    pub progress: HashMap<(Id, u64), (u32, u32)>,
+    /// When their steps were seen, for the live seconds per step.
+    pub sampling_times: HashMap<(Id, u64), crate::timing::Sampling>,
+    /// Review scope: `None` all projects (or `review_folder`), else one project.
+    pub review_scope: Option<Id>,
+    /// Review scope: every project under this folder (relative to `projects/`).
+    pub review_folder: Option<PathBuf>,
+    /// Review scope: one sweep of `review_scope`'s project (by name).
+    pub review_sweep: Option<String>,
+    /// Review scope: one run of `review_scope`'s project (not a sweep's).
+    pub review_run: Option<Id>,
+    /// Review's scope panel lists every project's runs, not only the
+    /// selected project's.
+    pub review_all_runs: bool,
+    /// Review's scope panel: the tree's search text (project and folder names).
+    pub review_search: String,
+    /// The contact sheet's selected cell (row, column).
+    pub sheet_cell: (usize, usize),
+    /// The contact sheet's name filter: rows whose style (or run label)
+    /// has every word of it.
+    pub sheet_filter: String,
+    pub review_cursor: usize,
+    pub review_view: ReviewView,
+    /// A/B compare: the pinned image (A).
+    pub review_pinned: Option<ImageRef>,
+    pub output_tab: OutputTab,
+    pub output_source: OutputSource,
+    /// Set by Show outputs: the Grid warns that filters hide images, or that
+    /// there are none, until the source changes or it is dismissed.
+    pub output_notice: bool,
+    pub confirm: Option<Confirm>,
+    /// The server status window (the top bar's **Servers…**).
+    pub server_status: bool,
+    /// "No server is connected" showing, after Queue.
+    pub no_server_warning: bool,
+    /// That warning was shown this session (it shows once per start).
+    pub no_server_warned: bool,
+    /// Queueing a sweep while the jobs go one at a time: asking whether to
+    /// spread them evenly (holds the sweep's "big one confirmed").
+    pub sweep_order_ask: Option<bool>,
+    /// Answered: the queueing it held goes on without asking again.
+    pub sweep_order_asked: bool,
+    /// Projects → Folder.
+    /// The folder view of the tab showing; the other three wait in
+    /// `parked_folder_views`, so each keeps its own location and history.
+    pub folder_view: FolderView,
+    pub parked_folder_views: Vec<FolderView>,
+    pub fv_clipboard: Option<FvClipboard>,
+    pub lib_tab: LibTab,
+    pub lib_filter: LibFilter,
+    pub output_filter: OutputFilter,
+    /// The Output library's search box searches project names (narrowing
+    /// the "by project" tree) instead of the images' titles and prompts.
+    pub output_search_projects: bool,
+    /// That project-name search.
+    pub output_project_search: String,
+    /// Set by Show outputs: the sources panel opens the way to the source
+    /// in "by project" and scrolls to it, once (then `OutputRevealed`).
+    pub output_reveal: bool,
+    /// Bumped by each Show outputs: the "by project" tree's open folders
+    /// start over (only the way to the source open).
+    pub output_reveals: u32,
+    /// The Grid's preset tab last clicked (the filters may differ since).
+    pub output_preset: OutputPreset,
+    /// The top-left back / forward.
+    pub nav: NavHistory,
+    /// Projects tab: the tree's search text.
+    pub project_search: String,
+    /// The command line's servers choice, until the library opens.
+    pub startup_servers: Option<StartupServers>,
+    /// Output library image whose lineage and recipe are shown.
+    pub output_selected: Option<ImageRef>,
+    pub export: Option<ExportDialog>,
+    /// Images picked in Review or the Output library's Grid, in the order
+    /// picked: rated together, or tiled (DESIGN.md, Tiling).
+    pub picked: Vec<ImageRef>,
+    pub tile: Option<TileDialog>,
+    /// A composed image for the GUI to put on the clipboard.
+    pub clipboard_image: Option<crate::tile::TileImage>,
+    pub history_view: Option<HistoryView>,
+    pub history_last: HashMap<HistoryKey, LastEntry>,
+    pub idea_edit: Option<IdeaEdit>,
+    /// When the Edit idea text was last changed, while not yet recorded.
+    pub idea_edit_dirty: Option<f64>,
+    /// The resolution editor's working copy.
+    pub res_editor: Option<Vec<Resolution>>,
+    pub scale: Option<ScaleDialog>,
+    /// An image shown large over everything (double-click a reference or
+    /// the start image in Generate).
+    pub preview: Option<ImageRef>,
+    /// The title dialog of an output image, while open.
+    pub title_edit: Option<TitleEdit>,
+    /// Generate's From library… picker, while open.
+    pub ref_picker: Option<RefPicker>,
+    /// Where the picker was last (it opens there again).
+    pub ref_picker_source: Option<RefSource>,
+    /// The job details window (a run in Jobs or the jobs popover clicked).
+    pub job_info: Option<Id>,
+    /// The Settings window.
+    pub settings_open: bool,
+    pub alerts: Alerts,
+    /// How the library is watched for outside changes (Import tab).
+    pub watch_status: String,
+    /// Naming the project New project / Duplicate with an image makes.
+    pub new_project: Option<NewProjectDialog>,
+    /// Naming a project's plain Duplicate.
+    pub duplicate: Option<DuplicateDialog>,
+    /// Naming the project for Promote.
+    pub promote: Option<PromoteDialog>,
+    /// Where the last promote put its project (this session), the next
+    /// one's first guess.
+    pub promote_last: Option<PathBuf>,
+    /// The prompt presets (shared by every library).
+    pub prompt_presets: PromptPresets,
+    /// The `prompt-presets` folder they are saved in (`None`: not saved,
+    /// e.g. in tests).
+    pub presets_path: Option<PathBuf>,
+    pub presets_panel: Option<PresetsPanel>,
+    pub presets_editor: Option<PresetsEditor>,
+    pub save_preset: Option<SavePresetDialog>,
+    /// The Generate prompt's characters to select, once (a preset's first
+    /// `{slot}`, or where an inserted preset ends).
+    pub prompt_select: Option<std::ops::Range<usize>>,
+    /// The library screen shown to switch libraries (it has a Cancel).
+    pub switching: Option<LibrarySwitch>,
+    /// The prompt's `<imageN>` tags to renumber, waiting for confirmation.
+    pub retag: Option<Retag>,
+    /// Recipes of output images, loaded on demand.
+    pub recipes: HashMap<Id, Option<Recipe>>,
+    /// Input images' stored metadata, loaded on demand (`None`: loading).
+    pub input_meta: HashMap<Id, Option<InputMeta>>,
+    /// How often each image was used as a ref or start image (from the
+    /// index's runs; see [`AppState::rebuild_usage`]).
+    pub usage: HashMap<ImageRef, Usage>,
+    /// Import tab: input images with what their original was, newest first.
+    pub imports: Option<Vec<(Id, SourceInfo)>>,
+    /// Review: checkerboard behind transparent images (else a flat colour).
+    pub checkerboard: bool,
+    /// (link path now, verdict before) of review actions, for `Ctrl+Z`.
+    pub review_undo: Vec<(PathBuf, Option<Verdict>)>,
+    pub renaming: Option<Renaming>,
+    /// Library operations in flight.
+    pub busy: usize,
+    /// The usage check after opening, while it runs: images done, of how many.
+    pub usage_check: Option<(usize, usize)>,
+    /// Seconds, from `Msg::Tick` (the GUI's clock).
+    pub now: f64,
+    /// When the Generate form was last edited, while not yet autosaved.
+    pub generate_dirty: Option<f64>,
+    /// When the New idea draft was last edited, while not yet autosaved.
+    pub idea_dirty: Option<f64>,
+    /// When a draft was last saved (for the "draft saved" note).
+    pub draft_saved: Option<f64>,
+    /// Draft saves sent and not yet confirmed.
+    pub saving: usize,
+    pub messages: Vec<Message>,
+}
+
+impl AppState {
+    /// Fresh state: asks for a library (a recent one, or another folder).
+    pub fn new(config: Config, config_path: Option<PathBuf>) -> AppState {
+        AppState {
+            generate: GenerateForm::new(&config),
+            config,
+            config_path,
+            phase: Phase::Library(LibraryDialog::default()),
+            library: None,
+            index: Index::default(),
+            tab: Tab::IdeaInbox,
+            inbox_tab: InboxTab::NewIdea,
+            projects_tab: ProjectsTab::Grid,
+            draft: IdeaDraft::default(),
+            inbox_cursor: 0,
+            inbox_filter: InboxFilter::default(),
+            info_hidden: BTreeSet::new(),
+            lib_folder: None,
+            lib_selected: BTreeSet::new(),
+            lib_info: None,
+            project: None,
+            proj_folder: None,
+            proj_scope_kept: None,
+            servers: vec![],
+            engine_running: false,
+            open_attempt: 0,
+            background: None,
+            start_log: vec![],
+            stopping: vec![],
+            active_runs: BTreeSet::new(),
+            finishing: BTreeSet::new(),
+            progress: HashMap::new(),
+            sampling_times: HashMap::new(),
+            review_scope: None,
+            review_folder: None,
+            review_sweep: None,
+            review_run: None,
+            review_all_runs: false,
+            review_search: String::new(),
+            sheet_cell: (0, 0),
+            sheet_filter: String::new(),
+            review_cursor: 0,
+            review_view: ReviewView::Single,
+            review_pinned: None,
+            output_tab: OutputTab::Grid,
+            output_source: OutputSource::AllProjects,
+            output_notice: false,
+            confirm: None,
+            server_status: false,
+            no_server_warning: false,
+            no_server_warned: false,
+            folder_view: FolderView::new(FvPlace::Projects),
+            parked_folder_views: FvPlace::ALL[1..].iter().map(|p| FolderView::new(*p)).collect(),
+            fv_clipboard: None,
+            lib_tab: LibTab::Grid,
+            lib_filter: LibFilter::default(),
+            output_filter: OutputFilter::default(),
+            output_search_projects: false,
+            output_project_search: String::new(),
+            output_reveal: false,
+            output_reveals: 0,
+            output_preset: OutputPreset::Kept,
+            nav: NavHistory::default(),
+            project_search: String::new(),
+            startup_servers: None,
+            output_selected: None,
+            export: None,
+            picked: vec![],
+            tile: None,
+            clipboard_image: None,
+            history_view: None,
+            history_last: HashMap::new(),
+            idea_edit: None,
+            idea_edit_dirty: None,
+            res_editor: None,
+            scale: None,
+            preview: None,
+            ref_picker: None,
+            ref_picker_source: None,
+            title_edit: None,
+            promote: None,
+            promote_last: None,
+            job_info: None,
+            settings_open: false,
+            alerts: Alerts { focused: true, ..Default::default() },
+            retag: None,
+            new_project: None,
+            sweep_order_ask: None,
+            sweep_order_asked: false,
+            duplicate: None,
+            prompt_presets: increart_core::prompts::builtin(),
+            presets_path: None,
+            presets_panel: None,
+            presets_editor: None,
+            save_preset: None,
+            prompt_select: None,
+            switching: None,
+            watch_status: String::new(),
+            recipes: HashMap::new(),
+            input_meta: HashMap::new(),
+            usage: HashMap::new(),
+            imports: None,
+            checkerboard: true,
+            review_undo: vec![],
+            renaming: None,
+            busy: 0,
+            usage_check: None,
+            now: 0.0,
+            generate_dirty: None,
+            idea_dirty: None,
+            draft_saved: None,
+            saving: 0,
+            messages: vec![],
+        }
+    }
+
+    // ---------------------------------------------------------- idea lists
+
+    /// The Idea inbox, newest first.
+    pub fn unreviewed_ideas(&self) -> Vec<&IdeaEntry> {
+        let mut v: Vec<_> = self.index.ideas.iter().filter(|e| e.loc == IdeaLoc::Unreviewed).collect();
+        v.sort_by(|a, b| b.idea.id.cmp(&a.idea.id));
+        v
+    }
+
+    /// The Idea inbox as the Grid shows it: searched, filtered and sorted.
+    pub fn inbox_queue(&self) -> Vec<&IdeaEntry> {
+        let f = &self.inbox_filter;
+        let now = increart_core::id::now();
+        let mut v = self.unreviewed_ideas();
+        v.retain(|e| f.matches(&e.idea, now));
+        if f.oldest_first {
+            v.reverse();
+        }
+        v
+    }
+
+    /// Discarded ideas, newest first.
+    pub fn discarded_ideas(&self) -> Vec<&IdeaEntry> {
+        let mut v: Vec<_> = self.index.ideas.iter().filter(|e| e.loc == IdeaLoc::Discarded).collect();
+        v.sort_by(|a, b| b.idea.id.cmp(&a.idea.id));
+        v
+    }
+
+    /// Kept ideas in the selected folder and its subfolders, newest first.
+    pub fn library_ideas(&self) -> Vec<&IdeaEntry> {
+        let mut v: Vec<_> = self
+            .index
+            .ideas
+            .iter()
+            .filter(|e| match (&e.loc, &self.lib_folder) {
+                (IdeaLoc::Library(_), None) => true,
+                (IdeaLoc::Library(f), Some(sel)) => f.starts_with(sel),
+                _ => false,
+            })
+            .collect();
+        let f = &self.lib_filter;
+        let q = f.text.to_lowercase();
+        v.retain(|e| {
+            let i = &e.idea;
+            (q.is_empty()
+                || i.title.to_lowercase().contains(&q)
+                || i.text.to_lowercase().contains(&q)
+                || i.tags.iter().any(|t| t.to_lowercase().contains(&q)))
+                && (!f.starred_only || i.starred)
+                && (!f.with_images_only || !i.images.is_empty())
+                && f.promoted.is_none_or(|p| p == !i.projects.is_empty())
+        });
+        v.sort_by(|a, b| b.idea.id.cmp(&a.idea.id));
+        if f.most_used {
+            v.sort_by_key(|e| std::cmp::Reverse(self.idea_usage(e).runs()));
+        }
+        v
+    }
+
+    /// Counts every image's uses from the runs in the index.
+    pub fn rebuild_usage(&mut self) {
+        let mut made: HashMap<&Id, usize> = HashMap::new();
+        for o in self.index.projects.iter().flat_map(|p| &p.outputs) {
+            *made.entry(&o.name.run).or_default() += 1;
+        }
+        let mut usage: HashMap<ImageRef, Usage> = HashMap::new();
+        // as the images' increart:usage counts: a run counts once it generates
+        for r in self.index.projects.iter().flat_map(|p| &p.runs).filter(|r| !r.revisions.is_empty()) {
+            let images = made.get(&r.id).copied().unwrap_or(0);
+            for i in r.refs.iter().collect::<std::collections::HashSet<_>>() {
+                usage.entry(i.clone()).or_default().add(Usage { ref_runs: 1, start_runs: 0, images });
+            }
+            if let increart_core::model::Mode::Edit { init: Some(i), .. } = &r.mode {
+                usage.entry(i.clone()).or_default().add(Usage { ref_runs: 0, start_runs: 1, images });
+            }
+        }
+        self.usage = usage;
+    }
+
+    pub fn usage(&self, image: &ImageRef) -> Usage {
+        self.usage.get(image).copied().unwrap_or_default()
+    }
+
+    /// An idea's images' uses, added up.
+    pub fn idea_usage(&self, e: &IdeaEntry) -> Usage {
+        let mut u = Usage::default();
+        for id in &e.idea.images {
+            u.add(self.usage(&ImageRef::input(id.clone())));
+        }
+        u
+    }
+
+    pub fn idea(&self, id: &Id) -> Option<&IdeaEntry> {
+        self.index.idea(id)
+    }
+
+    // ---------------------------------------------------------- projects
+
+    /// Whether `name` is taken next to the project at `path` (relative to
+    /// `projects/`), by a project or a folder, ignoring case.
+    pub fn project_name_taken(&self, path: &Path, name: &str) -> bool {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let projects = self.index.projects.iter().filter_map(|p| p.dir.strip_prefix("projects").ok());
+        projects.chain(self.index.project_folders.iter().map(PathBuf::as_path)).any(|p| {
+            p.parent() == Some(parent)
+                && p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase() == name.to_lowercase())
+        })
+    }
+
+    /// What keeps Start servers from starting: no sd-server binary, or a
+    /// missing one or models folder. A bare binary name is looked up on PATH
+    /// and not checked.
+    pub fn sdserver_problem(&self) -> Option<String> {
+        let c = &self.config.sdserver;
+        if c.binary.is_empty() {
+            return Some("No sd-server binary set".into());
+        }
+        if c.binary.contains('/') && !Path::new(&c.binary).is_file() {
+            return Some(format!("sd-server not found at {}", c.binary));
+        }
+        c.model_dirs.iter().find(|m| !Path::new(m).is_dir()).map(|m| format!("Models folder not found: {m}"))
+    }
+
+    pub fn place(&self) -> Place {
+        Place {
+            tab: self.tab,
+            inbox_tab: self.inbox_tab,
+            lib_tab: self.lib_tab,
+            lib_folder: self.lib_folder.clone(),
+            projects_tab: self.projects_tab,
+            project: self.project.clone(),
+            proj_folder: self.proj_folder.clone(),
+            review_scope: self.review_scope.clone(),
+            review_folder: self.review_folder.clone(),
+            output_tab: self.output_tab,
+            output_source: self.output_source.clone(),
+        }
+    }
+
+    /// Whether a folder view is on screen (it has its own back / forward).
+    pub fn folder_view_shown(&self) -> bool {
+        match self.tab {
+            Tab::IdeaInbox => self.inbox_tab == InboxTab::Folder,
+            Tab::InputLibrary => self.lib_tab == LibTab::Folder,
+            Tab::Projects => self.projects_tab == ProjectsTab::Folder,
+            Tab::Review => false,
+            Tab::OutputLibrary => self.output_tab == OutputTab::Folder,
+        }
+    }
+
+    pub fn project_entry(&self) -> Option<&ProjectEntry> {
+        self.index.project(self.project.as_ref()?)
+    }
+
+    /// The project folder the grid shows (relative to `projects/`): the
+    /// selected folder; else, with a project selected, the folder kept on
+    /// selecting it, or [`Self::project_home`].
+    pub fn project_scope(&self) -> PathBuf {
+        match (&self.proj_folder, self.project_entry()) {
+            (Some(f), _) => f.clone(),
+            (None, Some(p)) => self.proj_scope_kept.clone().unwrap_or_else(|| self.project_home(p)),
+            (None, None) => PathBuf::new(),
+        }
+    }
+
+    /// A project's folder when it holds more than this one project (here
+    /// and below), else the folder above it.
+    pub fn project_home(&self, p: &ProjectEntry) -> PathBuf {
+        let mut at = p.dir.parent().unwrap_or(Path::new("projects"));
+        if !self.has_siblings(p) {
+            at = at.parent().filter(|a| a.starts_with("projects")).unwrap_or(at);
+        }
+        at.strip_prefix("projects").map(Path::to_path_buf).unwrap_or_default()
+    }
+
+    /// Whether a project's folder (here and below) holds other projects.
+    pub fn has_siblings(&self, p: &ProjectEntry) -> bool {
+        let Some(dir) = p.dir.parent() else { return false };
+        self.index.projects.iter().any(|q| q.dir != p.dir && q.dir.starts_with(dir))
+    }
+
+    /// Projects in [`Self::project_scope`] and all its subfolders, in
+    /// [`Self::sort_projects`] order.
+    pub fn projects_in_scope(&self) -> Vec<&ProjectEntry> {
+        let scope = Path::new("projects").join(self.project_scope());
+        let mut v: Vec<_> = self.index.projects.iter().filter(|p| p.dir.starts_with(&scope)).collect();
+        self.sort_projects(&mut v);
+        v
+    }
+
+    /// Newest first, or by name (any case; newest first among equals).
+    pub fn sort_projects(&self, v: &mut [&ProjectEntry]) {
+        v.sort_by(|a, b| b.project.id.cmp(&a.project.id));
+        if self.config.projects_by_name {
+            v.sort_by_cached_key(|p| p.name().to_lowercase());
+        }
+    }
+
+    /// One past the highest seed any run of the selected project has used
+    /// (generated, pending, cancelled or failed): where the Generate panel's
+    /// first seed continues from.
+    pub fn next_seed(&self) -> u64 {
+        self.project_entry().map_or(0, |p| p.runs.iter().map(|r| r.next_seed()).max().unwrap_or(0))
+    }
+
+    /// Whether a project-tree folder is collapsed (in this library).
+    pub fn folder_collapsed(&self, f: &Path) -> bool {
+        let Some(lib) = &self.library else { return false };
+        self.config.collapsed_folders.get(&*lib.to_string_lossy()).is_some_and(|c| c.iter().any(|g| g == f))
+    }
+
+    // ---------------------------------------------------------- review
+
+    /// What the reference picker shows (its source, text and ratings),
+    /// each image once.
+    pub fn ref_candidates(&self) -> Vec<RefCandidate> {
+        let Some(p) = &self.ref_picker else { return vec![] };
+        let q = p.text.trim().to_lowercase();
+        let has = |s: &str| s.to_lowercase().contains(&q);
+        let mut seen = std::collections::HashSet::new();
+        let v: Vec<RefCandidate> = match &p.source {
+            RefSource::Inputs(folder) => {
+                let mut ideas: Vec<&IdeaEntry> = self
+                    .index
+                    .ideas
+                    .iter()
+                    .filter(|e| match (&e.loc, folder) {
+                        (IdeaLoc::Library(_), None) => true,
+                        (IdeaLoc::Library(f), Some(sel)) => f.starts_with(sel),
+                        _ => false,
+                    })
+                    .filter(|e| {
+                        let i = &e.idea;
+                        q.is_empty() || has(&i.title) || has(&i.text) || i.tags.iter().any(|t| has(t))
+                    })
+                    .collect();
+                ideas.sort_by(|a, b| b.idea.id.cmp(&a.idea.id));
+                ideas
+                    .into_iter()
+                    .flat_map(|e| {
+                        e.idea.images.iter().map(|id| RefCandidate {
+                            image: ImageRef::input(id.clone()),
+                            title: if e.idea.title.is_empty() { "(untitled)".into() } else { e.idea.title.clone() },
+                            text: e.idea.text.clone(),
+                            verdict: None,
+                        })
+                    })
+                    .collect()
+            }
+            RefSource::Outputs(src) => self
+                .source_images_in(src, p.ratings)
+                .into_iter()
+                .filter_map(|o| {
+                    let (proj, run) = self.index.run(&o.name.run)?;
+                    let title = proj.project.titles.get(&o.image.id);
+                    (q.is_empty() || has(&run.prompt) || title.is_some_and(|t| has(t))).then(|| RefCandidate {
+                        image: o.image.clone(),
+                        title: match title {
+                            Some(t) => format!("{t}\n{} · {} · seed {}", proj.name(), run.label, o.name.seed),
+                            None => format!("{} · {} · seed {}", proj.name(), run.label, o.name.seed),
+                        },
+                        text: run.prompt.clone(),
+                        verdict: Some(o.verdict),
+                    })
+                })
+                .collect(),
+        };
+        v.into_iter().filter(|c| seen.insert(c.image.clone())).collect()
+    }
+
+    /// The images the large preview steps through with ← / →: Review's
+    /// queue (single and grid), the contact sheet's images (row by row) or
+    /// the Output library's grid; `None` elsewhere.
+    pub fn preview_list(&self) -> Option<Vec<&OutputLink>> {
+        match self.tab {
+            Tab::Review if matches!(self.review_view, ReviewView::Single | ReviewView::Grid) => {
+                Some(self.review_queue())
+            }
+            Tab::Review if self.review_view == ReviewView::Sheet => Some(
+                self.sheet()?
+                    .rows
+                    .into_iter()
+                    .flat_map(|r| r.cells)
+                    .filter_map(|c| match c {
+                        SheetCell::Image(o) => Some(o),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            Tab::OutputLibrary if self.output_tab == OutputTab::Grid => Some(self.output_source_images()),
+            _ => None,
+        }
+    }
+
+    /// Where the preview is in [`Self::preview_list`]: (index, count).
+    pub fn preview_position(&self) -> Option<(usize, usize)> {
+        let p = self.preview.as_ref()?;
+        let list = self.preview_list()?;
+        list.iter().position(|o| &o.image == p).map(|i| (i, list.len()))
+    }
+
+    /// Unreviewed outputs in the review scope, oldest first.
+    pub fn review_queue(&self) -> Vec<&OutputLink> {
+        let mut v: Vec<_> = self
+            .index
+            .projects
+            .iter()
+            .filter(|p| self.review_scope.as_ref().is_none_or(|s| &p.project.id == s))
+            .filter(|p| self.review_folder.as_ref().is_none_or(|f| p.dir.starts_with(Path::new("projects").join(f))))
+            .flat_map(|p| p.outputs.iter().map(move |o| (p, o)))
+            .filter(|(p, o)| self.review_sweep.as_ref().is_none_or(|s| in_sweep(p, &o.name.run, s)))
+            .filter(|(_, o)| self.review_run.as_ref().is_none_or(|r| &o.name.run == r))
+            .map(|(_, o)| o)
+            .filter(|o| o.verdict.is_none())
+            .collect();
+        v.sort_by(|a, b| a.image.id.cmp(&b.image.id));
+        v
+    }
+
+    /// What can be picked where we are, in order: Review's queue or contact
+    /// sheet (row by row), or the Output library's Grid.
+    pub fn pickable(&self) -> Vec<ImageRef> {
+        match self.tab {
+            Tab::Review if self.review_view == ReviewView::Sheet => self
+                .sheet()
+                .map(|sh| {
+                    sh.rows
+                        .iter()
+                        .flat_map(|r| &r.cells)
+                        .filter_map(|c| match c {
+                            SheetCell::Image(o) => Some(o.image.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Tab::Review => self.review_queue().iter().map(|o| o.image.clone()).collect(),
+            Tab::OutputLibrary if self.output_tab == OutputTab::Grid => {
+                self.output_source_images().iter().map(|o| o.image.clone()).collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The image the cursor is on (where picking with Ctrl or Shift starts).
+    pub fn current_image(&self) -> Option<ImageRef> {
+        match self.tab {
+            Tab::Review if self.review_view == ReviewView::Sheet => {
+                let sh = self.sheet()?;
+                match sh.rows.get(self.sheet_cell.0)?.cells.get(self.sheet_cell.1)? {
+                    SheetCell::Image(o) => Some(o.image.clone()),
+                    _ => None,
+                }
+            }
+            Tab::Review => self.review_queue().get(self.review_cursor).map(|o| o.image.clone()),
+            Tab::OutputLibrary => self.output_selected.clone(),
+            _ => None,
+        }
+    }
+
+    /// The (column, row) of each image on the contact sheet.
+    pub fn sheet_cells(&self) -> HashMap<ImageRef, (u32, u32)> {
+        let Some(sh) = self.sheet() else { return HashMap::new() };
+        let mut m = HashMap::new();
+        for (r, row) in sh.rows.iter().enumerate() {
+            for (c, cell) in row.cells.iter().enumerate() {
+                if let SheetCell::Image(o) = cell {
+                    m.insert(o.image.clone(), (c as u32, r as u32));
+                }
+            }
+        }
+        m
+    }
+
+    /// An output image's caption.
+    pub fn caption(&self, image: &ImageRef, fill: CaptionFill) -> String {
+        let Some(o) = self.output_link(image) else { return String::new() };
+        let run = self.index.run(&o.name.run).map(|(_, r)| r);
+        match fill {
+            CaptionFill::Clear => String::new(),
+            CaptionFill::Style => {
+                run.map(|r| r.sweep.as_ref().map_or(r.label.clone(), |s| s.row())).unwrap_or_default()
+            }
+            CaptionFill::Seed => format!("seed {}", o.name.seed),
+            CaptionFill::Title => self.image_title(image).unwrap_or_default().to_string(),
+            CaptionFill::Run => run.map(|r| r.label.clone()).unwrap_or_default(),
+            CaptionFill::Prompt => run.map(|r| r.prompt.clone()).unwrap_or_default(),
+            CaptionFill::Settings => run.map(settings_line).unwrap_or_default(),
+            CaptionFill::StyleSeed => {
+                format!("{} · seed {}", self.caption(image, CaptionFill::Style), o.name.seed)
+            }
+        }
+    }
+
+    /// A caption as shown: its `{placeholders}` (`CAPTION_FIELDS`) filled
+    /// for the `n`th tile's image; unknown ones stay as typed.
+    pub fn caption_text(&self, template: &str, image: Option<&ImageRef>, n: usize) -> String {
+        if !template.contains('{') {
+            return template.to_string();
+        }
+        let o = image.and_then(|i| self.output_link(i));
+        let found = o.and_then(|o| self.index.run(&o.name.run));
+        let fmt = crate::update::fmt_value;
+        let field = |key: &str| -> Option<String> {
+            let run = found.map(|(_, r)| r);
+            Some(match key {
+                "n" => n.to_string(),
+                "style" => image.map(|i| self.caption(i, CaptionFill::Style)).unwrap_or_default(),
+                "seed" => o.map(|o| o.name.seed.to_string()).unwrap_or_default(),
+                "settings" => run.map(settings_line).unwrap_or_default(),
+                "steps" => run.map(|r| r.sample.steps.to_string()).unwrap_or_default(),
+                "cfg" => run.map(|r| fmt(r.sample.cfg)).unwrap_or_default(),
+                "shift" => run.and_then(|r| r.sample.flow_shift).map(fmt).unwrap_or_default(),
+                "strength" => match run.map(|r| &r.mode) {
+                    Some(increart_core::model::Mode::Edit { strength, init: Some(_) }) => fmt(*strength),
+                    _ => String::new(),
+                },
+                "title" => image.and_then(|i| self.image_title(i)).unwrap_or_default().to_string(),
+                "run" => run.map(|r| r.label.clone()).unwrap_or_default(),
+                "prompt" => run.map(|r| r.prompt.clone()).unwrap_or_default(),
+                "project" => found.map(|(p, _)| p.name().to_string()).unwrap_or_default(),
+                _ => return None,
+            })
+        };
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            match after.find('}').and_then(|close| field(&after[..close]).map(|v| (close, v))) {
+                Some((close, v)) => {
+                    out.push_str(&v);
+                    rest = &after[close + 1..];
+                }
+                None => {
+                    out.push('{');
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// An output image's size, as its run asked for.
+    pub fn output_size(&self, image: &ImageRef) -> Option<(u32, u32)> {
+        let o = self.output_link(image)?;
+        self.index.run(&o.name.run).map(|(_, r)| (r.width, r.height))
+    }
+
+    /// A project's runs for Review's scope panel, newest first: a single run
+    /// on its own, a sweep once (at its newest run).
+    pub fn review_runs<'a>(&self, p: &'a ProjectEntry) -> Vec<ReviewRun<'a>> {
+        let mut v = vec![];
+        let mut runs: Vec<_> = p.runs.iter().collect();
+        runs.sort_by(|a, b| b.id.cmp(&a.id));
+        for r in runs {
+            match &r.sweep {
+                None => v.push(ReviewRun::Single(r)),
+                Some(s) if !v.contains(&ReviewRun::Sweep(&s.name)) => v.push(ReviewRun::Sweep(&s.name)),
+                Some(_) => {}
+            }
+        }
+        v
+    }
+
+    /// A project's runs with kept images, newest first, and how many.
+    pub fn kept_runs<'a>(&self, p: &'a ProjectEntry) -> Vec<(&'a increart_core::model::Run, usize)> {
+        let kept = self.kept_outputs();
+        let mut v: Vec<_> = p
+            .runs
+            .iter()
+            .map(|r| (r, kept.iter().filter(|o| o.name.run == r.id).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        v.sort_by(|a, b| b.0.id.cmp(&a.0.id));
+        v
+    }
+
+    /// A sweep's newest run.
+    pub fn sweep_newest<'a>(&self, p: &'a ProjectEntry, sweep: &str) -> Option<&'a increart_core::model::Run> {
+        p.runs.iter().filter(|r| r.sweep.as_ref().is_some_and(|s| s.name == sweep)).max_by(|a, b| a.id.cmp(&b.id))
+    }
+
+    /// Unreviewed images of a run.
+    pub fn run_unreviewed(&self, p: &ProjectEntry, run: &Id) -> usize {
+        p.outputs.iter().filter(|o| o.verdict.is_none() && &o.name.run == run).count()
+    }
+
+    /// Unreviewed images of a sweep.
+    pub fn sweep_unreviewed(&self, p: &ProjectEntry, sweep: &str) -> usize {
+        p.outputs.iter().filter(|o| o.verdict.is_none() && in_sweep(p, &o.name.run, sweep)).count()
+    }
+
+    /// The interface zoom in percent.
+    pub fn ui_zoom(&self) -> u32 {
+        match self.config.ui_zoom {
+            0 => 100,
+            n => n.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX),
+        }
+    }
+
+    /// The contact sheet's cell size in points.
+    pub fn sheet_cell_size(&self) -> u32 {
+        match self.config.sheet_cell {
+            0 => SHEET_CELL_DEFAULT,
+            n => n.clamp(SHEET_CELL_MIN, SHEET_CELL_MAX),
+        }
+    }
+
+    /// The Review scope's sweep as a contact sheet.
+    pub fn sheet(&self) -> Option<Sheet<'_>> {
+        let name = self.review_sweep.as_ref()?;
+        let p = self.index.project(self.review_scope.as_ref()?)?;
+        let mut runs: Vec<_> = p.runs.iter().filter(|r| r.sweep.as_ref().is_some_and(|s| &s.name == name)).collect();
+        runs.sort_by(|a, b| a.id.cmp(&b.id));
+        // the seeds are the whole sweep's, so columns stay put while filtering
+        let mut seeds: Vec<u64> = runs.iter().flat_map(|r| r.all_seeds().map(|(_, s)| s)).collect();
+        seeds.sort();
+        seeds.dedup();
+        let words: Vec<String> = self.sheet_filter.to_lowercase().split_whitespace().map(String::from).collect();
+        let total = runs.len();
+        runs.retain(|r| {
+            let name = format!("{} {}", r.sweep.as_ref().map_or(String::new(), |s| s.row()), r.label).to_lowercase();
+            words.iter().all(|w| name.contains(w))
+        });
+        let hidden = total - runs.len();
+        let rows = runs
+            .into_iter()
+            .map(|run| {
+                let cells = seeds
+                    .iter()
+                    .map(|seed| {
+                        let newest = p
+                            .outputs
+                            .iter()
+                            .filter(|o| o.name.run == run.id && o.name.seed == *seed)
+                            .max_by_key(|o| o.name.rev);
+                        let asked = run.all_seeds().any(|(_, s)| s == *seed);
+                        let dropped = run.failed.iter().any(|f| f.seed == *seed)
+                            || run.cancelled.iter().any(|c| (c.first..c.first + c.count).contains(seed));
+                        match newest {
+                            Some(o) => SheetCell::Image(o),
+                            None if asked && !dropped => SheetCell::Pending,
+                            None => SheetCell::Empty,
+                        }
+                    })
+                    .collect();
+                SheetRow { run, cells }
+            })
+            .collect();
+        Some(Sheet { seeds, rows, hidden })
+    }
+
+    pub fn unreviewed_outputs(&self) -> usize {
+        self.index.projects.iter().flat_map(|p| &p.outputs).filter(|o| o.verdict.is_none()).count()
+    }
+
+    /// The project holding an output link.
+    pub fn project_of_link(&self, link: &OutputLink) -> Option<&ProjectEntry> {
+        self.index.projects.iter().find(|p| link.path.starts_with(&p.dir))
+    }
+
+    /// An output image's title (project.rsn `titles`), if it has one.
+    pub fn image_title(&self, image: &ImageRef) -> Option<&str> {
+        let p = self.project_of_link(self.output_link(image)?)?;
+        p.project.titles.get(&image.id).map(String::as_str)
+    }
+
+    /// The link of a store image (the first project link to it), any verdict.
+    pub fn output_link(&self, image: &ImageRef) -> Option<&OutputLink> {
+        self.index.projects.iter().flat_map(|p| &p.outputs).find(|o| &o.image == image)
+    }
+
+    /// The Output library Grid's images for the chosen source, newest first.
+    pub fn output_source_images(&self) -> Vec<&OutputLink> {
+        let f = &self.output_filter;
+        let mut v = self.source_images_in(&self.output_source, f.ratings);
+        let q = f.text.to_lowercase();
+        v.retain(|o| {
+            let run = self.index.run(&o.name.run).map(|(_, r)| r);
+            let title = || self.image_title(&o.image).is_some_and(|t| t.to_lowercase().contains(&q));
+            (q.is_empty() || run.is_some_and(|r| r.prompt.to_lowercase().contains(&q)) || title())
+                && (!f.has_refs || run.is_some_and(|r| !r.refs.is_empty()))
+                && (!f.transparent || self.index.transparent(&o.image))
+        });
+        v
+    }
+
+    /// Unreviewed images of a project source (0 for the other sources).
+    pub fn source_unreviewed(&self, source: &OutputSource) -> usize {
+        let dir = match source {
+            OutputSource::Project(id) => match self.index.project(id) {
+                Some(p) => p.dir.clone(),
+                None => return 0,
+            },
+            OutputSource::ProjectFolder(f) => Path::new("projects").join(f),
+            _ => return 0,
+        };
+        self.index.projects.iter().filter(|p| p.dir.starts_with(&dir)).map(|p| counts(p)[3]).sum()
+    }
+
+    /// A source's kept images (no filters), newest first.
+    pub fn source_images(&self, source: &OutputSource) -> Vec<&OutputLink> {
+        self.source_images_in(source, Ratings::KEPT)
+    }
+
+    /// Whether the filters differ from the preset tab last clicked.
+    pub fn output_preset_modified(&self) -> bool {
+        self.output_filter != self.output_preset.filter()
+    }
+
+    /// A source's images with these ratings (no other filters), newest first.
+    pub fn source_images_in(&self, source: &OutputSource, ratings: Ratings) -> Vec<&OutputLink> {
+        let kept: Vec<&OutputLink> = self.all_outputs().into_iter().filter(|o| ratings.allows(o.verdict)).collect();
+        let v: Vec<&OutputLink> = match source {
+            OutputSource::AllProjects => kept,
+            OutputSource::Project(id) => {
+                let dir = self.index.project(id).map(|p| p.dir.clone());
+                kept.into_iter().filter(|o| dir.as_ref().is_some_and(|d| o.path.starts_with(d))).collect()
+            }
+            OutputSource::ProjectFolder(f) => {
+                let dir = Path::new("projects").join(f);
+                kept.into_iter().filter(|o| o.path.starts_with(&dir)).collect()
+            }
+            OutputSource::Smart(Smart::Day(day)) => {
+                kept.into_iter().filter(|o| o.image.id.as_str().starts_with(day.as_str())).collect()
+            }
+            OutputSource::Smart(Smart::Idea(idea)) => kept
+                .into_iter()
+                .filter(|o| self.index.run(&o.name.run).is_some_and(|(_, r)| r.source_idea.as_ref() == Some(idea)))
+                .collect(),
+            OutputSource::Smart(Smart::Transparent) => {
+                kept.into_iter().filter(|o| self.index.transparent(&o.image)).collect()
+            }
+            OutputSource::Run(id) => kept.into_iter().filter(|o| &o.name.run == id).collect(),
+            OutputSource::Collection(folder) => {
+                let mut seen = std::collections::HashSet::new();
+                let images: Vec<ImageRef> = self
+                    .index
+                    .collection_links
+                    .iter()
+                    .filter(|l| l.folder.starts_with(folder))
+                    .map(|l| l.image.clone())
+                    .filter(|i| seen.insert(i.clone()))
+                    .collect();
+                // Any rating: a collection holds what you put in it.
+                images.iter().filter_map(|i| self.output_link(i)).collect()
+            }
+        };
+        v
+    }
+
+    /// A smart idea folder's name: "title · id".
+    fn smart_idea_name(&self, id: &Id) -> String {
+        let title = self.idea(id).map(|e| e.idea.title.clone()).filter(|t| !t.is_empty());
+        title.map_or_else(|| id.to_string(), |t| format!("{t} · {id}"))
+    }
+
+    /// A folder of the project tree (relative to `projects/`, empty = the
+    /// top): its subfolders, then its projects, that have kept images.
+    pub fn kept_project_children(&self, folder: &Path) -> (Vec<&PathBuf>, Vec<&ProjectEntry>) {
+        let kept = self.kept_outputs();
+        let has_kept = |d: &Path| kept.iter().any(|o| o.path.starts_with(d));
+        let mut folders: Vec<&PathBuf> = self
+            .index
+            .project_folders
+            .iter()
+            .filter(|f| f.parent() == Some(folder) && has_kept(&Path::new("projects").join(f)))
+            .collect();
+        folders.sort_by_key(|f| f.to_string_lossy().to_lowercase());
+        let dir = Path::new("projects").join(folder);
+        let mut projects: Vec<&ProjectEntry> =
+            self.index.projects.iter().filter(|p| p.dir.parent() == Some(dir.as_path()) && has_kept(&p.dir)).collect();
+        projects.sort_by_key(|p| p.name().to_lowercase());
+        (folders, projects)
+    }
+
+    /// Whether the "by project" tree shows `source` with the project-name
+    /// search typed: a project shows when its name or a folder above it
+    /// has the text, a folder also when something inside it has.
+    pub fn project_search_shows(&self, source: &OutputSource) -> bool {
+        let q = self.output_project_search.trim().to_lowercase();
+        if !self.output_search_projects || q.is_empty() {
+            return true;
+        }
+        let has = |p: &Path| p.iter().any(|c| c.to_string_lossy().to_lowercase().contains(&q));
+        let rel = |e: &ProjectEntry| e.dir.strip_prefix("projects").map(Path::to_path_buf).unwrap_or_default();
+        match source {
+            OutputSource::Project(id) => {
+                self.index.projects.iter().find(|p| &p.project.id == id).is_none_or(|p| has(&rel(p)))
+            }
+            OutputSource::Run(id) => self.index.run(id).is_none_or(|(p, _)| has(&rel(p))),
+            OutputSource::ProjectFolder(f) => {
+                has(f)
+                    || self.index.project_folders.iter().any(|d| d.starts_with(f) && has(d))
+                    || self.index.projects.iter().any(|p| {
+                        let r = rel(p);
+                        r.starts_with(f) && has(&r)
+                    })
+            }
+            _ => true,
+        }
+    }
+
+    /// The project at a path relative to `projects/`.
+    fn project_at(&self, rel: &Path) -> Option<&ProjectEntry> {
+        let dir = Path::new("projects").join(rel);
+        self.index.projects.iter().find(|p| p.dir == dir)
+    }
+
+    /// The subfolders of a folder of the virtual `smart/` tree (`rel` is
+    /// the path under it), if it has subfolders rather than images.
+    pub fn smart_children(&self, rel: &Path) -> Option<Vec<String>> {
+        let parts: Vec<String> = rel.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+        Some(match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            [] => ["by date", "by source idea", "by project", "transparent"].map(String::from).to_vec(),
+            ["by date"] => self.kept_days().into_iter().map(|(d, _)| d).collect(),
+            ["by source idea"] => self.kept_source_ideas().iter().map(|(id, _)| self.smart_idea_name(id)).collect(),
+            // the project tree, folders and all
+            ["by project", rest @ ..] => {
+                let rel: PathBuf = rest.iter().collect();
+                if self.project_at(&rel).is_some() {
+                    return None;
+                }
+                let (folders, projects) = self.kept_project_children(&rel);
+                let name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                folders.into_iter().map(|f| name(f)).chain(projects.into_iter().map(|p| p.name())).collect()
+            }
+            _ => return None,
+        })
+    }
+
+    /// The source a folder of the virtual `smart/` tree shows, if it is one
+    /// that holds images.
+    pub fn smart_source(&self, rel: &Path) -> Option<OutputSource> {
+        let parts: Vec<String> = rel.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+        Some(match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["by date", day] => OutputSource::Smart(Smart::Day(day.to_string())),
+            ["by source idea", name] => {
+                let id = self
+                    .kept_source_ideas()
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .find(|id| self.smart_idea_name(id) == *name)?;
+                OutputSource::Smart(Smart::Idea(id))
+            }
+            ["by project", rest @ ..] if !rest.is_empty() => {
+                let rel: PathBuf = rest.iter().collect();
+                match self.project_at(&rel) {
+                    Some(p) => OutputSource::Project(p.project.id.clone()),
+                    None if self.index.project_folders.contains(&rel) => OutputSource::ProjectFolder(rel),
+                    None => return None,
+                }
+            }
+            ["transparent"] => OutputSource::Smart(Smart::Transparent),
+            _ => return None,
+        })
+    }
+
+    /// A folder of the virtual `smart/` tree as folder-view entries.
+    pub fn smart_listing(&self, rel: &Path) -> Vec<FvEntry> {
+        if let Some(children) = self.smart_children(rel) {
+            return children
+                .into_iter()
+                .map(|name| {
+                    let n = self.smart_images(&rel.join(&name)).len();
+                    FvEntry {
+                        info: format!("{n} image(s)"),
+                        name,
+                        kind: EntryKind::Smart,
+                        size: n as u64,
+                        modified: None,
+                    }
+                })
+                .collect();
+        }
+        self.smart_images(rel)
+            .into_iter()
+            .map(|o| FvEntry {
+                name: o.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                kind: EntryKind::Image(o.image.clone()),
+                size: 0,
+                modified: None,
+                info: match o.verdict {
+                    Some(Verdict::Good) => "good",
+                    Some(Verdict::Neutral) => "neutral",
+                    Some(Verdict::Bad) => "bad",
+                    None => "unreviewed",
+                }
+                .to_string(),
+            })
+            .collect()
+    }
+
+    /// Every image in a folder of the `smart/` tree and its subfolders.
+    pub fn smart_images(&self, rel: &Path) -> Vec<&OutputLink> {
+        if let Some(src) = self.smart_source(rel) {
+            return self.source_images(&src);
+        }
+        match self.smart_children(rel) {
+            Some(_) if rel.as_os_str().is_empty() || rel == Path::new("by date") || rel == Path::new("by project") => {
+                self.kept_outputs()
+            }
+            Some(children) => {
+                let mut seen = std::collections::HashSet::new();
+                let mut v: Vec<&OutputLink> = children
+                    .iter()
+                    .flat_map(|c| self.smart_images(&rel.join(c)))
+                    .filter(|o| seen.insert(o.path.clone()))
+                    .collect();
+                v.sort_by(|a, b| b.image.id.cmp(&a.image.id));
+                v
+            }
+            None => vec![],
+        }
+    }
+
+    /// The image a folder-view path (relative to the library root) shows:
+    /// a project's link, a collection's link or a smart folder's image.
+    pub fn image_at(&self, path: &Path) -> Option<ImageRef> {
+        if is_smart(path) {
+            let rel = path.parent()?.strip_prefix(SMART_DIR).ok()?;
+            let name = path.file_name()?;
+            return self
+                .smart_images(rel)
+                .into_iter()
+                .find(|o| o.path.file_name() == Some(name))
+                .map(|o| o.image.clone());
+        }
+        let in_collections = self.index.collection_links.iter().find(|l| l.path == path).map(|l| l.image.clone());
+        in_collections.or_else(|| {
+            self.index.projects.iter().flat_map(|p| &p.outputs).find(|o| o.path == path).map(|o| o.image.clone())
+        })
+    }
+
+    /// Days with kept images (`YYYY.MM.DD`), newest first.
+    pub fn kept_days(&self) -> Vec<(String, usize)> {
+        let mut days: std::collections::BTreeMap<String, usize> = Default::default();
+        for o in self.kept_outputs() {
+            *days.entry(o.image.id.as_str()[..10].to_string()).or_default() += 1;
+        }
+        days.into_iter().rev().collect()
+    }
+
+    /// Source ideas of kept images, with counts.
+    pub fn kept_source_ideas(&self) -> Vec<(Id, usize)> {
+        let mut ideas: std::collections::BTreeMap<Id, usize> = Default::default();
+        for o in self.kept_outputs() {
+            if let Some(id) = self.index.run(&o.name.run).and_then(|(_, r)| r.source_idea.clone()) {
+                *ideas.entry(id).or_default() += 1;
+            }
+        }
+        ideas.into_iter().collect()
+    }
+
+    /// Lineage of an output: the image it was edited from (its recipe's
+    /// parent) and the outputs edited from it.
+    pub fn lineage(&self, image: &ImageRef) -> (Option<ImageRef>, Vec<ImageRef>) {
+        let parent = self.recipes.get(&image.id).cloned().flatten().and_then(|r| r.parent);
+        let children = self
+            .index
+            .projects
+            .iter()
+            .flat_map(|p| &p.outputs)
+            .filter(|o| {
+                self.index.run(&o.name.run).is_some_and(|(_, r)| {
+                    matches!(&r.mode, increart_core::model::Mode::Edit { init: Some(i), .. } if i == image)
+                        || r.refs.contains(image)
+                })
+            })
+            .map(|o| o.image.clone())
+            .collect();
+        (parent, children)
+    }
+
+    /// What deleting a tree node removes, for the confirmation:
+    /// "2 folders, 3 projects, 41 images; 12 pending seeds will be cancelled".
+    pub fn delete_summary(&self, tree: increart_core::Tree, path: &Path) -> String {
+        use increart_core::Tree;
+        match tree {
+            Tree::Projects => {
+                let base = Path::new("projects").join(path);
+                let ps: Vec<_> = self.index.projects.iter().filter(|p| p.dir.starts_with(&base)).collect();
+                let folders =
+                    self.index.project_folders.iter().filter(|f| f.starts_with(path) && f.as_path() != path).count();
+                let images: usize = ps.iter().map(|p| p.outputs.len()).sum();
+                let pending: u64 = ps
+                    .iter()
+                    .flat_map(|p| &p.runs)
+                    .map(|r| r.live_seeds().count() as u64)
+                    .sum::<u64>()
+                    .saturating_sub(images as u64);
+                let mut s = format!("{folders} folder(s), {} project(s), {images} image link(s)", ps.len());
+                if pending > 0 {
+                    s.push_str(&format!("; {pending} pending seed(s) will not be generated"));
+                }
+                s
+            }
+            Tree::InputLibrary => {
+                let n = self
+                    .index
+                    .ideas
+                    .iter()
+                    .filter(|e| matches!(&e.loc, IdeaLoc::Library(f) if f.starts_with(path)))
+                    .count();
+                format!("{n} idea(s) inside will be discarded (restorable)")
+            }
+            Tree::Collections => {
+                let n = self.index.collection_links.iter().filter(|l| l.folder.starts_with(path)).count();
+                format!("{n} link(s); the images stay")
+            }
+        }
+    }
+
+    /// Every output image, any rating or none, newest first.
+    pub fn all_outputs(&self) -> Vec<&OutputLink> {
+        let mut v: Vec<_> = self.index.projects.iter().flat_map(|p| &p.outputs).collect();
+        v.sort_by(|a, b| b.image.id.cmp(&a.image.id));
+        v
+    }
+
+    /// Kept (good + neutral) images, newest first.
+    pub fn kept_outputs(&self) -> Vec<&OutputLink> {
+        let mut v: Vec<_> = self
+            .index
+            .projects
+            .iter()
+            .flat_map(|p| &p.outputs)
+            .filter(|o| matches!(o.verdict, Some(Verdict::Good | Verdict::Neutral)))
+            .collect();
+        v.sort_by(|a, b| b.image.id.cmp(&a.image.id));
+        v
+    }
+
+    pub fn messages_error(&mut self, text: impl Into<String>) {
+        self.messages.push(Message { text: text.into(), error: true });
+    }
+
+    pub fn messages_info(&mut self, text: impl Into<String>) {
+        self.messages.push(Message { text: text.into(), error: false });
+    }
+}
+
+/// Progress of one run that has seeds in the engine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunProgress {
+    pub run: Id,
+    pub project: String,
+    pub label: String,
+    pub prompt: String,
+    /// Seeds with an image.
+    pub done: u64,
+    /// Seeds to generate in all (cancelled and failed ones excluded).
+    pub total: u64,
+    /// (seed, step, steps) of seeds being sampled now.
+    pub sampling: Vec<(u64, u32, u32)>,
+    /// Its images so far (DESIGN.md, Timing).
+    pub timing: Option<crate::timing::Timing>,
+    /// Seconds per step of the seeds being sampled now (mean).
+    pub step_s: Option<f64>,
+    /// Steps per image.
+    pub steps: u32,
+}
+
+impl RunProgress {
+    /// 0..1, counting partly sampled seeds by their steps.
+    pub fn fraction(&self) -> f32 {
+        let partial: f32 = self.sampling.iter().map(|(_, s, n)| *s as f32 / (*n).max(1) as f32).sum();
+        ((self.done as f32 + partial) / self.total.max(1) as f32).min(1.0)
+    }
+
+    /// Seconds per image: its images' mean so far, else from the live
+    /// seconds per step.
+    pub fn image_s(&self) -> Option<f64> {
+        self.timing.as_ref().map(|t| t.per_image).or_else(|| self.step_s.map(|s| s * self.steps as f64))
+    }
+
+    /// Time left, roughly: the images still to make (partly sampled ones by
+    /// their steps) at [`Self::image_s`], as many at once as are sampling now.
+    pub fn eta_s(&self) -> Option<f64> {
+        let partial: f64 = self.sampling.iter().map(|(_, s, n)| *s as f64 / (*n).max(1) as f64).sum();
+        let left = (self.total.saturating_sub(self.done) as f64 - partial).max(0.0);
+        Some(left * self.image_s()? / self.sampling.len().max(1) as f64)
+    }
+}
+
+/// All runs in the engine together, for the status bar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobSummary {
+    pub runs: usize,
+    pub done: u64,
+    pub total: u64,
+    pub fraction: f32,
+}
+
+impl AppState {
+    pub fn run_progress(&self, run: &Id) -> Option<RunProgress> {
+        let (p, r) = self.index.run(run)?;
+        let live: BTreeSet<u64> = r.live_seeds().map(|(_, s)| s).collect();
+        let done = p.outputs.iter().filter(|o| &o.name.run == run && live.contains(&o.name.seed)).count() as u64;
+        let mut sampling: Vec<_> =
+            self.progress.iter().filter(|((r2, _), _)| r2 == run).map(|((_, seed), (s, n))| (*seed, *s, *n)).collect();
+        sampling.sort();
+        let live_steps: Vec<f64> =
+            self.sampling_times.iter().filter(|((r2, _), _)| r2 == run).filter_map(|(_, t)| t.step_s()).collect();
+        Some(RunProgress {
+            run: run.clone(),
+            project: p.name(),
+            label: r.label.clone(),
+            prompt: r.prompt.clone(),
+            done,
+            total: live.len() as u64,
+            sampling,
+            timing: crate::timing::Timing::of_run(r),
+            step_s: (!live_steps.is_empty()).then(|| live_steps.iter().sum::<f64>() / live_steps.len() as f64),
+            steps: r.sample.steps,
+        })
+    }
+
+    /// A project's most recent run (by ID: creation order).
+    pub fn latest_run<'a>(&self, p: &'a ProjectEntry) -> Option<&'a increart_core::model::Run> {
+        p.runs.iter().max_by(|a, b| a.id.cmp(&b.id))
+    }
+
+    /// Runs in the engine, in queue order (oldest first).
+    pub fn jobs(&self) -> Vec<RunProgress> {
+        self.active_runs.iter().filter_map(|r| self.run_progress(r)).collect()
+    }
+
+    pub fn job_summary(&self) -> JobSummary {
+        let jobs = self.jobs();
+        let total: u64 = jobs.iter().map(|j| j.total).sum();
+        let weighted: f32 = jobs.iter().map(|j| j.fraction() * j.total as f32).sum();
+        JobSummary {
+            runs: jobs.len(),
+            done: jobs.iter().map(|j| j.done).sum(),
+            total,
+            fraction: if total == 0 { 0.0 } else { weighted / total as f32 },
+        }
+    }
+}
+
+/// (good, neutral, bad, unreviewed) of a project.
+pub fn counts(p: &ProjectEntry) -> [usize; 4] {
+    let mut c = [0; 4];
+    for o in &p.outputs {
+        c[match o.verdict {
+            Some(Verdict::Good) => 0,
+            Some(Verdict::Neutral) => 1,
+            Some(Verdict::Bad) => 2,
+            None => 3,
+        }] += 1;
+    }
+    c
+}
+
+/// The images a project generates from (references and start images): its
+/// Generate draft's list, then its runs', newest run first, each once.
+pub fn project_inputs(p: &ProjectEntry) -> Vec<ImageRef> {
+    let mut seen = std::collections::HashSet::new();
+    let draft = p.draft.iter().flat_map(|d| {
+        let listed = d.images.iter().map(|i| i.image.clone());
+        listed.chain(d.refs.iter().cloned()).chain(d.init.clone())
+    });
+    let runs = p.runs.iter().rev().flat_map(|r| {
+        let init = match &r.mode {
+            increart_core::model::Mode::Edit { init, .. } => init.clone(),
+            increart_core::model::Mode::Generate => None,
+        };
+        r.refs.iter().cloned().chain(init)
+    });
+    draft.chain(runs).filter(|i| seen.insert(i.clone())).collect()
+}
+
+/// A project's cover: the chosen cover, else its best image (good > neutral
+/// > unreviewed > bad, most recent among equals).
+pub fn cover(p: &ProjectEntry) -> Option<ImageRef> {
+    if let Some(c) = &p.project.cover {
+        return Some(c.clone());
+    }
+    let rank = |v: Option<Verdict>| match v {
+        Some(Verdict::Good) => 3,
+        Some(Verdict::Neutral) => 2,
+        None => 1,
+        Some(Verdict::Bad) => 0,
+    };
+    p.outputs
+        .iter()
+        .max_by(|a, b| (rank(a.verdict), &a.image.id).cmp(&(rank(b.verdict), &b.image.id)))
+        .map(|o| o.image.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_snap_to_32() {
+        assert_eq!([1000, 1008, 1024, 1039, 1040, 5, 0].map(round32), [992, 1024, 1024, 1024, 1056, 32, 32]);
+        // the start image's aspect, within 256…2048, in multiples of 32
+        assert_eq!(fit_size(1344, 896), (1344, 896));
+        assert_eq!(fit_size(1000, 750), (992, 736));
+        assert_eq!(fit_size(4000, 3000), (2048, 1536));
+        assert_eq!(fit_size(100, 50), (512, 256));
+        assert_eq!(fit_size(3000, 200), (2048, 256));
+    }
+
+    #[test]
+    fn settings_changes_name_what_differs() {
+        let mut config = Config::default();
+        config.normalize();
+        let t0 = increart_core::id::now();
+        let img = |n: u32| GenerateImage { image: ImageRef::input(Id::new(t0, n)), reference: true, start: false };
+        let mut a = GenerateForm::new(&config);
+        a.images = vec![img(1), img(2)];
+        let a = a.to_draft(&config);
+        let mut b = a.clone();
+        b.label = "r09".into();
+        b.first_seed = 99;
+        b.prompt = "other".into();
+        assert!(settings_changes(&a, &b).is_empty(), "label, seed and prompt aren't settings");
+        b.images = vec![img(2), img(1)];
+        assert_eq!(settings_changes(&a, &b), ["image order"]);
+        b.images = vec![img(1), img(3), img(4)];
+        b.width = 512;
+        assert_eq!(settings_changes(&a, &b), [format!("512×{}", a.height), "+2 images".into(), "−1 image".into()]);
+    }
+
+    #[test]
+    fn history_rows_group_identical_texts_in_a_row() {
+        let e = |kind, text: &str| HistoryEntry::text(increart_core::id::now(), kind, text.into(), "".into());
+        let q = |l: &str| HistoryKind::Queued(l.into());
+        let mut v = HistoryView {
+            // newest first
+            entries: vec![e(q("r03"), "fox"), e(q("r02"), "fox"), e(HistoryKind::Edit, "fox"), e(q("r01"), "cat")],
+            selected: 1,
+            ..HistoryView::new(HistoryKey::NewIdea)
+        };
+        let rows = v.shown();
+        assert_eq!(rows.iter().map(|r| r.indexes.clone()).collect::<Vec<_>>(), [vec![0, 1, 2], vec![3]]);
+        assert_eq!(rows[0].index, 0, "the newest entry is the row's");
+        assert_eq!(rows[0].kinds, [&HistoryKind::Edit, &q("r02"), &q("r03")], "oldest first");
+        v.every_entry = true;
+        assert_eq!(v.shown().len(), 4);
+    }
+
+    #[test]
+    fn scaling_keeps_the_aspect() {
+        let g = (256, 2048);
+        // 3:2 to 1 MP: 1224.7 × 816.5 → 1216 × 832 (the nearest multiples of 32)
+        assert_eq!(scaled(1344, 896, ScaleBy::Megapixels, 1.0, g), (1216, 832));
+        assert_eq!(scaled(1024, 1024, ScaleBy::Megapixels, 2.0, g), (1408, 1408));
+        assert_eq!(scaled(1344, 896, ScaleBy::Width, 1920.0, g), (1920, 1280));
+        assert_eq!(scaled(1344, 896, ScaleBy::Height, 1000.0, g), (1504, 992));
+        // within the limits
+        assert_eq!(scaled(1024, 1024, ScaleBy::Megapixels, 50.0, g), (2048, 2048));
+        let d = ScaleDialog::new(ScaleTarget::Generate, 1344, 896);
+        assert_eq!((d.megapixels, d.side, d.result()), (1.2, 1344, (1344, 896)));
+    }
+}

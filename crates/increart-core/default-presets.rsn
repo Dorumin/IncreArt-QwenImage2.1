@@ -1,0 +1,673 @@
+// The prompt presets shipped with IncreArt (DESIGN.md, Prompt presets),
+// embedded in the app and written to prompt-presets/default-presets.rsn
+// beside config.rsn on every start (so edits to that copy are lost: put
+// your own presets in the task folders next to it instead).
+//
+// Modify style prompts read "Convert <image1> into <look>. Keep the
+// composition, pose and identity unchanged." Styles that turn a flat image
+// into 3D (Voxel, Animatronic) keep only the subject ("Keep the subject,
+// pose and identity unchanged.") and have a negative prompt: kept to its
+// composition, the model keeps the flat front view, and voxels seen face-on
+// come out as 2D pixel art.
+//
+// A description loosely defines the name for someone who doesn't know the
+// term, then says what you get. Artist, studio and brand names are left out.
+PromptPresets {
+    tasks: [
+        PromptTask {
+            name: "Modify style",
+            description: "Redraw a reference image in another art style, keeping what it shows.",
+            presets: [
+                PromptPreset {
+                    name: "Anime cel-shaded",
+                    group: "Anime & cartoon",
+                    description: "The 1990s TV-anime look: flat colour areas (\"cels\") with hard-edged shadows and bold outlines.",
+                    prompt: "Convert <image1> into a flat 2D anime cel-shaded illustration, bold black outlines, minimalist shading, 90s anime aesthetic, solid color fills, vector art style. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Modern anime",
+                    group: "Anime & cartoon",
+                    description: "Today's anime look: soft gradient shading, glossy eyes, detailed painted backgrounds.",
+                    prompt: "Convert <image1> into a modern anime illustration, clean line art, soft gradient shading, glossy expressive eyes, detailed painted background, vibrant colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Anime film",
+                    group: "Anime & cartoon",
+                    description: "Feature-film anime: hand-painted watercolour scenery, gentle colours, warm natural light.",
+                    prompt: "Convert <image1> into a frame from a hand-drawn anime feature film, hand-painted watercolour background, soft gentle palette, warm natural light, delicate line work. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Chibi",
+                    group: "Anime & cartoon",
+                    description: "Japanese \"small and cute\" style: big head, tiny body, simplified features.",
+                    prompt: "Convert <image1> into a cute chibi illustration, super-deformed proportions with a big head and tiny body, large eyes, simple shapes, soft pastel colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Manga ink",
+                    group: "Anime & cartoon",
+                    description: "Black-and-white Japanese comic: ink lines, dot-pattern grey tones (screentone), speed lines.",
+                    prompt: "Convert <image1> into a black-and-white manga panel, crisp ink lines, screentone dot shading, dramatic speed lines, high contrast. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "American comic",
+                    group: "Anime & cartoon",
+                    description: "Superhero-comic look: heavy black ink, printed halftone dots, bright primary colours.",
+                    prompt: "Convert <image1> into an American comic book illustration, heavy black inks, halftone dot shading, saturated primary colours, dynamic composition. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Western cartoon",
+                    group: "Anime & cartoon",
+                    description: "TV-cartoon look: thick outlines, simple shapes, exaggerated features.",
+                    prompt: "Convert <image1> into a western TV cartoon, thick clean outlines, simple rounded shapes, exaggerated expressive features, flat bright colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Children's book",
+                    group: "Anime & cartoon",
+                    description: "Picture-book illustration: soft painted texture, rounded friendly shapes.",
+                    prompt: "Convert <image1> into a children's picture book illustration, soft gouache texture, rounded friendly shapes, warm gentle colours, whimsical mood. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Flat vector",
+                    group: "Anime & cartoon",
+                    description: "Clean digital illustration built from simple geometric shapes: no shading, few colours.",
+                    prompt: "Convert <image1> into a flat vector illustration, simple geometric shapes, no gradients or shading, limited colour palette, clean edges. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Line art",
+                    group: "Anime & cartoon",
+                    description: "Outlines only, no colour or shading, like a colouring-book page.",
+                    prompt: "Convert <image1> into clean black line art on a white background, outlines only, no fill, no shading, even line weight. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Rubber hose 1930s",
+                    group: "Anime & cartoon",
+                    description: "Early-1930s black-and-white theatrical cartoons: bendy limbs, old film grain.",
+                    prompt: "Convert <image1> into a frame from a 1930s black-and-white theatrical cartoon, rubber hose animation with bendy tube-like limbs and chunky hands, thick wobbly ink outlines, flat grey tones, a painted miniature-set background with depth, scratchy film grain, flicker and dark vignette. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Technicolor cartoon 1940s",
+                    group: "Anime & cartoon",
+                    description: "Wartime-era colour shorts: saturated colour, smoother rounder animation.",
+                    prompt: "Convert <image1> into a frame from a 1940s colour theatrical cartoon, saturated Technicolor palette, smooth rounded character shapes, squash-and-stretch poses, lush painted watercolour backgrounds, soft film grain. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "TV cartoon 1960s",
+                    group: "Anime & cartoon",
+                    description: "Cheap made-for-TV animation: simple shapes, flat colour, sparse backgrounds.",
+                    prompt: "Convert <image1> into a frame from a 1960s limited-animation TV cartoon, simple flat shapes, thick uniform outlines, flat unshaded colour, sparse stylised background, slightly faded broadcast colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Watercolour",
+                    group: "Painting",
+                    description: "Transparent water-based paint: soft bleeding edges, visible paper texture.",
+                    prompt: "Convert <image1> into a watercolour painting, transparent washes, soft bleeding edges, visible cold-press paper texture, loose brushwork. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Oil painting",
+                    group: "Painting",
+                    description: "Thick oil paint with raised, visible brushstrokes (impasto) and deep colour.",
+                    prompt: "Convert <image1> into an oil painting on canvas, thick impasto brushstrokes, rich deep colours, visible canvas texture. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Gouache",
+                    group: "Painting",
+                    description: "Opaque water-based paint: flat matte colour, visible brush texture, poster-like.",
+                    prompt: "Convert <image1> into a gouache painting, opaque matte colours, flat colour shapes, visible brush texture, poster-like finish. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Ink wash (sumi-e)",
+                    group: "Painting",
+                    description: "East Asian brush painting: black ink in graded washes, lots of empty space.",
+                    prompt: "Convert <image1> into a sumi-e ink wash painting, black ink in graded washes, expressive brush strokes, generous empty space, rice paper. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Impressionist",
+                    group: "Painting",
+                    description: "1870s French painting: small dabs of colour that capture light rather than detail.",
+                    prompt: "Convert <image1> into an impressionist painting, small broken dabs of colour, shimmering light and atmosphere, loose visible brushwork. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Pastel",
+                    group: "Painting",
+                    description: "Soft chalk sticks: powdery blended strokes on tinted paper.",
+                    prompt: "Convert <image1> into a soft pastel drawing, powdery chalky strokes, gentle blending, tinted paper showing through. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Pop art",
+                    group: "Painting",
+                    description: "1960s style borrowed from comics and adverts: bold flat colours, printed dots, high contrast.",
+                    prompt: "Convert <image1> into a pop art print, bold flat colours, Ben-Day dots, thick outlines, high contrast. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Art nouveau",
+                    group: "Painting",
+                    description: "Decorative style from around 1900: flowing plant-like lines, ornate borders, elegant muted colour.",
+                    prompt: "Convert <image1> into an art nouveau illustration, flowing organic lines, ornamental floral border, elegant muted colours, decorative composition. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Stained glass",
+                    group: "Painting",
+                    description: "Church-window look: pieces of coloured glass joined by dark lead lines.",
+                    prompt: "Convert <image1> into a stained glass window, pieces of coloured translucent glass, thick dark lead lines, light shining through. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Renaissance",
+                    group: "Painting",
+                    description: "1500s old-master painting: dramatic light and shadow (chiaroscuro), smooth glazed oil, classical poses.",
+                    prompt: "Convert <image1> into a Renaissance oil painting, chiaroscuro lighting, smooth glazed layers, classical composition, muted earthy palette. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Pencil sketch",
+                    group: "Drawing",
+                    description: "Graphite drawing shaded with crossed lines (cross-hatching), on sketchbook paper.",
+                    prompt: "Convert <image1> into a graphite pencil sketch, cross-hatching shading, visible construction lines, sketchbook paper. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Charcoal",
+                    group: "Drawing",
+                    description: "Drawing sticks of burnt wood: smudgy deep blacks, dramatic tones, rough paper.",
+                    prompt: "Convert <image1> into a charcoal drawing, smudged deep blacks, dramatic tonal contrast, rough textured paper. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Coloured pencil",
+                    group: "Drawing",
+                    description: "Layered strokes of coloured pencil with the paper grain showing through.",
+                    prompt: "Convert <image1> into a coloured pencil drawing, layered directional strokes, paper grain showing through, soft vivid colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Ballpoint pen",
+                    group: "Drawing",
+                    description: "Blue biro hatching, like a doodle in a school notebook.",
+                    prompt: "Convert <image1> into a blue ballpoint pen drawing, fine hatching and cross-hatching, notebook paper. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Blueprint",
+                    group: "Drawing",
+                    description: "Technical drawing: white lines on blue paper, with measurements and labels.",
+                    prompt: "Convert <image1> into a technical blueprint, white precise lines on blue paper, measurements, annotations and grid lines. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Claymation",
+                    group: "3D & craft",
+                    description: "Stop-motion animation with plasticine figures: soft clay, fingerprints, slightly lumpy handmade shapes.",
+                    prompt: "Convert <image1> into a claymation stop-motion scene, plasticine figures, visible fingerprints and tool marks, slight seams, handmade miniature set, soft lighting. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "3D clay render",
+                    group: "3D & craft",
+                    description: "Computer 3D made to look like smooth matte clay, in soft studio light.",
+                    prompt: "Convert <image1> into a 3D render of smooth matte clay, rounded soft forms, pastel colours, soft studio lighting, ambient occlusion. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "3D animated feature",
+                    group: "3D & craft",
+                    description: "Animated-movie CG: stylised characters, soft glowing skin, cinematic lighting.",
+                    prompt: "Convert <image1> into a still from a 3D animated feature film, stylised characters, subsurface scattering skin, expressive eyes, cinematic lighting. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Low-poly",
+                    group: "3D & craft",
+                    description: "3D built from a few large flat triangles: faceted, gem-like.",
+                    prompt: "Convert <image1> into a low-poly 3D render, faceted flat-shaded polygons, simple geometric forms, clean gradients in the background. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Voxel",
+                    group: "3D & craft",
+                    description: "3D built from small cubes, like a block-building video game.",
+                    prompt: "Convert <image1> into a 3D voxel render, everything built from visible cubes with shaded faces and crisp edges, soft global illumination and ambient occlusion, a tiny diorama with shallow depth of field, like a MagicaVoxel scene. Keep the subject, pose and identity unchanged.",
+                    negative: "pixel art, 2D, flat, sprite, pixelated"
+                },
+                PromptPreset {
+                    name: "Papercraft",
+                    group: "3D & craft",
+                    description: "Layered cut-paper shapes with small shadows between the layers.",
+                    prompt: "Convert <image1> into a layered papercraft scene, cut paper shapes, soft drop shadows between layers, paper texture. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Origami",
+                    group: "3D & craft",
+                    description: "Japanese paper folding: everything made of folded paper with crisp creases.",
+                    prompt: "Convert <image1> into an origami scene, everything made of folded paper, crisp creases and facets, soft lighting. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Needle felt",
+                    group: "3D & craft",
+                    description: "Wool fibres poked into fuzzy, soft figures: a handmade toy look.",
+                    prompt: "Convert <image1> into a needle-felted wool figure, fuzzy fibres, soft rounded shapes, handmade craft photographed close up. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Knitted",
+                    group: "3D & craft",
+                    description: "Made of knitted yarn: visible stitches, cosy wool texture.",
+                    prompt: "Convert <image1> into a knitted yarn version, visible knit stitches, cosy wool texture, soft lighting. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Spaghetti",
+                    group: "3D & craft",
+                    description: "Rebuilt entirely from tangled strands of cooked spaghetti, like noodle style-transfer art.",
+                    prompt: "Convert <image1> into an image made entirely of tangled, glossy cooked spaghetti strands, the shapes and shading built from tightly packed overlapping noodles, golden-yellow pasta tones with olive-oil highlights, macro food photography, surreal food art. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Toy bricks",
+                    group: "3D & craft",
+                    description: "Built from interlocking plastic toy bricks.",
+                    prompt: "Convert <image1> into a model built from interlocking plastic toy bricks, studs visible, glossy plastic, toy photography. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Vinyl toy",
+                    group: "3D & craft",
+                    description: "Collectible designer figure: glossy plastic, chunky simplified shapes.",
+                    prompt: "Convert <image1> into a collectible vinyl toy figure, glossy plastic, chunky simplified proportions, product photo on a plain background. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Animatronic",
+                    group: "3D & craft",
+                    description: "A theme-park robot figure: moulded skin or fur over visible mechanics, glass eyes, stage lighting.",
+                    prompt: "Convert <image1> into a photograph of a physical animatronic figure, a theme-park audio-animatronic with moulded silicone skin and painted fibreglass over a mechanical frame, visible seams at the joints with glimpses of servos, pistons and cables, glossy glass eyes, a slightly stiff posed expression, dramatic stage lighting on a dark show set. Keep the subject, pose and identity unchanged.",
+                    negative: "drawing, illustration, 2D, flat, cartoon, painting, sleek sci-fi android, chrome robot"
+                },
+                PromptPreset {
+                    name: "Miniature diorama",
+                    group: "3D & craft",
+                    description: "A tiny handmade model scene; tilt-shift blur makes it look toy-sized.",
+                    prompt: "Convert <image1> into a miniature diorama, tiny handmade model scene, tilt-shift shallow depth of field, macro photography. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Wood carving",
+                    group: "3D & craft",
+                    description: "Carved from wood: visible grain and chisel marks.",
+                    prompt: "Convert <image1> into a wood carving, visible wood grain, chisel marks, warm natural tones. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Marble statue",
+                    group: "3D & craft",
+                    description: "White carved marble, like a Greek or Roman sculpture.",
+                    prompt: "Convert <image1> into a white marble statue, classical sculpture, smooth polished stone, museum lighting. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Embroidery",
+                    group: "3D & craft",
+                    description: "Stitched with coloured thread onto fabric, in an embroidery hoop.",
+                    prompt: "Convert <image1> into an embroidery, coloured thread stitches on linen fabric, embroidery hoop, textile texture. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Stereoptical set",
+                    group: "3D & craft",
+                    description: "Flat ink characters in a real 3D miniature set, the 1930s studio trick for depth.",
+                    prompt: "Convert <image1> into a flat black-and-white ink cartoon character placed in front of a real sculpted miniature set, the 3D model background turning behind the 2D figure, theatrical lighting, old film grain. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Vintage film",
+                    group: "Photo & film",
+                    description: "1970s photo look: warm faded colour, film grain, light leaks (stray orange glows).",
+                    prompt: "Convert <image1> into a vintage 1970s film photograph, warm faded colours, film grain, light leaks. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Polaroid",
+                    group: "Photo & film",
+                    description: "Instant-camera print: soft focus, washed-out colour, white border.",
+                    prompt: "Convert <image1> into a Polaroid instant photo, soft focus, washed-out colours, white frame border. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Film noir",
+                    group: "Photo & film",
+                    description: "1940s crime-movie look: stark black and white, hard shadows.",
+                    prompt: "Convert <image1> into a film noir still, high-contrast black and white, hard shadows, venetian blind light, moody. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Cinematic still",
+                    group: "Photo & film",
+                    description: "A frame from a modern film: teal-and-orange colour grade, wide frame, blurred background.",
+                    prompt: "Convert <image1> into a cinematic film still, teal and orange colour grade, anamorphic look, shallow depth of field. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Tintype",
+                    group: "Photo & film",
+                    description: "1860s photograph on a metal plate: silvery tones, dark edges, slight blur.",
+                    prompt: "Convert <image1> into an 1860s tintype photograph, wet-plate collodion, silvery monochrome tones, dark vignette, imperfections. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Double exposure",
+                    group: "Photo & film",
+                    description: "Two photos overlaid: the subject's silhouette filled with a {scene}.",
+                    prompt: "Convert <image1> into a double exposure photograph, the subject's silhouette blended with {scene}. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Infrared",
+                    group: "Photo & film",
+                    description: "Photo taken with infrared film: foliage turns white or pink, dreamy glow.",
+                    prompt: "Convert <image1> into an infrared photograph, false-colour foliage in white and pink, dark sky, dreamy glow. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Pixel art 16-bit",
+                    group: "Retro & print",
+                    description: "Mid-90s console game graphics: small crisp pixels, limited palette.",
+                    prompt: "Convert <image1> into 16-bit pixel art, crisp pixels, limited colour palette, retro console game style. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "8-bit",
+                    group: "Retro & print",
+                    description: "1980s console graphics: big chunky pixels, very few colours.",
+                    prompt: "Convert <image1> into 8-bit pixel art, big chunky pixels, very limited NES-era palette. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Risograph",
+                    group: "Retro & print",
+                    description: "A cheap stencil-printing machine: two or three grainy inks, slightly misaligned layers.",
+                    prompt: "Convert <image1> into a risograph print, two-tone grainy ink, slight misregistration between layers, paper texture. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Ukiyo-e",
+                    group: "Retro & print",
+                    description: "Japanese woodblock prints (1600s–1800s): flat colour, strong outlines, stylised waves and clouds.",
+                    prompt: "Convert <image1> into an ukiyo-e Japanese woodblock print, flat colours, strong outlines, stylised waves and clouds, washi paper. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Screenprint",
+                    group: "Retro & print",
+                    description: "Ink pushed through mesh stencils: bold flat layers, poster look.",
+                    prompt: "Convert <image1> into a screenprint poster, bold flat ink layers, halftone, slight misregistration. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Vintage travel poster",
+                    group: "Retro & print",
+                    description: "1930s railway and tourism posters: simplified scenery, bold colour, space for a title.",
+                    prompt: "Convert <image1> into a vintage 1930s travel poster, simplified flat shapes, bold colours, space for a title. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Art deco",
+                    group: "Retro & print",
+                    description: "1920s luxury style: geometric shapes, symmetry, gold and black.",
+                    prompt: "Convert <image1> into an art deco poster, geometric shapes, strong symmetry, gold and black, elegant luxury. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Synthwave",
+                    group: "Retro & print",
+                    description: "1980s retro-futurism: neon pink and cyan, a sunset, a glowing grid.",
+                    prompt: "Convert <image1> into a synthwave scene, neon magenta and cyan, retro sunset, glowing grid, 1980s retro-futurism. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Newspaper strip 1930s",
+                    group: "Retro & print",
+                    description: "A daily comic strip: pen hatching, hand-lettered feel, yellowed newsprint.",
+                    prompt: "Convert <image1> into a 1930s newspaper comic strip panel, black pen-and-ink line work with cross-hatching, exaggerated cartoon proportions, hand-lettered feel, yellowed newsprint paper, slight ink bleed. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Sunday funnies",
+                    group: "Retro & print",
+                    description: "The colour Sunday comics page: four-colour printing, halftone dots, slightly off-register.",
+                    prompt: "Convert <image1> into a vintage Sunday comics page panel, bold ink outlines, flat four-colour printing, visible halftone dots, slight colour misregistration, aged newsprint. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Sticker",
+                    group: "Graphic",
+                    description: "A die-cut sticker: the subject with a thick white border (pairs with transparent output).",
+                    prompt: "Convert <image1> into a die-cut sticker, the subject with a thick white border, flat colours, transparent background. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Neon sign",
+                    group: "Graphic",
+                    description: "Glowing bent-glass tubes tracing the subject on a dark wall.",
+                    prompt: "Convert <image1> into a neon sign, glowing glass tubes tracing the subject, dark brick wall, light glow. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Mosaic",
+                    group: "Graphic",
+                    description: "A picture made of small tiles with grout lines between them.",
+                    prompt: "Convert <image1> into a mosaic made of small ceramic tiles, visible grout lines. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Graffiti",
+                    group: "Graphic",
+                    description: "Spray paint on a brick wall: drips, bold outlines.",
+                    prompt: "Convert <image1> into graffiti spray paint on a brick wall, bold outlines, drips, vivid colours. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Tattoo flash",
+                    group: "Graphic",
+                    description: "Classic tattoo-parlour designs: bold black lines, red, green and yellow, simple shading.",
+                    prompt: "Convert <image1> into a traditional tattoo flash design, bold black outlines, limited palette of red, green and yellow, simple shading. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Silhouette",
+                    group: "Graphic",
+                    description: "The subject as a solid black shape with almost no inside detail.",
+                    prompt: "Convert <image1> into a solid black silhouette on a plain light background, minimal inner detail, crisp edges. Keep the composition, pose and identity unchanged."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Remove background",
+            description: "Keep the subject, take away or change what is behind it.",
+            presets: [
+                PromptPreset {
+                    name: "Transparent background",
+                    description: "A cut-out: everything behind the subject removed, leaving transparency.",
+                    prompt: "Remove the background of <image1> and make it transparent. Keep the subject exactly as it is, with clean edges and fine details such as hair intact."
+                },
+                PromptPreset {
+                    name: "White studio background",
+                    description: "Product-photo look: the subject on plain white with a soft shadow beneath.",
+                    prompt: "Place the subject of <image1> on a plain white studio background with a soft natural shadow. Keep the subject unchanged."
+                },
+                PromptPreset {
+                    name: "Solid colour background",
+                    description: "The subject on a flat {colour} backdrop.",
+                    prompt: "Replace the background of <image1> with a flat solid {colour} backdrop. Keep the subject unchanged, with clean edges."
+                },
+                PromptPreset {
+                    name: "New background",
+                    description: "The subject kept, everything behind it replaced with a {scene}.",
+                    prompt: "Replace the background of <image1> with {scene}. Keep the subject unchanged and match the lighting to the new background."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Repair / restore",
+            description: "Fix damage and flaws without changing what the picture shows.",
+            presets: [
+                PromptPreset {
+                    name: "Restore old photo",
+                    description: "Fixes scratches, tears, stains and fading on an old photograph.",
+                    prompt: "Restore <image1>: remove scratches, dust, tears and stains, fix the fading, and keep the people and details exactly as they are."
+                },
+                PromptPreset {
+                    name: "Colourise",
+                    description: "Adds natural, believable colour to a black-and-white photo.",
+                    prompt: "Colourise <image1> with natural, realistic colours. Keep every detail and the composition unchanged."
+                },
+                PromptPreset {
+                    name: "Sharpen & denoise",
+                    description: "Removes blur, grain and blocky compression marks (JPEG artifacts).",
+                    prompt: "Make <image1> sharp and clean: remove blur, noise and compression artifacts, keep the content unchanged."
+                },
+                PromptPreset {
+                    name: "Fix faces & hands",
+                    description: "Repairs distorted or blurry faces and hands, a common flaw in generated images.",
+                    prompt: "Fix the faces and hands in <image1> so they are natural and well formed. Change nothing else."
+                },
+                PromptPreset {
+                    name: "Upscale detail",
+                    description: "Re-renders with more fine detail: crisper edges, richer textures.",
+                    prompt: "Re-render <image1> with more fine detail, crisp edges and rich textures, keeping the content and composition identical."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Edit content",
+            description: "Change what is in the picture and keep the rest.",
+            presets: [
+                PromptPreset {
+                    name: "Remove object",
+                    description: "Erases the {object} and fills in what would be behind it.",
+                    prompt: "Remove the {object} from <image1> and fill in the background naturally. Change nothing else."
+                },
+                PromptPreset {
+                    name: "Add object",
+                    description: "Puts a {object} into the scene, matching its light and perspective.",
+                    prompt: "Add {object} to <image1>, matching the lighting, perspective and style. Change nothing else."
+                },
+                PromptPreset {
+                    name: "Replace object",
+                    description: "Swaps the {object} for a {replacement}, in the same place and size.",
+                    prompt: "In <image1>, replace the {object} with {replacement}, keeping the position, scale and lighting. Change nothing else."
+                },
+                PromptPreset {
+                    name: "Change clothing",
+                    description: "Dresses the person in {outfit}, keeping face and pose.",
+                    prompt: "Dress the person in <image1> in {outfit}. Keep the face, pose and background unchanged."
+                },
+                PromptPreset {
+                    name: "Recolour",
+                    description: "Changes the colour of the {object} to {colour}.",
+                    prompt: "Change the colour of the {object} in <image1> to {colour}. Change nothing else."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Relight / mood",
+            description: "Change the light, time of day or weather.",
+            presets: [
+                PromptPreset {
+                    name: "Golden hour",
+                    description: "The warm, low sunlight just before sunset: long shadows, golden tones.",
+                    prompt: "Relight <image1> as golden hour: warm low sunlight from the side, long soft shadows, golden tones. Keep the content unchanged."
+                },
+                PromptPreset {
+                    name: "Night",
+                    description: "Turns day into night: dark sky, artificial lights switched on.",
+                    prompt: "Turn <image1> into a night scene: dark sky, artificial lights on, moonlight. Keep the content unchanged."
+                },
+                PromptPreset {
+                    name: "Studio lighting",
+                    description: "Three-point photo-studio light: soft main light, fill, and a bright rim on the edges.",
+                    prompt: "Relight <image1> with professional studio lighting: soft key light, gentle fill, rim light. Keep the content unchanged."
+                },
+                PromptPreset {
+                    name: "Dramatic (chiaroscuro)",
+                    description: "One hard light source and deep shadows, as in old-master paintings.",
+                    prompt: "Relight <image1> with dramatic chiaroscuro: a single hard light source and deep shadows. Keep the content unchanged."
+                },
+                PromptPreset {
+                    name: "Change season",
+                    description: "Makes the scene {season}: foliage, light and weather to match.",
+                    prompt: "Change the season in <image1> to {season}, with matching foliage, light and weather. Keep the composition unchanged."
+                },
+                PromptPreset {
+                    name: "Add weather",
+                    description: "Adds {weather}, e.g. rain, snow or fog.",
+                    prompt: "Add {weather} to <image1>, with matching light and wet or snowy surfaces where fitting. Keep the composition unchanged."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Extend / reframe",
+            description: "Change what the camera sees.",
+            presets: [
+                PromptPreset {
+                    name: "Outpaint",
+                    description: "Extends the picture past its edges, continuing the scene.",
+                    prompt: "Extend <image1> beyond its borders, continuing the scene naturally in the same style. Keep the original part unchanged."
+                },
+                PromptPreset {
+                    name: "Zoom out",
+                    description: "Pulls the camera back to show more of the surroundings.",
+                    prompt: "Zoom out from <image1> to show more of the surroundings, keeping the subject and style the same."
+                },
+                PromptPreset {
+                    name: "Change angle",
+                    description: "The same scene seen from {angle}, e.g. from above or from the side.",
+                    prompt: "Show the scene of <image1> from {angle}, keeping the subject, style and lighting consistent."
+                },
+                PromptPreset {
+                    name: "Close-up",
+                    description: "Moves in on the subject and re-renders it as a detailed close-up.",
+                    prompt: "Make a detailed close-up of the subject of <image1>, in the same style and lighting."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Character",
+            description: "Keep a character the same while changing pose, expression or setting.",
+            presets: [
+                PromptPreset {
+                    name: "Character sheet",
+                    description: "An animator's model sheet: the same character from front, side and back.",
+                    prompt: "Create a character sheet of the character in <image1>: front, side and back views, full body, plain white background, consistent design."
+                },
+                PromptPreset {
+                    name: "New pose",
+                    description: "The same character in {pose}.",
+                    prompt: "Show the character from <image1> {pose}, keeping the face, outfit and style identical."
+                },
+                PromptPreset {
+                    name: "Change expression",
+                    description: "The same face showing {expression}.",
+                    prompt: "Change the expression of the character in <image1> to {expression}. Change nothing else."
+                },
+                PromptPreset {
+                    name: "New scene",
+                    description: "Puts the character into {scene}.",
+                    prompt: "Place the character from <image1> in {scene}, keeping the character's face, outfit and style identical."
+                },
+                PromptPreset {
+                    name: "Change age",
+                    description: "Makes the person look {age}, keeping who they are.",
+                    prompt: "Make the person in <image1> look {age}, keeping their identity recognisable. Change nothing else."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Combine images",
+            description: "Use two or more reference images together.",
+            presets: [
+                PromptPreset {
+                    name: "Subject into scene",
+                    description: "Places the subject of image 1 into the scene of image 2, matching light.",
+                    prompt: "Place the subject of <image1> into the scene of <image2>, matching the lighting, perspective and scale."
+                },
+                PromptPreset {
+                    name: "Style transfer",
+                    description: "Redraws image 1 in the art style of image 2.",
+                    prompt: "Redraw <image1> in the art style of <image2>, keeping the composition and content of <image1>."
+                },
+                PromptPreset {
+                    name: "Outfit from image",
+                    description: "Dresses the person in image 1 in the clothing from image 2.",
+                    prompt: "Dress the person in <image1> in the outfit from <image2>. Keep the face, pose and background of <image1>."
+                },
+                PromptPreset {
+                    name: "Two characters",
+                    description: "Puts the characters from images 1 and 2 together in {scene}.",
+                    prompt: "Show the character from <image1> and the character from <image2> together in {scene}, each keeping their own look."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Text",
+            description: "Add or change lettering in the picture.",
+            presets: [
+                PromptPreset {
+                    name: "Add sign",
+                    description: "Adds the words {text} on a sign in the scene, in a fitting font.",
+                    prompt: "Add a sign to <image1> that reads \"{text}\", in a font and material that fit the scene."
+                },
+                PromptPreset {
+                    name: "Replace text",
+                    description: "Changes the existing text in the picture to {text}, keeping font and style.",
+                    prompt: "Change the text in <image1> to \"{text}\", keeping the font, size, colour and placement."
+                },
+                PromptPreset {
+                    name: "Poster title",
+                    description: "Adds a large title {text}, as on a film or event poster.",
+                    prompt: "Turn <image1> into a poster with the title \"{text}\" in large bold lettering. Keep the image itself unchanged."
+                },
+                PromptPreset {
+                    name: "Translate text",
+                    description: "Rewrites all the text in the picture in {language}, keeping the layout.",
+                    prompt: "Translate all the text in <image1> into {language}, keeping the font style, layout and everything else unchanged."
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,3322 @@
+//! GUI flows driven through the reducer, with the real runtime and a real
+//! library on disk (no window, no servers).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use increart_core::config::{Config, ServerConfig, ServerPreset};
+use increart_core::{IdeaLoc, Verdict};
+use increart_gui_core::*;
+
+struct Harness {
+    state: AppState,
+    rt: Runtime,
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl Harness {
+    fn new() -> Harness {
+        increart_core::fsutil::set_fsync(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib");
+        let mut config = Config::default();
+        config.normalize();
+        let mut h = Harness { state: AppState::new(config, None), rt: Runtime::new(|| {}), _tmp: tmp, root };
+        h.send(Msg::SetLibraryPath(h.root.to_string_lossy().into()));
+        h.send(Msg::CreateLibrary);
+        h.settle();
+        h.send(Msg::ContinueWithoutServers);
+        // the once-a-session "no server" warning (tested on its own)
+        h.state.no_server_warned = true;
+        h
+    }
+
+    /// Applies a message and carries out its effects (not settling).
+    fn send(&mut self, msg: Msg) -> Vec<Effect> {
+        let fx = update(&mut self.state, msg);
+        for f in &fx {
+            self.rt.run(f.clone());
+        }
+        fx
+    }
+
+    /// Feeds runtime messages back until nothing is pending.
+    fn settle(&mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let msgs = self.rt.wait(Duration::from_millis(300));
+            if msgs.is_empty() {
+                if self.state.busy == 0 && self.state.saving == 0 {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "operations still pending");
+                continue;
+            }
+            for m in msgs {
+                self.send(m);
+            }
+        }
+    }
+
+    fn errors(&self) -> Vec<&str> {
+        self.state.messages.iter().filter(|m| m.error).map(|m| m.text.as_str()).collect()
+    }
+}
+
+#[test]
+fn create_library_then_ideas_review_promote_generate() {
+    let mut h = Harness::new();
+    assert_eq!(h.state.phase, Phase::Main);
+    assert_eq!(h.state.library.as_deref(), Some(h.root.as_path()));
+    assert_eq!(h.state.config.recent_libraries, [h.root.to_str().unwrap()]);
+    assert_eq!(h.state.inbox_tab, InboxTab::NewIdea, "empty inbox opens on New idea");
+
+    // two ideas into the inbox, then review them
+    for (t, x) in [("Fox", "a red fox in a café"), ("Lighthouse", "lighthouse at dusk")] {
+        h.send(Msg::Draft(IdeaDraft {
+            title: t.into(),
+            text: x.into(),
+            tags: "animals, photo".into(),
+            images: vec![],
+        }));
+        h.send(Msg::AddIdea(AddIdea::Inbox));
+        h.settle();
+    }
+    assert_eq!(h.state.draft, IdeaDraft::default(), "draft cleared");
+    let inbox: Vec<_> = h.state.unreviewed_ideas().iter().map(|e| e.idea.title.clone()).collect();
+    assert_eq!(inbox, ["Lighthouse", "Fox"], "newest first");
+    assert_eq!(h.state.unreviewed_ideas()[0].idea.tags, ["animals", "photo"]);
+
+    h.send(Msg::ReviewCurrentIdea(Verdict::Bad));
+    h.settle();
+    h.send(Msg::ReviewCurrentIdea(Verdict::Good));
+    h.settle();
+    assert!(h.state.unreviewed_ideas().is_empty());
+    let kept = h.state.library_ideas();
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].idea.starred);
+    assert_eq!(h.state.discarded_ideas()[0].idea.title, "Lighthouse");
+
+    // restore the discarded one to the library, then promote both
+    let lighthouse = h.state.discarded_ideas()[0].idea.id.clone();
+    h.send(Msg::Restore(lighthouse.clone(), IdeaLoc::top_library()));
+    h.settle();
+    let fox = h.state.library_ideas()[1].idea.id.clone(); // newest first: Lighthouse, Fox
+    h.send(Msg::Promote(vec![fox.clone(), lighthouse]));
+    // always named first: the first idea title is the guess
+    assert_eq!(h.state.promote.as_ref().unwrap().name, "Fox");
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    assert_eq!((h.state.tab, h.state.projects_tab), (Tab::Projects, ProjectsTab::Generate));
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.name(), "Fox");
+    assert_eq!(p.dir, Path::new("projects/Fox/Fox"), "in a folder of its name by default");
+    assert_eq!(p.project.sources.len(), 2);
+    assert_eq!(h.state.generate.prompt, "a red fox in a café");
+    assert_eq!(h.state.generate.source_idea.as_ref(), Some(&fox));
+
+    // queue without servers: the run is saved for later
+    let mut f = h.state.generate.clone();
+    f.seeds = 3;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.runs.len(), 1);
+    let run = &p.runs[0];
+    assert_eq!((run.label.as_str(), run.alpha, run.seed_count(), run.sample.cfg), ("r00", false, 3, 2.0));
+    assert_eq!(increart_core::request::prompt_sent(&run.prompt, run.alpha), run.prompt, "the prompt as typed");
+    assert_eq!(run.model.recipe, "qwen-image-21");
+    assert_eq!(h.state.generate.label, "r01", "next label");
+    assert_eq!(h.state.generate.first_seed, 3, "first seed continues after the run's seeds");
+    let mut f = h.state.generate.clone();
+    f.seeds = 2;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let runs = &h.state.project_entry().unwrap().runs;
+    assert_eq!(runs[1].revisions[0].seeds, increart_core::model::Seeds { first: 3, count: 2 });
+    assert_eq!(h.state.generate.first_seed, 5);
+    // another project starts at 0; coming back continues where it left off
+    let fox_project = h.state.project.clone().unwrap();
+    // New project asks the name first: cancelling makes nothing
+    let before = h.state.index.projects.len();
+    h.send(Msg::NewProject(PathBuf::new()));
+    assert!(h.state.renaming.as_ref().is_some_and(|r| r.creating && r.name == "new project"));
+    h.send(Msg::CancelRename);
+    h.settle();
+    assert_eq!(h.state.index.projects.len(), before, "cancelled: no project");
+    assert_eq!(h.state.project.as_ref(), Some(&fox_project));
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_eq!(h.state.generate.first_seed, 0, "new project: seed 0");
+    h.send(Msg::SelectProject(fox_project));
+    assert_eq!(h.state.generate.first_seed, 5, "remembered from the project's runs");
+}
+
+#[test]
+fn inbox_filters_narrow_the_triage_queue() {
+    let mut h = Harness::new();
+    for (t, x, tags) in
+        [("Fox", "a red fox", "animals"), ("Owl", "an owl at night", "animals, night"), ("Sea", "waves", "")]
+    {
+        h.send(Msg::Draft(IdeaDraft { title: t.into(), text: x.into(), tags: tags.into(), images: vec![] }));
+        h.send(Msg::AddIdea(AddIdea::Inbox));
+        h.settle();
+    }
+    let titles = |s: &AppState| s.inbox_queue().iter().map(|e| e.idea.title.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&h.state), ["Sea", "Owl", "Fox"]);
+    h.send(Msg::InboxCursor(2));
+    h.send(Msg::InboxFilter(InboxFilter { tag: Some("animals".into()), ..Default::default() }));
+    assert_eq!(titles(&h.state), ["Owl", "Fox"]);
+    assert_eq!(h.state.inbox_cursor, 0, "the cursor starts over");
+    h.send(Msg::InboxFilter(InboxFilter { text: "NIGHT".into(), ..Default::default() }));
+    assert_eq!(titles(&h.state), ["Owl"], "case-blind, tags too");
+    h.send(Msg::InboxFilter(InboxFilter { origin: Some(IdeaOrigin::Clipboard), ..Default::default() }));
+    assert!(titles(&h.state).is_empty());
+    h.send(Msg::InboxFilter(InboxFilter { age: Some(IdeaAge::Older), ..Default::default() }));
+    assert!(titles(&h.state).is_empty(), "all added just now");
+    h.send(Msg::InboxFilter(InboxFilter { images: Some(false), oldest_first: true, ..Default::default() }));
+    assert_eq!(titles(&h.state), ["Fox", "Owl", "Sea"]);
+    // the rating keys go through what's shown
+    h.send(Msg::InboxFilter(InboxFilter { tag: Some("night".into()), ..Default::default() }));
+    h.send(Msg::ReviewCurrentIdea(Verdict::Bad));
+    h.settle();
+    assert_eq!(h.state.discarded_ideas()[0].idea.title, "Owl");
+    assert!(h.state.inbox_queue().is_empty());
+    assert_eq!(h.state.unreviewed_ideas().len(), 2, "the others wait");
+}
+
+#[test]
+fn details_panels_start_shown_and_hide_for_the_session() {
+    let mut h = Harness::new();
+    assert!(h.state.info_hidden.is_empty(), "all shown at start");
+    h.send(Msg::ShowInfo(InfoPanel::Output, false));
+    assert!(h.state.info_hidden.contains(&InfoPanel::Output));
+    h.send(Msg::ShowInfo(InfoPanel::Output, true));
+    assert!(h.state.info_hidden.is_empty());
+}
+
+#[test]
+fn add_and_promote_in_one_step() {
+    let mut h = Harness::new();
+    h.send(Msg::Draft(IdeaDraft {
+        title: "Sticker set".into(),
+        text: "cute robot sticker".into(),
+        ..Default::default()
+    }));
+    h.send(Msg::AddIdea(AddIdea::Promote));
+    // named first; the draft waits, an empty or taken name is refused
+    assert_eq!(h.state.promote.as_ref().unwrap().name, "Sticker set");
+    assert!(!h.state.draft.is_empty(), "kept until the project is named");
+    h.send(Msg::EditPromoteName(" ".into()));
+    h.send(Msg::ConfirmPromote);
+    assert!(h.state.promote.is_some() && !h.errors().is_empty());
+    h.send(Msg::EditPromoteName("Robots".into()));
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    assert!(h.state.promote.is_none());
+    assert_eq!(
+        h.state.project_entry().unwrap().dir,
+        Path::new("projects/Robots/Robots"),
+        "the folder follows the name"
+    );
+    assert_eq!(h.state.library_ideas().len(), 1, "kept, not in the inbox");
+    assert!(h.state.unreviewed_ideas().is_empty());
+}
+
+#[test]
+fn dropped_files_become_ideas() {
+    let mut h = Harness::new();
+    let dir = h._tmp.path().join("drop");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("note.txt"), "otter with a teacup\n").unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([200, 10, 10])).save(dir.join("red.png")).unwrap();
+    h.send(Msg::DropFiles(vec![dir.join("note.txt"), dir.join("red.png")]));
+    h.settle();
+    let inbox = h.state.unreviewed_ideas();
+    assert_eq!(inbox.len(), 2);
+    // newest first: the image was imported after the text
+    assert_eq!(inbox[1].idea.text, "otter with a teacup");
+    assert_eq!(inbox[0].idea.images.len(), 1);
+
+    // the idea panels read its image's file metadata once
+    let img = inbox[0].idea.images[0].clone();
+    assert_eq!(h.send(Msg::NeedInputMeta(vec![img.clone()])).len(), 1);
+    assert!(h.send(Msg::NeedInputMeta(vec![img.clone()])).is_empty(), "already loading");
+    h.settle();
+    let meta = h.state.input_meta[&img].clone().expect("loaded");
+    assert_eq!(meta.source.unwrap().original_name.as_deref(), Some("red.png"));
+    assert!(meta.blake3.is_some_and(|b| b.len() == 64));
+}
+
+#[test]
+fn trees_create_rename_move_delete() {
+    let mut h = Harness::new();
+    h.send(Msg::NewFolder(increart_core::Tree::Projects, PathBuf::new()));
+    h.settle();
+    let r = h.state.renaming.clone().expect("new folder opens for rename");
+    assert_eq!(r.path, Path::new("new folder"));
+    h.send(Msg::EditRename("clients".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_eq!(h.state.index.project_folders, [PathBuf::from("clients")]);
+
+    // in a folder: from its right-click menu
+    h.send(Msg::NewProject("clients".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let p = h.state.project_entry().expect("new project selected");
+    assert_eq!(p.dir, Path::new("projects/clients/new project"));
+    h.send(Msg::CancelRename);
+    h.send(Msg::MoveNode(increart_core::Tree::Projects, "clients/new project".into(), PathBuf::new()));
+    h.settle();
+    assert_eq!(h.state.project_entry().unwrap().dir, Path::new("projects/new project"), "selection follows the id");
+
+    h.send(Msg::StartRename(increart_core::Tree::Projects, "clients".into()));
+    h.send(Msg::EditRename("a/b".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_eq!(h.errors().len(), 1, "invalid name refused");
+}
+
+#[test]
+fn review_and_undo() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    // Outputs need sd-server; write two through a second handle on the
+    // library files, as the engine would (the runtime's handle holds the lock).
+    let run = {
+        let lib = Library_::steal(&h.root);
+        lib.write_two(&project)
+    };
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    assert_eq!(h.state.review_queue().len(), 2);
+    assert_eq!(h.state.unreviewed_outputs(), 2);
+    h.send(Msg::ReviewCurrent(Verdict::Good));
+    h.settle();
+    assert_eq!(h.state.review_queue().len(), 1);
+    assert_eq!(h.state.kept_outputs().len(), 1);
+    h.send(Msg::UndoReview);
+    h.settle();
+    assert_eq!(h.state.review_queue().len(), 2, "undone");
+    assert!(h.state.review_undo.is_empty());
+    assert_eq!(h.state.index.project(&project).unwrap().runs[0].id, run);
+}
+
+/// Writes outputs without the lock: only for setting up `review_and_undo`.
+struct Library_ {
+    root: PathBuf,
+}
+
+impl Library_ {
+    fn steal(root: &Path) -> Library_ {
+        Library_ { root: root.to_path_buf() }
+    }
+
+    /// A run with two seeds and their output files and links, made with
+    /// a throwaway copy of the library opened elsewhere.
+    fn write_two(&self, project: &increart_core::Id) -> increart_core::Id {
+        self.in_copy(|lib| {
+            let mut cfg = Config::default();
+            cfg.normalize();
+            let form = GenerateForm::new(&cfg);
+            let run = increart_core::NewRun {
+                sweep: None,
+                label: "r01".into(),
+                prompt: "x".into(),
+                negative_prompt: String::new(),
+                alpha: false,
+                width: 64,
+                height: 64,
+                sample: increart_core::model::Sample {
+                    method: "euler".into(),
+                    scheduler: String::new(),
+                    steps: form.steps,
+                    cfg: form.cfg,
+                    flow_shift: None,
+                    custom_sigmas: vec![],
+                },
+                mode: increart_core::model::Mode::Generate,
+                refs: vec![],
+                model: increart_core::model::ModelSelection {
+                    recipe: "qwen-image-21".into(),
+                    files: Default::default(),
+                },
+                source_idea: None,
+                first_seed: 0,
+                seeds: 2,
+            };
+            let id = lib.create_run(project, run).unwrap();
+            write_pngs(lib, &id, &[0, 1]);
+            id
+        })
+    }
+
+    /// Outputs for these seeds of an existing run, as the engine would write.
+    fn write_seeds(&self, run: &increart_core::Id, seeds: &[u64]) {
+        self.in_copy(|lib| write_pngs(lib, run, seeds));
+    }
+
+    /// Runs `f` on a copy of the library, then moves the new files into the
+    /// real one.
+    fn in_copy<T>(&self, f: impl FnOnce(&mut increart_core::Library) -> T) -> T {
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("copy");
+        increart_core::fsutil::copy_tree(&self.root, &copy).unwrap();
+        std::fs::remove_file(copy.join("library.lock")).unwrap();
+        let mut lib = increart_core::Library::open(&copy).unwrap();
+        // A past minute, so the IDs made here can't collide with ones the
+        // app's own handle hands out later (it never sees this handle's).
+        lib.set_clock(|| chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap());
+        let out = f(&mut lib);
+        drop(lib);
+        for sub in ["output_images", "projects"] {
+            for p in increart_core::fsutil::walk(&copy.join(sub)).unwrap() {
+                let dst = self.root.join(p.strip_prefix(&copy).unwrap());
+                if p.is_dir() && !increart_core::fsutil::is_symlink(&p) {
+                    std::fs::create_dir_all(&dst).unwrap();
+                } else if !increart_core::fsutil::exists(&dst) {
+                    std::fs::rename(&p, &dst).unwrap();
+                }
+            }
+        }
+        out
+    }
+}
+
+fn write_pngs(lib: &mut increart_core::Library, run: &increart_core::Id, seeds: &[u64]) {
+    let (_, def) = lib.find_run(run).unwrap();
+    for &seed in seeds {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([seed as u8, 0, 0])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let p = increart_core::request::Provenance::default();
+        lib.write_output(run, 0, seed, &png, &increart_core::request::recipe(&def, seed, &p)).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------- server dialog (pure)
+
+fn dialog_state(presets: Vec<ServerPreset>, last: Option<&str>) -> AppState {
+    let mut config = Config::default();
+    config.normalize();
+    config.server_presets = presets;
+    config.last_preset = last.map(String::from);
+    let mut s = AppState::new(config, Some("/nonexistent/config.rsn".into()));
+    let ix = increart_core::Index::default();
+    update(&mut s, Msg::LibraryOpened(Ok(("/lib".into(), ix))));
+    s
+}
+
+fn start(name: &str, port: u16) -> ServerConfig {
+    ServerConfig::Start { name: name.into(), host: "127.0.0.1".into(), port, device: "ROCm0".into(), args: vec![] }
+}
+
+fn dialog(s: &AppState) -> &ServerDialog {
+    match &s.phase {
+        Phase::Servers(d) => d,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn command_line_servers_skip_the_screen_only_when_valid() {
+    let open = |presets: Vec<ServerPreset>, last: Option<&str>, choice: StartupServers| {
+        let mut config = Config::default();
+        config.normalize();
+        (config.server_presets, config.last_preset) = (presets, last.map(String::from));
+        config.sdserver.binary = "/nonexistent/sd-server".into();
+        let mut s = AppState::new(config, Some("/nonexistent/config.rsn".into()));
+        s.startup_servers = Some(choice);
+        let fx = update(&mut s, Msg::LibraryOpened(Ok(("/lib".into(), increart_core::Index::default()))));
+        (s, fx)
+    };
+    let remote = || ServerPreset {
+        name: "Remote".into(),
+        servers: vec![ServerConfig::Connect {
+            name: "r".into(),
+            url: "http://10.0.0.2:1234".into(),
+            device: String::new(),
+        }],
+    };
+
+    let (s, fx) = open(vec![], None, StartupServers::Without);
+    assert_eq!((s.phase, fx.last()), (Phase::Main, Some(&Effect::StopServers)));
+
+    let (s, fx) = open(vec![remote()], None, StartupServers::Preset("remote".into()));
+    assert_eq!(s.phase, Phase::Main, "any case; the main window opens while it connects");
+    assert!(s.background.is_some() && fx.iter().any(|f| matches!(f, Effect::OpenServers { .. })));
+    let (s, _) = open(vec![remote()], Some("Remote"), StartupServers::Preset("last".into()));
+    assert_eq!(s.phase, Phase::Main);
+
+    for (presets, last, asked, why) in [
+        (vec![remote()], None, "nope", "no preset by that name"),
+        (vec![remote()], None, "last", "no preset opened yet"),
+        (vec![ServerPreset { name: "Empty".into(), servers: vec![] }], None, "Empty", "has no servers"),
+        (vec![ServerPreset { name: "GPU".into(), servers: vec![start("gpu0", 1234)] }], None, "GPU", "sd-server"),
+    ] {
+        let (s, fx) = open(presets, last, StartupServers::Preset(asked.into()));
+        let notice = dialog(&s).notice.clone().unwrap_or_default();
+        assert!(notice.contains(why) && !dialog(&s).opening, "{asked}: {notice}");
+        assert!(!fx.iter().any(|f| matches!(f, Effect::OpenServers { .. })));
+        assert_eq!(s.startup_servers, None, "used once");
+    }
+}
+
+#[test]
+fn server_dialog_click_opens_a_preset() {
+    let a = ServerPreset { name: "A".into(), servers: vec![start("gpu0", 1234)] };
+    let b = ServerPreset { name: "B".into(), servers: vec![start("gpu0", 1234), start("gpu1", 1235)] };
+    let mut s = dialog_state(vec![a, b.clone()], Some("A"));
+    assert_eq!(dialog(&s).editing, None, "nothing is edited until asked");
+    let fx = update(&mut s, Msg::OpenPreset(1));
+    assert_eq!(fx[0], Effect::StopServers, "no servers yet: opens without asking");
+    assert!(s.confirm.is_none());
+    assert!(dialog(&s).opening);
+    assert_eq!(dialog(&s).draft, b);
+    assert_eq!(s.config.last_preset.as_deref(), Some("B"));
+}
+
+#[test]
+fn server_dialog_asks_before_replacing_servers_in_use() {
+    let p = ServerPreset { name: "One".into(), servers: vec![start("gpu0", 1234)] };
+    let mut s = dialog_state(vec![p], None);
+    s.engine_running = true;
+    assert!(update(&mut s, Msg::OpenPreset(0)).is_empty(), "asks first");
+    assert!(s.confirm.as_ref().unwrap().text.contains("open One"));
+    assert!(!dialog(&s).opening);
+    let fx = update(&mut s, Msg::ConfirmYes);
+    assert_eq!(fx[0], Effect::StopServers);
+    assert!(dialog(&s).opening);
+}
+
+#[test]
+fn server_dialog_new_edit_save_and_delete() {
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::NewPreset);
+    assert_eq!(dialog(&s).editing, Some(Editing::New));
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::AddConnectServer);
+    let d = dialog(&s);
+    assert_eq!(d.draft.servers[1], start("gpu1", 1235).clone().with_device("ROCm1"));
+    assert!(matches!(&d.draft.servers[2], ServerConfig::Connect { .. }));
+    update(&mut s, Msg::RemoveServer(2));
+
+    assert!(update(&mut s, Msg::SavePreset).is_empty(), "needs a name");
+    assert!(dialog(&s).editing.is_some(), "the editor stays open");
+    update(&mut s, Msg::SetPresetName(" Both GPUs ".into()));
+    let fx = update(&mut s, Msg::SavePreset);
+    assert!(matches!(fx[..], [Effect::SaveConfig(..)]));
+    assert_eq!(s.config.server_presets[0].name, "Both GPUs");
+    assert_eq!(dialog(&s).editing, None, "saving closes the editor");
+    assert_eq!(s.config.last_preset, None, "saving is not using");
+
+    // a second one; renaming the first in place, not onto the second's name
+    update(&mut s, Msg::NewPreset);
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::SetPresetName("One".into()));
+    update(&mut s, Msg::SavePreset);
+    s.config.last_preset = Some("Both GPUs".into());
+    update(&mut s, Msg::EditPreset(0));
+    update(&mut s, Msg::SetPresetName("One".into()));
+    assert!(update(&mut s, Msg::SavePreset).is_empty(), "name taken");
+    update(&mut s, Msg::SetPresetName("Two GPUs".into()));
+    update(&mut s, Msg::SavePreset);
+    let names: Vec<_> = s.config.server_presets.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Two GPUs", "One"]);
+    assert_eq!(s.config.last_preset.as_deref(), Some("Two GPUs"), "the last used follows a rename");
+
+    // Cancel drops the edits
+    update(&mut s, Msg::EditPreset(1));
+    update(&mut s, Msg::RemoveServer(0));
+    update(&mut s, Msg::CancelEdit);
+    assert_eq!(s.config.server_presets[1].servers.len(), 1);
+
+    // deleting the edited preset closes the editor
+    update(&mut s, Msg::EditPreset(1));
+    update(&mut s, Msg::DeletePreset(1));
+    assert_eq!(dialog(&s).editing, None);
+    assert_eq!(s.config.server_presets.len(), 1);
+
+    // Open without saving: the edited servers, the preset unchanged
+    update(&mut s, Msg::EditPreset(0));
+    update(&mut s, Msg::RemoveServer(1));
+    let fx = update(&mut s, Msg::OpenDraft);
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 1));
+    assert_eq!(s.config.server_presets[0].servers.len(), 2);
+    assert_eq!(dialog(&s).editing, None);
+}
+
+#[test]
+fn server_dialog_save_and_open_then_partial_failure() {
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::NewPreset);
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::SetPresetName("Both GPUs".into()));
+    let fx = update(&mut s, Msg::SaveAndOpen);
+    assert!(matches!(fx[0], Effect::SaveConfig(..)));
+    assert!(fx.contains(&Effect::StopServers));
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 2));
+    assert_eq!(s.config.server_presets.len(), 1);
+    assert_eq!(s.config.last_preset.as_deref(), Some("Both GPUs"));
+    assert_eq!(s.servers.len(), 2);
+    let a = s.open_attempt;
+    // what each starting server's log says, until it's up; older attempts' lines are ignored
+    update(&mut s, Msg::ServerLog(a, 0, "294/396 · 4.38GB/s".into()));
+    update(&mut s, Msg::ServerLog(a - 1, 1, "stale".into()));
+    assert_eq!(s.start_log, ["294/396 · 4.38GB/s", ""]);
+    update(&mut s, Msg::ServerOpened(a, 0, Ok(())));
+    update(&mut s, Msg::ServerLog(a, 0, "later".into()));
+    assert_eq!(s.start_log[0], "294/396 · 4.38GB/s", "up: no longer starting");
+    update(&mut s, Msg::ServerOpened(a, 1, Err("ROCm1: out of memory".into())));
+    assert!(update(&mut s, Msg::ServersSettled(a)).is_empty(), "one failed: the dialog stays");
+    assert_eq!(dialog(&s).progress[1], ServerProgress::Failed("ROCm1: out of memory".into()));
+    let fx = update(&mut s, Msg::ContinueWithServers);
+    assert!(matches!(fx[..], [Effect::StartEngine { .. }]));
+    assert_eq!(s.phase, Phase::Main);
+    assert_eq!(s.servers.len(), 1, "only the server that came up");
+
+    // stopping: shown as stopping until the processes are gone
+    update(&mut s, Msg::OpenServerDialog);
+    let fx = update(&mut s, Msg::ContinueWithoutServers);
+    assert_eq!(fx, [Effect::StopServers]);
+    assert!(s.servers.is_empty());
+    assert_eq!(s.stopping.len(), 1);
+    update(&mut s, Msg::ServersStopped(vec!["gpu0".into()]));
+    assert!(s.stopping.is_empty());
+    assert!(s.messages.last().is_some_and(|m| m.text.contains("gpu0") && !m.error), "{:?}", s.messages);
+}
+
+#[test]
+fn server_wizard_ticks_the_gpus_and_opens_them() {
+    let mut s = dialog_state(vec![], None);
+    let fx = update(&mut s, Msg::ServerWizard(true));
+    assert!(matches!(fx[..], [Effect::ListDevices(_)]), "lists the devices at once");
+    assert!(dialog(&s).wizard);
+    let listed = ["ROCm0\tAMD Radeon AI PRO R9700", "ROCm1\tAMD Radeon AI PRO R9700", "CPU\tIntel"];
+    update(&mut s, Msg::Devices(Ok(listed.iter().map(|l| l.to_string()).collect())));
+    let ports: Vec<_> = dialog(&s)
+        .draft
+        .servers
+        .iter()
+        .map(|x| match x {
+            ServerConfig::Start { device, port, .. } => (device.as_str(), *port),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(ports, [("ROCm0", 1234), ("ROCm1", 1235)], "every GPU, not the CPU");
+
+    update(&mut s, Msg::DraftDevice("ROCm0".into(), false));
+    update(&mut s, Msg::DraftDevice("ROCm1".into(), true));
+    assert_eq!(dialog(&s).draft.servers.len(), 1, "ticking twice adds once");
+    update(&mut s, Msg::DraftDevice("ROCm0".into(), true));
+    let fx = update(&mut s, Msg::FinishServerWizard);
+    assert!(matches!(fx[0], Effect::SaveConfig(..)));
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 2));
+    assert_eq!(s.config.server_presets[0].name, "ROCm1 + ROCm0");
+    assert_eq!(s.config.last_preset.as_deref(), Some("ROCm1 + ROCm0"));
+    assert!(!dialog(&s).wizard && dialog(&s).editing.is_none());
+
+    // connections only; Cancel leaves nothing behind
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::AddConnectServer);
+    update(&mut s, Msg::FinishServerWizard);
+    assert_eq!(s.config.server_presets[0].name, "Running server");
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::AddConnectServer);
+    update(&mut s, Msg::ServerWizard(false));
+    assert!(dialog(&s).draft.servers.is_empty() && !dialog(&s).wizard);
+    assert!(update(&mut s, Msg::FinishServerWizard).is_empty(), "only from the wizard");
+}
+
+#[test]
+fn queue_without_servers_warns_once_a_session() {
+    let mut h = Harness::new();
+    h.state.no_server_warned = false;
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    h.send(Msg::Generate(f));
+    assert!(h.send(Msg::QueueGenerate).is_empty(), "warns instead of queueing");
+    assert!(h.state.no_server_warning && h.state.no_server_warned);
+    h.send(Msg::CloseNoServerWarning);
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert!(!h.state.no_server_warning, "only the first time");
+    let p = h.state.project_entry().unwrap().clone();
+    assert!(h.state.latest_run(&p).is_some(), "queued (waiting for a server)");
+}
+
+#[test]
+fn server_dialog_from_main_can_be_closed_and_status_shows() {
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::AskContinueWithoutServers);
+    assert!(matches!(s.phase, Phase::Servers(_)), "asks first");
+    assert!(s.confirm.as_ref().is_some_and(|c| c.text.starts_with("Continue without servers?")));
+    update(&mut s, Msg::ConfirmYes);
+    assert_eq!(s.phase, Phase::Main);
+    update(&mut s, Msg::ServerStatus(true));
+    assert!(s.server_status);
+    update(&mut s, Msg::OpenServerDialog);
+    assert!(!s.server_status, "the dialog replaces the status window");
+    assert!(dialog(&s).from_main);
+    update(&mut s, Msg::CloseServerDialog);
+    assert_eq!(s.phase, Phase::Main);
+
+    // not at start-up, and not while opening
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::CloseServerDialog);
+    assert!(matches!(s.phase, Phase::Servers(_)), "at start-up there is no main window to go back to");
+    update(&mut s, Msg::ContinueWithoutServers);
+    update(&mut s, Msg::OpenServerDialog);
+    update(&mut s, Msg::NewPreset);
+    update(&mut s, Msg::AddStartServer);
+    update(&mut s, Msg::OpenDraft);
+    assert!(dialog(&s).opening);
+    update(&mut s, Msg::CloseServerDialog);
+    assert!(matches!(s.phase, Phase::Servers(_)), "Cancel or Continue in background while opening");
+}
+
+#[test]
+fn editor_and_settings_list_the_devices_once() {
+    let mut s = dialog_state(vec![], None);
+    s.config.sdserver.binary = "/opt/sd-server".into();
+    let fx = update(&mut s, Msg::NewPreset);
+    assert!(matches!(&fx[..], [Effect::ListDevices(b)] if b == "/opt/sd-server"));
+    update(&mut s, Msg::Devices(Ok(vec!["ROCm0\tGPU".into(), "ROCm1\tGPU".into()])));
+    assert!(dialog(&s).draft.servers.is_empty(), "the editor ticks nothing by itself");
+    update(&mut s, Msg::DraftDevice("ROCm1".into(), true));
+    assert!(
+        matches!(&dialog(&s).draft.servers[..], [ServerConfig::Start { device, port: 1234, .. }] if device == "ROCm1")
+    );
+    update(&mut s, Msg::CancelEdit);
+    assert!(update(&mut s, Msg::ServerSettings(true)).is_empty(), "listed already");
+    assert!(dialog(&s).settings);
+    update(&mut s, Msg::ServerSettings(false));
+    assert!(!dialog(&s).settings);
+}
+
+#[test]
+fn all_servers_up_goes_straight_to_main() {
+    let p = ServerPreset { name: "One".into(), servers: vec![start("gpu0", 1234)] };
+    let mut s = dialog_state(vec![p], Some("One"));
+    update(&mut s, Msg::OpenPreset(0));
+    let a = s.open_attempt;
+    update(&mut s, Msg::ServerOpened(a, 0, Ok(())));
+    let fx = update(&mut s, Msg::ServersSettled(a));
+    assert!(matches!(fx[..], [Effect::StartEngine { .. }]));
+    assert_eq!(s.phase, Phase::Main);
+    assert!(s.engine_running);
+}
+
+trait WithDevice {
+    fn with_device(self, d: &str) -> Self;
+}
+
+impl WithDevice for ServerConfig {
+    fn with_device(mut self, d: &str) -> Self {
+        if let ServerConfig::Start { device, .. } = &mut self {
+            *device = d.into();
+        }
+        self
+    }
+}
+
+#[test]
+fn picked_files() {
+    let mut h = Harness::new();
+    let png = h._tmp.path().join("pick.png");
+    image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])).save(&png).unwrap();
+    h.send(Msg::Picked(PickKind::IdeaImages, vec![png.clone()]));
+    h.settle();
+    assert_eq!(h.state.draft.images.len(), 1, "imported into the draft");
+    h.send(Msg::Picked(PickKind::IdeaImages, vec![png]));
+    h.settle();
+    assert_eq!(h.state.draft.images.len(), 1, "same pixels: reused, not duplicated");
+    let mut d = h.state.draft.clone();
+    d.title = "with image".into();
+    h.send(Msg::Draft(d));
+    h.send(Msg::AddIdea(AddIdea::Inbox));
+    h.settle();
+    assert_eq!(h.state.unreviewed_ideas()[0].idea.images.len(), 1);
+
+    let fx = h.send(Msg::Picked(PickKind::ModelDir, vec!["/models".into()]));
+    assert!(fx.is_empty(), "no config path in tests: nothing saved");
+    assert_eq!(h.state.config.sdserver.model_dirs, ["/models"]);
+    h.send(Msg::Picked(PickKind::SdServerBinary, vec!["/opt/sd/sd-server".into()]));
+    assert_eq!(h.state.config.sdserver.binary, "/opt/sd/sd-server");
+    assert!(h.send(Msg::Picked(PickKind::ImportFiles, vec![])).is_empty(), "cancelled");
+}
+
+#[test]
+fn picked_library_folder_fills_the_dialog() {
+    let mut s = AppState::new(Config::default(), None);
+    update(&mut s, Msg::Picked(PickKind::LibraryFolder, vec!["/data/my library".into()]));
+    assert!(matches!(&s.phase, Phase::Library(d) if d.path == "/data/my library"));
+    let fx = update(&mut s, Msg::Pick(PickKind::LibraryFolder));
+    assert!(matches!(&fx[..], [Effect::Pick { kind: PickKind::LibraryFolder, .. }]));
+}
+
+#[test]
+fn startup_offers_recent_libraries() {
+    let config = Config { recent_libraries: vec!["/libs/a".into(), "/libs/b".into()], ..Default::default() };
+    let mut s = AppState::new(config, None);
+    assert!(matches!(&s.phase, Phase::Library(d) if d.path.is_empty() && !d.busy), "nothing opens by itself");
+    update(&mut s, Msg::ForgetLibrary(0));
+    assert_eq!(s.config.recent_libraries, ["/libs/b"]);
+    let fx = update(&mut s, Msg::OpenRecentLibrary(0));
+    assert_eq!(fx, [Effect::OpenLibrary { path: "/libs/b".into(), create: false }]);
+    assert!(matches!(&s.phase, Phase::Library(d) if d.busy && d.path == "/libs/b"));
+    assert!(update(&mut s, Msg::OpenRecentLibrary(0)).is_empty(), "not twice while opening");
+    update(&mut s, Msg::LibraryOpened(Err("/libs/b is not an IncreArt library (no library.rsn)".into())));
+    assert!(matches!(&s.phase, Phase::Library(d) if !d.busy && d.error.is_some()));
+}
+
+#[test]
+fn library_wizards_create_or_open_the_chosen_folder() {
+    let mut s = AppState::new(Config::default(), None);
+    update(&mut s, Msg::LibraryWizard(Some((LibraryWizard::Create, "/home/me/IncreArt".into()))));
+    assert!(
+        matches!(&s.phase, Phase::Library(d) if d.wizard == Some(LibraryWizard::Create) && d.path == "/home/me/IncreArt")
+    );
+    update(&mut s, Msg::SetLibraryPath("/work/IncreArt".into()));
+    let fx = update(&mut s, Msg::CreateLibrary);
+    assert_eq!(fx, [Effect::OpenLibrary { path: "/work/IncreArt".into(), create: true }]);
+    assert!(update(&mut s, Msg::LibraryWizard(None)).is_empty());
+    assert!(matches!(&s.phase, Phase::Library(d) if d.wizard.is_some()), "not closed while creating");
+    update(&mut s, Msg::LibraryOpened(Err("/work/IncreArt is not empty".into())));
+    assert!(
+        matches!(&s.phase, Phase::Library(d) if d.wizard.is_some() && d.error.is_some()),
+        "the error shows in the wizard"
+    );
+
+    // switching to the Open wizard (no folder yet) drops the error
+    update(&mut s, Msg::LibraryWizard(Some((LibraryWizard::Open, String::new()))));
+    assert!(
+        matches!(&s.phase, Phase::Library(d) if d.wizard == Some(LibraryWizard::Open) && d.error.is_none() && d.path.is_empty())
+    );
+    update(&mut s, Msg::SetLibraryPath("/libs/a".into()));
+    assert_eq!(update(&mut s, Msg::OpenLibrary), [Effect::OpenLibrary { path: "/libs/a".into(), create: false }]);
+    update(&mut s, Msg::LibraryOpened(Err("locked".into())));
+    update(&mut s, Msg::LibraryWizard(None));
+    assert!(matches!(&s.phase, Phase::Library(d) if d.wizard.is_none() && d.error.is_none()));
+}
+
+#[test]
+fn back_and_forward_retrace_the_places() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    h.send(Msg::Tab(Tab::Projects));
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::ShowOutputs(OutputSource::Project(project.clone())));
+    h.send(Msg::OutputSource(OutputSource::AllProjects));
+    h.send(Msg::ProjectSearch("fox".into()));
+    assert!(h.state.nav.forward.is_empty());
+
+    h.send(Msg::NavBack);
+    assert_eq!((h.state.tab, &h.state.output_source), (Tab::OutputLibrary, &OutputSource::Project(project.clone())));
+    h.send(Msg::NavBack);
+    assert_eq!(h.state.tab, Tab::Review, "Show outputs was one step");
+    h.send(Msg::NavBack);
+    assert_eq!((h.state.tab, h.state.project.as_ref()), (Tab::Projects, Some(&project)));
+    h.send(Msg::NavForward);
+    h.send(Msg::NavForward);
+    assert_eq!((h.state.tab, h.state.nav.forward.len()), (Tab::OutputLibrary, 1));
+    h.send(Msg::Tab(Tab::IdeaInbox));
+    assert!(h.state.nav.forward.is_empty(), "a new step drops the forward ones");
+    h.send(Msg::NavBack);
+    assert_eq!(h.state.tab, Tab::OutputLibrary);
+}
+
+#[test]
+fn show_outputs_jumps_to_the_grid_and_flags_the_notice() {
+    let mut s = AppState::new(Config::default(), None);
+    s.tab = Tab::Projects;
+    s.output_tab = OutputTab::Folder;
+    s.output_preset = OutputPreset::Rejected;
+    s.output_filter = OutputPreset::Rejected.filter();
+    s.output_filter.text = "fox".into();
+    update(&mut s, Msg::ShowOutputs(OutputSource::ProjectFolder("clients".into())));
+    assert_eq!((s.tab, s.output_tab), (Tab::OutputLibrary, OutputTab::Grid));
+    assert_eq!((s.output_preset, s.output_filter.ratings), (OutputPreset::Kept, Ratings::KEPT), "back on Kept");
+    assert_eq!(s.output_source, OutputSource::ProjectFolder("clients".into()));
+    assert!(s.output_notice);
+    assert!(s.output_reveal, "the sources panel reveals it");
+    assert_eq!(s.output_reveals, 1, "and starts the tree's open folders over");
+    update(&mut s, Msg::OutputRevealed);
+    assert!(!s.output_reveal);
+    assert_eq!(s.output_filter.text, "fox", "filters are kept; the Grid offers a reset");
+    // a project-name search that would hide the source goes; one that shows it stays
+    s.output_search_projects = true;
+    s.output_project_search = "LIEN".into();
+    update(&mut s, Msg::ShowOutputs(OutputSource::ProjectFolder("clients".into())));
+    assert_eq!(s.output_project_search, "LIEN");
+    s.output_project_search = "fox".into();
+    update(&mut s, Msg::ShowOutputs(OutputSource::ProjectFolder("clients".into())));
+    assert_eq!(s.output_project_search, "");
+    s.output_search_projects = false;
+    update(&mut s, Msg::ResetOutputFilters);
+    assert_eq!(s.output_filter, OutputFilter::default());
+    update(&mut s, Msg::OutputSource(OutputSource::AllProjects));
+    assert!(!s.output_notice, "picking another source drops the notice");
+    update(&mut s, Msg::ShowOutputs(OutputSource::AllProjects));
+    update(&mut s, Msg::DismissOutputNotice);
+    assert!(!s.output_notice);
+}
+
+#[test]
+fn job_progress() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    f.seeds = 4;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let run = h.state.project_entry().unwrap().runs[0].id.clone();
+    assert_eq!(h.state.job_summary(), JobSummary::default(), "not in the engine (no servers)");
+    // as the engine would report it
+    h.state.active_runs.insert(run.clone());
+    h.send(Msg::Engine(increart_core::engine::Event::Progress {
+        run: run.clone(),
+        rev: 0,
+        seed: 0,
+        server: 0,
+        step: 10,
+        total: 20,
+        preview: None,
+    }));
+    let p = h.state.run_progress(&run).unwrap();
+    assert_eq!((p.done, p.total, p.sampling.clone()), (0, 4, vec![(0, 10, 20)]));
+    assert!((p.fraction() - 0.125).abs() < 1e-6);
+    let s = h.state.job_summary();
+    assert_eq!((s.runs, s.done, s.total), (1, 0, 4));
+    assert!((s.fraction - 0.125).abs() < 1e-6);
+}
+
+#[test]
+fn review_views_compare_and_rejected() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let (first, second) = {
+        let q = h.state.review_queue();
+        (q[0].image.clone(), q[1].image.clone())
+    };
+
+    h.send(Msg::ToggleReviewGrid);
+    assert_eq!(h.state.review_view, ReviewView::Grid);
+    h.send(Msg::ToggleReviewGrid);
+    assert_eq!(h.state.review_view, ReviewView::Single);
+
+    // C: A = first, B = second
+    h.send(Msg::Compare);
+    assert_eq!(h.state.review_view, ReviewView::Compare);
+    assert_eq!(h.state.review_pinned.as_ref(), Some(&first));
+    assert_eq!(h.state.review_queue()[h.state.review_cursor].image, second);
+    h.send(Msg::SwapCompare);
+    assert_eq!(h.state.review_pinned.as_ref(), Some(&second));
+    assert_eq!(h.state.review_queue()[h.state.review_cursor].image, first);
+    // rate B (keys) and A (its own buttons)
+    h.send(Msg::ReviewCurrent(Verdict::Bad));
+    h.settle();
+    h.send(Msg::ReviewPinned(Verdict::Good));
+    h.settle();
+    assert!(h.state.review_queue().is_empty());
+    assert_eq!(h.state.output_link(&second).unwrap().verdict, Some(Verdict::Good), "A still shown after rating");
+    h.send(Msg::Compare);
+    assert_eq!((h.state.review_view, h.state.review_pinned.clone()), (ReviewView::Single, None));
+
+    // output library: the preset tabs, and deleting the shown rejected
+    h.send(Msg::OutputSource(OutputSource::AllProjects));
+    h.send(Msg::OutputPreset(OutputPreset::Good));
+    assert_eq!(h.state.output_source_images().len(), 1);
+    h.send(Msg::OutputPreset(OutputPreset::All));
+    assert_eq!(h.state.output_source_images().len(), 2);
+    h.send(Msg::OutputPreset(OutputPreset::Unreviewed));
+    assert!(h.state.output_source_images().is_empty());
+    h.send(Msg::OutputPreset(OutputPreset::Rejected));
+    assert_eq!(h.state.output_source_images().len(), 1);
+    let mut f = h.state.output_filter.clone();
+    f.ratings.good = true;
+    h.send(Msg::OutputFilter(f));
+    assert!(h.state.output_preset_modified(), "the tab shows a dot");
+    h.send(Msg::OutputPreset(OutputPreset::Rejected));
+    assert!(!h.state.output_preset_modified(), "clicking it again resets");
+    h.send(Msg::OutputSource(OutputSource::ProjectFolder("no such folder".into())));
+    assert!(h.state.output_source_images().is_empty(), "Rejected follows the source");
+    h.send(Msg::OutputSource(OutputSource::AllProjects));
+    h.send(Msg::Ask("Delete these rejected?".into(), Box::new(Msg::DeleteShownRejected)));
+    assert!(h.state.confirm.is_some());
+    h.send(Msg::ConfirmYes);
+    h.settle();
+    assert!(h.state.confirm.is_none());
+    assert!(h.state.output_source_images().is_empty(), "{:?}", h.errors());
+    assert!(h.root.join(first.rel_path()).is_file(), "the image itself stays until Clean up");
+}
+
+#[test]
+fn drafts_autosave_and_restore() {
+    let mut h = Harness::new();
+    let draft_file = |h: &Harness, p: &str| h.root.join("projects").join(p).join("draft.rsn");
+    // two projects
+    for _ in 0..2 {
+        h.send(Msg::NewProject(PathBuf::new()));
+        h.send(Msg::CommitRename);
+        h.settle();
+    }
+    let a = h.state.index.projects.iter().find(|p| p.name() == "new project").unwrap().project.id.clone();
+    let b = h.state.index.projects.iter().find(|p| p.name() == "new project 2").unwrap().project.id.clone();
+    h.send(Msg::SelectProject(a.clone()));
+
+    // an edit is saved only after 2 s without edits
+    h.send(Msg::Tick(10.0));
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox in a café".into();
+    h.send(Msg::Generate(f.clone()));
+    assert!(h.send(Msg::Tick(11.0)).is_empty(), "too soon");
+    f.prompt.push_str(", film photo");
+    h.send(Msg::Generate(f.clone()));
+    assert!(h.send(Msg::Tick(12.5)).is_empty(), "the clock restarts at each edit");
+    let fx = h.send(Msg::Tick(13.1));
+    assert!(
+        matches!(&fx[0], Effect::SaveDraft(DraftSave::Generate(p, d)) if p == &a && d.prompt.ends_with("film photo"))
+    );
+    h.settle();
+    assert!(draft_file(&h, "new project").is_file());
+    assert!(h.state.draft_saved.is_some());
+    assert!(h.send(Msg::Tick(20.0)).is_empty(), "nothing new to save");
+
+    // switching projects flushes at once, and each project has its own form
+    let mut g = h.state.generate.clone();
+    g.prompt = "unsaved yet".into();
+    h.send(Msg::Generate(g));
+    let fx = h.send(Msg::SelectProject(b.clone()));
+    assert!(matches!(&fx[0], Effect::SaveDraft(DraftSave::Generate(p, d)) if p == &a && d.prompt == "unsaved yet"));
+    h.settle();
+    assert_eq!(h.state.generate.prompt, "", "project b starts fresh");
+    h.send(Msg::SelectProject(a.clone()));
+    assert_eq!(h.state.generate.prompt, "unsaved yet");
+
+    // queueing keeps the draft, with the next label and seed
+    let mut g = h.state.generate.clone();
+    g.seeds = 3;
+    h.send(Msg::Generate(g));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    h.send(Msg::FlushDrafts);
+    h.settle();
+    let saved = h.state.index.project(&a).unwrap().draft.clone().unwrap();
+    assert_eq!((saved.label.as_str(), saved.first_seed, saved.prompt.as_str()), ("r01", 3, "unsaved yet"));
+
+    // Clear resets the form
+    h.send(Msg::ClearGenerate);
+    assert_eq!(
+        (h.state.generate.prompt.as_str(), h.state.generate.label.as_str(), h.state.generate.first_seed),
+        ("", "r01", 3)
+    );
+
+    // the New idea draft: saved, restored when the library is opened again, removed when added
+    h.send(Msg::Draft(IdeaDraft { title: "Otter".into(), text: "otter with a teacup".into(), ..Default::default() }));
+    h.send(Msg::FlushDrafts);
+    h.settle();
+    assert!(h.root.join("input/draft.rsn").is_file());
+    let ix = h.state.index.clone();
+    let mut fresh = AppState::new(h.state.config.clone(), None);
+    let mut ix2 = ix;
+    ix2.idea_draft = Some(increart_core::model::IdeaDraftFile {
+        title: "Otter".into(),
+        text: "otter with a teacup".into(),
+        ..Default::default()
+    });
+    update(&mut fresh, Msg::LibraryOpened(Ok((h.root.clone(), ix2))));
+    assert_eq!(fresh.draft.title, "Otter", "restored on open");
+    h.send(Msg::AddIdea(AddIdea::Inbox));
+    h.settle();
+    assert!(!h.root.join("input/draft.rsn").exists(), "removed once the idea is added");
+}
+
+#[test]
+fn outputs_as_inputs() {
+    use increart_core::model::{IdeaSource, Mode};
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::EditRename("fox".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.settle();
+    let fox = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&fox);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let (first, second) = {
+        let q = h.state.review_queue();
+        (q[0].image.clone(), q[1].image.clone())
+    };
+
+    // E: a fresh edit in the image's own project, the image as <image1>
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::UseImage(first.clone(), UseTarget::Edit));
+    assert_eq!((h.state.tab, h.state.projects_tab), (Tab::Projects, ProjectsTab::Generate));
+    assert_eq!(h.state.project.as_ref(), Some(&fox));
+    assert_eq!(h.state.generate.refs(), std::slice::from_ref(&first));
+    assert_eq!(h.state.generate.prompt, "<image1> ");
+    assert!(h.state.generate.init().is_none());
+
+    // another output into the current form: the next reference; made the
+    // img2img start image by hand in the Images pane
+    h.send(Msg::UseImage(second.clone(), UseTarget::CurrentProject));
+    assert!(h.state.messages.last().unwrap().text.ends_with("as <image2>"));
+    h.send(Msg::ImageRoles { index: 1, reference: true, start: true });
+    let mut f = h.state.generate.clone();
+    f.prompt = "make it night".into();
+    f.strength = 0.6;
+    f.seeds = 1;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let run = h.state.project_entry().unwrap().runs.iter().find(|r| r.prompt == "make it night").unwrap().clone();
+    assert_eq!(run.mode, Mode::Edit { init: Some(second.clone()), strength: 0.6 });
+    assert_eq!(run.refs, [first.clone(), second.clone()]);
+
+    // N: a new project next to it, references (the default), prompt prefilled;
+    // its name is asked first (Cancel makes nothing)
+    h.send(Msg::UseImage(first.clone(), UseTarget::NewProject));
+    assert_eq!(h.state.new_project.as_ref().map(|d| d.name.as_str()), Some("fox from s0000"));
+    h.send(Msg::CancelNewProject);
+    h.settle();
+    assert_eq!(h.state.project.as_ref(), Some(&fox), "nothing made");
+    h.send(Msg::UseImage(first.clone(), UseTarget::NewProject));
+    h.send(Msg::ConfirmNewProject);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.name(), "fox from s0000");
+    assert_eq!(h.state.generate.refs(), std::slice::from_ref(&first));
+    assert_eq!(h.state.generate.prompt, "x", "the image's prompt");
+    assert!(h.state.renaming.is_none(), "named in the dialog");
+
+    // D: a copy of the image's project, form from the image's run (which had
+    // no images) with this one as <image1>, under the name typed (an invalid one is refused, the dialog stays)
+    h.send(Msg::UseImage(first.clone(), UseTarget::DuplicateProject));
+    h.send(Msg::EditNewProjectName("a/b".into()));
+    h.send(Msg::ConfirmNewProject);
+    assert!(h.state.new_project.is_some() && h.errors().iter().any(|e| e.contains("a/b")), "{:?}", h.errors());
+    h.state.messages.clear();
+    h.send(Msg::EditNewProjectName("fox night edits".into()));
+    h.send(Msg::ConfirmNewProject);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.name(), "fox night edits");
+    assert_eq!(p.runs.len(), 2, "run settings copied as templates");
+    assert!(p.outputs.is_empty(), "no images copied");
+    assert_eq!(h.state.generate.refs(), std::slice::from_ref(&first));
+    assert!(h.state.generate.init().is_none());
+    // past the copied runs' r01 and r02
+    assert_eq!((h.state.generate.label.as_str(), h.state.generate.first_seed), ("r03", 0));
+    h.send(Msg::CancelRename);
+
+    // tree: plain Duplicate
+    h.send(Msg::DuplicateProject("fox".into()));
+    assert_eq!(h.state.duplicate.as_ref().unwrap().name, "fox copy", "asks for a name first");
+    h.send(Msg::EditDuplicateName("FOX".into()));
+    h.send(Msg::ConfirmDuplicate);
+    assert!(h.state.duplicate.is_some() && !h.errors().is_empty(), "a taken name keeps the dialog open");
+    h.state.messages.clear();
+    h.send(Msg::CancelDuplicate);
+    assert!(h.state.duplicate.is_none());
+    h.send(Msg::DuplicateProject("fox".into()));
+    h.send(Msg::EditDuplicateName("fox 2".into()));
+    h.send(Msg::ConfirmDuplicate);
+    h.settle();
+    assert_eq!(h.state.project_entry().unwrap().name(), "fox 2", "the copy is selected");
+    assert!(h.state.renaming.is_none() && h.state.duplicate.is_none());
+
+    // R and I
+    h.send(Msg::ToInputLibrary(first.clone()));
+    h.send(Msg::NewIdeaFromImage(second.clone()));
+    h.settle();
+    let kept = h.state.library_ideas();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].idea.source, IdeaSource::FromOutput { image: first.clone() });
+    assert_eq!(kept[0].idea.text, "");
+    let inbox = h.state.unreviewed_ideas();
+    assert_eq!((inbox.len(), inbox[0].idea.text.as_str()), (1, "x"));
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+/// Regression: starting the engine with a run that has pending seeds used to
+/// take the library lock twice (nested) and hang the runtime, and with it the
+/// GUI thread.
+#[test]
+fn start_engine_with_pending_runs_does_not_hang() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    f.seeds = 2;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let run = h.state.project_entry().unwrap().runs[0].id.clone();
+    h.rt.run(Effect::StartEngine {
+        shared: increart_core::config::SdServerConfig::default(),
+        order: Default::default(),
+    });
+    let msgs = h.rt.wait(Duration::from_secs(10));
+    assert!(msgs.contains(&Msg::RunsQueued(vec![run])), "{msgs:?}");
+    // and the runtime still answers
+    h.rt.run(Effect::Rescan);
+    assert!(!h.rt.wait(Duration::from_secs(10)).is_empty());
+}
+
+#[test]
+fn continue_in_background_and_cancel() {
+    let p = ServerPreset { name: "Both".into(), servers: vec![start("gpu0", 1234), start("gpu1", 1235)] };
+    let mut s = dialog_state(vec![p], Some("Both"));
+    update(&mut s, Msg::OpenPreset(0));
+    let first = s.open_attempt;
+    // Cancel: stops what was started; late reports of that attempt are ignored
+    let fx = update(&mut s, Msg::CancelOpening);
+    assert_eq!(fx, [Effect::StopServers]);
+    assert!(!dialog(&s).opening && s.servers.is_empty());
+    update(&mut s, Msg::ServerOpened(first, 0, Ok(())));
+    assert!(update(&mut s, Msg::ServersSettled(first)).is_empty());
+    assert!(matches!(s.phase, Phase::Servers(_)), "a stale attempt changes nothing");
+
+    // Again, then carry on in the main window while they open
+    update(&mut s, Msg::OpenPreset(0));
+    let a = s.open_attempt;
+    assert_ne!(a, first);
+    update(&mut s, Msg::ContinueInBackground);
+    assert_eq!(s.phase, Phase::Main);
+    assert!(s.servers.iter().all(|x| x.state == "starting…"));
+    update(&mut s, Msg::ServerOpened(a, 1, Err("ROCm1: out of memory".into())));
+    assert_eq!(s.servers[1].state, "failed");
+    assert_eq!(s.messages.last().unwrap().text, "ROCm1: out of memory");
+    update(&mut s, Msg::ServerOpened(a, 0, Ok(())));
+    let fx = update(&mut s, Msg::ServersSettled(a));
+    assert!(matches!(fx[..], [Effect::StartEngine { .. }]), "starts with the one that came up");
+    assert_eq!(s.servers.len(), 1);
+    assert!(s.engine_running && s.background.is_none());
+}
+
+#[test]
+fn generate_more_seeds() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    f.seeds = 4;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let p = h.state.project_entry().unwrap().clone();
+    let run = h.state.latest_run(&p).unwrap().id.clone();
+    h.send(Msg::MoreSeeds(run.clone(), 8));
+    h.settle();
+    let r = h.state.index.run(&run).unwrap().1.clone();
+    assert_eq!((r.seed_count(), r.next_seed()), (12, 12), "continues after seed 3");
+    assert_eq!(r.revisions.len(), 1, "same revision");
+    assert!(h.state.messages.last().unwrap().text.contains("+8 seeds"));
+    // with servers it is queued right away
+    h.state.engine_running = true;
+    let fx = h.send(Msg::MoreSeeds(run.clone(), 4));
+    assert!(matches!(&fx[..], [Effect::Lib(LibOp::AddSeeds(_, 4))]));
+    h.settle();
+    assert!(h.state.active_runs.contains(&run));
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::OpenInGenerate(p.project.id.clone()));
+    assert_eq!((h.state.tab, h.state.projects_tab), (Tab::Projects, ProjectsTab::Generate));
+}
+
+#[test]
+fn form_from_latest_run_and_refs_from_files() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let p = h.state.project.clone().unwrap();
+    // a reference from a file (file picker / drop on the Generate panel)
+    let png = h._tmp.path().join("ref.png");
+    image::RgbImage::from_pixel(32, 32, image::Rgb([9, 9, 9])).save(&png).unwrap();
+    h.send(Msg::Picked(PickKind::GenerateRefs, vec![png.clone()]));
+    h.settle();
+    assert_eq!(h.state.generate.refs().len(), 1);
+    assert_eq!(h.state.generate.refs()[0].store, increart_core::Store::Input);
+    h.send(Msg::DropRefs(vec![png]));
+    h.settle();
+    assert_eq!(h.state.generate.refs().len(), 1, "same pixels: same image, not added twice");
+
+    let mut f = h.state.generate.clone();
+    f.prompt = "the robot from <image1>".into();
+    f.width = 1152;
+    f.height = 512;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    // a project whose draft is gone (runs made before drafts existed)
+    std::fs::remove_file(h.root.join("projects/new project/draft.rsn")).ok();
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::SelectProjectFolder(None));
+    h.send(Msg::SelectProject(p));
+    let g = &h.state.generate;
+    assert_eq!((g.prompt.as_str(), g.refs().len(), g.width, g.height), ("the robot from <image1>", 1, 1152, 512));
+    assert_eq!((g.label.as_str(), g.first_seed), ("r01", 4), "from the latest run, label and seed moved on");
+}
+
+fn history(h: &mut Harness, key: increart_core::HistoryKey) -> Vec<increart_core::history::HistoryEntry> {
+    h.send(Msg::OpenHistory(key));
+    h.settle();
+    let v = h.state.history_view.clone().unwrap();
+    h.send(Msg::CloseHistory);
+    v.entries
+}
+
+#[test]
+fn prompt_history_groups_and_restores() {
+    use increart_core::HistoryKey;
+    use increart_core::history::HistoryKind;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let p = h.state.project.clone().unwrap();
+    let key = HistoryKey::Project(p.clone());
+    let type_at = |h: &mut Harness, t: f64, text: &str| {
+        h.send(Msg::Tick(t));
+        let mut f = h.state.generate.clone();
+        f.prompt = text.into();
+        h.send(Msg::Generate(f));
+        h.send(Msg::Tick(t + 2.5));
+        h.settle();
+    };
+    type_at(&mut h, 100.0, "a red fox reading a newspaper");
+    type_at(&mut h, 110.0, "a red fox reading the newspaper"); // small, soon: merged
+    type_at(&mut h, 200.0, "a red fox reading the newspapers"); // small but 90 s later: new
+    type_at(&mut h, 205.0, "a red fox reading the newspapers in a sunlit café, film photograph"); // big: new
+    let e = history(&mut h, key.clone());
+    let texts: Vec<_> = e.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "a red fox reading the newspapers in a sunlit café, film photograph",
+            "a red fox reading the newspapers",
+            "a red fox reading the newspaper",
+        ],
+        "newest first; the first two edits merged"
+    );
+
+    // checkpoints: queued, before clear
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    h.send(Msg::ClearGenerate);
+    h.settle();
+    let e = history(&mut h, key.clone());
+    assert_eq!(e[0].kind, HistoryKind::BeforeClear);
+    assert_eq!(e[1].kind, HistoryKind::Queued("r00".into()));
+
+    // restore an older entry: the current text is kept first
+    let mut f = h.state.generate.clone();
+    f.prompt = "something new".into();
+    h.send(Msg::Generate(f));
+    h.send(Msg::OpenHistory(key.clone()));
+    h.settle();
+    let i = h
+        .state
+        .history_view
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|e| e.text == "a red fox reading the newspapers")
+        .unwrap();
+    h.send(Msg::HistorySelect(i));
+    h.send(Msg::HistoryRestore(increart_gui_core::Restore::Text));
+    h.settle();
+    assert_eq!(h.state.generate.prompt, "a red fox reading the newspapers");
+    let e = history(&mut h, key);
+    assert_eq!((e[0].kind.clone(), e[0].text.as_str()), (HistoryKind::BeforeRestore, "something new"));
+
+    // search and filter
+    h.send(Msg::OpenHistory(HistoryKey::Project(p)));
+    h.settle();
+    h.send(Msg::HistorySearch("café".into()));
+    assert!(h.state.history_view.as_ref().unwrap().shown().iter().all(|r| r.entry.text.contains("café")));
+    h.send(Msg::HistorySearch(String::new()));
+    h.send(Msg::HistoryCheckpointsOnly(true));
+    assert!(h.state.history_view.as_ref().unwrap().shown().iter().all(|r| r.entry.kind.is_checkpoint()));
+}
+
+#[test]
+fn edit_idea_window_and_its_history() {
+    use increart_core::HistoryKey;
+    let mut h = Harness::new();
+    h.send(Msg::Draft(IdeaDraft { title: "Fox".into(), text: "a fox".into(), ..Default::default() }));
+    h.send(Msg::AddIdea(AddIdea::Inbox));
+    h.settle();
+    let new_idea_hist = history(&mut h, HistoryKey::NewIdea);
+    assert_eq!(new_idea_hist[0].text, "a fox", "the added idea is a checkpoint of the New idea form");
+    let id = h.state.unreviewed_ideas()[0].idea.id.clone();
+    h.send(Msg::OpenIdea(id.clone()));
+    let mut ed = h.state.idea_edit.clone().unwrap();
+    ed.text = "a red fox in a café, film photograph".into();
+    ed.tags = "animals, photo".into();
+    h.send(Msg::Tick(50.0));
+    h.send(Msg::EditIdea(ed));
+    h.send(Msg::Tick(53.0));
+    h.send(Msg::SaveIdea);
+    h.settle();
+    let i = &h.state.idea(&id).unwrap().idea;
+    assert_eq!((i.text.as_str(), i.tags.len()), ("a red fox in a café, film photograph", 2));
+    assert!(h.state.idea_edit.is_none());
+    let e = history(&mut h, HistoryKey::Idea(id));
+    assert_eq!(e[0].text, "a red fox in a café, film photograph");
+}
+
+#[test]
+fn library_filters_and_output_sources() {
+    let mut h = Harness::new();
+    for (t, x, star) in [("Fox", "a fox", true), ("Hut", "alpine hut", false)] {
+        h.send(Msg::Draft(IdeaDraft { title: t.into(), text: x.into(), ..Default::default() }));
+        h.send(Msg::AddIdea(AddIdea::Keep));
+        h.settle();
+        if star {
+            let id = h.state.library_ideas().iter().find(|e| e.idea.title == t).unwrap().idea.id.clone();
+            h.send(Msg::SetStar(id, true));
+            h.settle();
+        }
+    }
+    h.send(Msg::LibFilter(LibFilter { starred_only: true, ..Default::default() }));
+    assert_eq!(h.state.library_ideas().len(), 1);
+    h.send(Msg::LibFilter(LibFilter { text: "alpine".into(), ..Default::default() }));
+    assert_eq!(h.state.library_ideas()[0].idea.title, "Hut");
+    h.send(Msg::LibFilter(LibFilter { promoted: Some(true), ..Default::default() }));
+    assert!(h.state.library_ideas().is_empty());
+    h.send(Msg::LibFilter(LibFilter::default()));
+
+    // outputs: collections, smart folders, cover, export
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    for i in &imgs {
+        h.send(Msg::ReviewLink(h.state.output_link(i).unwrap().path.clone(), Some(Verdict::Good)));
+        h.settle();
+    }
+    h.send(Msg::NewCollection(PathBuf::new(), vec![imgs[0].clone()]));
+    h.settle();
+    let coll = h.state.renaming.clone().unwrap().path;
+    h.send(Msg::CancelRename);
+    h.send(Msg::AddToCollection(coll.clone(), vec![imgs[1].clone()]));
+    h.settle();
+    h.send(Msg::OutputSource(OutputSource::Collection(coll)));
+    assert_eq!(h.state.output_source_images().len(), 2);
+    let day = imgs[0].id.as_str()[..10].to_string();
+    assert_eq!(h.state.kept_days(), [(day.clone(), 2)]);
+    h.send(Msg::OutputSource(OutputSource::Smart(Smart::Day(day))));
+    assert_eq!(h.state.output_source_images().len(), 2);
+    h.send(Msg::OutputFilter(OutputFilter { text: "no such prompt".into(), ..Default::default() }));
+    assert!(h.state.output_source_images().is_empty());
+    h.send(Msg::OutputFilter(OutputFilter::default()));
+
+    // a project with only a bad image: nothing kept, all of it with any_rating
+    h.send(Msg::ReviewLink(h.state.output_link(&imgs[0]).unwrap().path.clone(), Some(Verdict::Bad)));
+    h.settle();
+    h.send(Msg::ShowOutputs(OutputSource::Project(project.clone())));
+    assert_eq!(h.state.output_source_images().len(), 1, "the other one is still good");
+    let any = OutputPreset::All.filter();
+    assert!(!any.narrows(), "ratings are the tabs' business");
+    h.send(Msg::OutputFilter(any));
+    assert_eq!(h.state.output_source_images().len(), 2, "bad included");
+    h.send(Msg::ReviewLink(h.state.output_link(&imgs[0]).unwrap().path.clone(), Some(Verdict::Good)));
+    h.settle();
+    h.send(Msg::OutputFilter(OutputFilter::default()));
+
+    h.send(Msg::SetCover(project.clone(), Some(imgs[1].clone())));
+    h.settle();
+    assert_eq!(h.state.index.project(&project).unwrap().project.cover.as_ref(), Some(&imgs[1]));
+
+    let dest = h._tmp.path().join("export");
+    h.send(Msg::OpenExport(imgs.clone(), "2 images".into()));
+    let mut e = h.state.export.clone().unwrap();
+    e.dest = dest.to_string_lossy().into();
+    e.keep_metadata = false;
+    h.send(Msg::EditExport(e));
+    h.send(Msg::RunExport);
+    h.settle();
+    let names: Vec<_> =
+        std::fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().all(|n| n.contains("_r0_s")), "named by run / revision / seed: {names:?}");
+    let bytes = std::fs::read(dest.join(&names[0])).unwrap();
+    assert!(increart_core::png::texts(&bytes).unwrap().is_empty(), "metadata stripped");
+
+    // file manager: with no command and none installed, a clear message
+    h.state.config.file_manager = "definitely-not-a-file-manager".into();
+    h.send(Msg::ShowInFileManager(PathBuf::from("projects")));
+    h.settle();
+    assert!(h.errors().iter().any(|e| e.contains("couldn't run")), "{:?}", h.errors());
+}
+
+#[test]
+fn folder_view_browse_open_paste_delete() {
+    let mut h = Harness::new();
+    h.send(Msg::NewFolder(increart_core::Tree::Projects, PathBuf::new()));
+    h.settle();
+    h.send(Msg::EditRename("clients".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.send(Msg::NewProject("clients".into()));
+    h.send(Msg::EditRename("fox".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.settle();
+    let fox = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&fox);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+
+    h.send(Msg::ProjectsTab(ProjectsTab::Folder));
+    h.send(Msg::FvGo("projects".into()));
+    h.settle();
+    let names = |h: &Harness| h.state.folder_view.shown().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&h), ["clients"]);
+    h.send(Msg::FvOpen("clients".into()));
+    h.settle();
+    assert_eq!(h.state.folder_view.entries[0].kind, EntryKind::Project);
+    h.send(Msg::FvOpen("fox".into()));
+    h.settle();
+    assert_eq!(h.state.project.as_ref(), Some(&fox), "entering a project selects it");
+    assert_eq!(names(&h), ["reviewed", "runs", "unreviewed"], "project.rsn hidden until Ctrl+H");
+    h.send(Msg::FvShowMeta(true));
+    assert!(names(&h).contains(&"project.rsn".to_string()));
+    h.send(Msg::FvShowMeta(false));
+
+    // back / forward / up
+    h.send(Msg::FvBack);
+    h.settle();
+    assert_eq!(h.state.folder_view.path, PathBuf::from("projects/clients"));
+    h.send(Msg::FvForward);
+    h.settle();
+    h.send(Msg::FvOpen("unreviewed".into()));
+    h.settle();
+    let links = names(&h);
+    assert_eq!(links.len(), 2);
+    assert!(matches!(h.state.folder_view.entries[0].kind, EntryKind::Image(_)));
+
+    // open an unreviewed image: Review, at that image
+    h.send(Msg::FvOpen(links[1].clone()));
+    assert_eq!(h.state.tab, Tab::Review);
+    assert_eq!(
+        h.state.review_queue()[h.state.review_cursor].path,
+        PathBuf::from("projects/clients/fox/unreviewed").join(&links[1])
+    );
+    h.send(Msg::Tab(Tab::Projects));
+
+    // cut + paste into reviewed/good = a review
+    h.send(Msg::FvSelect(links[0].clone(), SelectHow::Replace));
+    h.send(Msg::FvCut);
+    h.send(Msg::FvUp);
+    h.settle();
+    h.send(Msg::FvGo("projects/clients/fox/reviewed/good".into()));
+    h.send(Msg::FvPaste(None));
+    h.settle();
+    assert_eq!(names(&h), [links[0].clone()], "relisted after the move");
+    assert_eq!(h.state.kept_outputs().len(), 1);
+    // …but not into another project's folder
+    h.send(Msg::FvSelect(links[0].clone(), SelectHow::Replace));
+    h.send(Msg::FvCut);
+    h.send(Msg::FvGo("projects/clients".into()));
+    h.send(Msg::FvPaste(None));
+    assert!(h.errors().iter().any(|e| e.contains("only be moved between")));
+
+    // copy + paste a project; range select; delete with confirmation
+    h.send(Msg::FvGo("projects/clients".into()));
+    h.settle();
+    h.send(Msg::FvSelect("fox".into(), SelectHow::Replace));
+    h.send(Msg::FvCopy);
+    h.send(Msg::FvPaste(None));
+    h.settle();
+    assert_eq!(names(&h), ["fox", "fox 2"]);
+    h.send(Msg::FvSelect("fox".into(), SelectHow::Replace));
+    h.send(Msg::FvSelect("fox 2".into(), SelectHow::Range));
+    assert_eq!(h.state.folder_view.selected.len(), 2);
+    h.send(Msg::FvSelect("fox".into(), SelectHow::Toggle));
+    h.send(Msg::FvDelete);
+    assert!(h.state.confirm.is_some());
+    h.send(Msg::ConfirmYes);
+    h.settle();
+    assert_eq!(names(&h), ["fox"]);
+}
+
+#[test]
+fn drag_and_drop_moves_copies_and_refuses_bad_drops() {
+    let mut h = Harness::new();
+    for name in ["a", "b"] {
+        h.send(Msg::NewFolder(increart_core::Tree::Projects, PathBuf::new()));
+        h.settle();
+        h.send(Msg::EditRename(name.into()));
+        h.send(Msg::CommitRename);
+        h.settle();
+    }
+    h.send(Msg::NewProject("a".into()));
+    h.send(Msg::EditRename("fox".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.settle();
+    let dir = |h: &Harness| h.state.index.projects[0].dir.clone();
+    let p = PathBuf::from;
+
+    // move a project, then copy a folder (Ctrl)
+    h.send(Msg::DropInto { paths: vec![p("projects/a/fox")], dest: p("projects/b"), copy: false });
+    h.settle();
+    assert_eq!(dir(&h), p("projects/b/fox"));
+    h.send(Msg::DropInto { paths: vec![p("projects/a")], dest: p("projects/b"), copy: true });
+    h.settle();
+    assert!(h.state.index.project_folders.contains(&p("a")) && h.state.index.project_folders.contains(&p("b/a")));
+
+    // onto itself or where it already is: nothing, silently
+    h.send(Msg::DropInto { paths: vec![p("projects/b")], dest: p("projects/b"), copy: false });
+    h.send(Msg::DropInto { paths: vec![p("projects/b/fox")], dest: p("projects/b"), copy: false });
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    // into its own subfolder, or into a project: refused
+    h.send(Msg::DropInto { paths: vec![p("projects/b")], dest: p("projects/b/a"), copy: false });
+    h.send(Msg::DropInto { paths: vec![p("projects/a")], dest: p("projects/b/fox"), copy: false });
+    h.settle();
+    assert_eq!(h.errors().len(), 2, "{:?}", h.errors());
+    assert!(h.state.index.project_folders.contains(&p("a")) && h.state.index.project_folders.contains(&p("b")));
+}
+
+#[test]
+fn scale_dialog_resizes_the_generate_size_and_resolution_rows() {
+    use increart_gui_core::{ScaleBy, ScaleTarget};
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    (h.state.generate.width, h.state.generate.height) = (1344, 896);
+
+    h.send(Msg::OpenScale(ScaleTarget::Generate));
+    let mut d = h.state.scale.clone().unwrap();
+    assert_eq!((d.width, d.height, d.result()), (1344, 896, (1344, 896)), "opens on the current size");
+    (d.by, d.side) = (ScaleBy::Width, 1920);
+    h.send(Msg::EditScale(d));
+    h.send(Msg::ApplyScale);
+    assert_eq!((h.state.generate.width, h.state.generate.height), (1920, 1280));
+    assert!(h.state.scale.is_none() && h.state.generate_dirty.is_some(), "closed, and the draft will be saved");
+
+    // a row of the resolutions editor; Cancel leaves it alone
+    h.send(Msg::OpenResolutions);
+    let first = h.state.res_editor.as_ref().unwrap()[0].clone();
+    h.send(Msg::OpenScale(ScaleTarget::Resolution(0)));
+    let mut d = h.state.scale.clone().unwrap();
+    d.megapixels = 2.0;
+    h.send(Msg::EditScale(d.clone()));
+    h.send(Msg::CloseScale);
+    assert_eq!(h.state.res_editor.as_ref().unwrap()[0], first);
+    h.send(Msg::OpenScale(ScaleTarget::Resolution(0)));
+    h.send(Msg::EditScale(d.clone()));
+    h.send(Msg::ApplyScale);
+    let r = &h.state.res_editor.as_ref().unwrap()[0];
+    assert_eq!((r.width, r.height), d.result());
+    assert_eq!(h.state.config.resolutions[0], first, "saved only with the editor's Save");
+}
+
+#[test]
+fn output_library_folder_view_collections_and_smart_folders() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    for (i, v) in imgs.iter().zip([Verdict::Good, Verdict::Neutral]) {
+        h.send(Msg::ReviewLink(h.state.output_link(i).unwrap().path.clone(), Some(v)));
+        h.settle();
+    }
+    let names = |h: &Harness| h.state.folder_view.shown().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+
+    // the Projects folder view somewhere, to check each keeps its own place
+    h.send(Msg::Tab(Tab::Projects));
+    h.send(Msg::ProjectsTab(ProjectsTab::Folder));
+    h.settle();
+    h.send(Msg::FvOpen(names(&h)[0].clone()));
+    h.settle();
+    let projects_path = h.state.folder_view.path.clone();
+
+    // Output library → Folder: collections, with smart/ first
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    h.send(Msg::OutputTab(OutputTab::Folder));
+    h.settle();
+    assert_eq!(h.state.folder_view.root, PathBuf::from("collections"));
+    assert_eq!(names(&h), ["smart"]);
+    h.send(Msg::FvOpen("smart".into()));
+    h.settle();
+    assert_eq!(names(&h), ["by date", "by source idea", "by project", "transparent"]);
+    h.send(Msg::FvGo(PathBuf::from("collections/smart/by project")));
+    h.settle();
+    h.send(Msg::FvOpen(names(&h)[0].clone()));
+    h.settle();
+    assert_eq!(h.state.folder_view.shown().len(), 2);
+    let shown = h.state.folder_view.shown();
+    let good = shown.iter().find(|e| matches!(&e.kind, EntryKind::Image(i) if *i == imgs[0])).unwrap().name.clone();
+    // read-only: no delete, no new folder
+    h.send(Msg::FvSelect(good.clone(), SelectHow::Replace));
+    h.send(Msg::FvDelete);
+    assert!(h.state.confirm.is_none());
+    h.send(Msg::FvCopy);
+
+    // a new collection; paste the smart folder's image into it
+    h.send(Msg::FvGo(PathBuf::from("collections")));
+    h.settle();
+    h.send(Msg::FvNewFolder);
+    h.settle();
+    h.send(Msg::EditRename("Portfolio".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_eq!(names(&h), ["smart", "Portfolio"]);
+    h.send(Msg::FvPaste(Some("Portfolio".into())));
+    h.settle();
+    assert_eq!(h.state.index.collection_links.len(), 1);
+    assert_eq!(h.state.index.collection_links[0].image, imgs[0]);
+
+    // the sources panel drives the view on this tab
+    h.send(Msg::OutputSource(OutputSource::Collection(PathBuf::from("Portfolio"))));
+    h.settle();
+    assert_eq!(h.state.folder_view.path, PathBuf::from("collections/Portfolio"));
+    assert_eq!(h.state.folder_view.shown().len(), 1);
+    // opening the image shows it in the Grid of that collection
+    let link = names(&h)[0].clone();
+    h.send(Msg::FvOpen(link.clone()));
+    assert_eq!(h.state.output_tab, OutputTab::Grid);
+    assert_eq!(h.state.output_selected.as_ref(), Some(&imgs[0]));
+    h.send(Msg::OutputTab(OutputTab::Folder));
+    h.settle();
+
+    // the other view kept its place
+    h.send(Msg::Tab(Tab::Projects));
+    assert_eq!(
+        (h.state.folder_view.root.clone(), h.state.folder_view.path.clone()),
+        (PathBuf::from("projects"), projects_path)
+    );
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    h.settle();
+    assert_eq!(h.state.folder_view.path, PathBuf::from("collections/Portfolio"));
+
+    // removing it from the collection leaves the image and its rating
+    h.send(Msg::FvSelect(link, SelectHow::Replace));
+    h.send(Msg::FvDelete);
+    h.send(Msg::ConfirmYes);
+    h.settle();
+    assert!(h.state.index.collection_links.is_empty());
+    assert_eq!(h.state.output_link(&imgs[0]).unwrap().verdict, Some(Verdict::Good));
+
+    // "by project" is the project tree, folders and all
+    let name = h.state.project_entry().unwrap().name();
+    h.send(Msg::NewFolder(increart_core::Tree::Projects, PathBuf::new()));
+    h.settle();
+    h.send(Msg::EditRename("clients".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.send(Msg::MoveNode(increart_core::Tree::Projects, name.clone().into(), "clients".into()));
+    h.settle();
+    h.send(Msg::FvGo(PathBuf::from("collections/smart/by project")));
+    h.settle();
+    assert_eq!(names(&h), ["clients"]);
+    h.send(Msg::FvOpen("clients".into()));
+    h.settle();
+    assert_eq!(names(&h), std::slice::from_ref(&name));
+    h.send(Msg::FvOpen(name.clone()));
+    h.settle();
+    assert_eq!(h.state.folder_view.shown().len(), 2, "the project's kept images");
+    // a folder as the source shows its place in the tree
+    h.send(Msg::OutputSource(OutputSource::ProjectFolder("clients".into())));
+    h.settle();
+    assert_eq!(h.state.folder_view.path, PathBuf::from("collections/smart/by project/clients"));
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn input_library_and_inbox_folder_views_and_selection_keys() {
+    let mut h = Harness::new();
+    // two kept ideas (input/library), one in the inbox
+    for (t, add) in [("Fox", AddIdea::Keep), ("Fern", AddIdea::Keep), ("Lighthouse", AddIdea::Inbox)] {
+        h.send(Msg::Draft(IdeaDraft { title: t.into(), text: t.to_lowercase(), ..Default::default() }));
+        h.send(Msg::AddIdea(add));
+        h.settle();
+    }
+    let shown =
+        |h: &Harness| h.state.folder_view.shown().iter().map(|e| (e.name.clone(), e.info.clone())).collect::<Vec<_>>();
+
+    // Input library → Folder: ideas are folders, titled in their info
+    h.send(Msg::Tab(Tab::InputLibrary));
+    h.send(Msg::LibTab(LibTab::Folder));
+    h.settle();
+    assert_eq!(h.state.folder_view.place, FvPlace::InputLibrary);
+    let ideas = shown(&h);
+    assert_eq!(ideas.iter().map(|(_, info)| info.as_str()).collect::<Vec<_>>(), ["Fox", "Fern"]);
+    assert!(h.state.folder_view.shown().iter().all(|e| matches!(e.kind, EntryKind::Idea(_))));
+
+    // a folder; drag (move) the Fox idea into it
+    h.send(Msg::FvNewFolder);
+    h.settle();
+    h.send(Msg::EditRename("animals".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let fox = ideas.iter().find(|(_, i)| i == "Fox").unwrap().0.clone();
+    h.send(Msg::DropInto {
+        paths: vec![PathBuf::from("input/library").join(&fox)],
+        dest: PathBuf::from("input/library/animals"),
+        copy: false,
+    });
+    h.settle();
+    let loc =
+        |h: &Harness, title: &str| h.state.index.ideas.iter().find(|e| e.idea.title == title).unwrap().loc.clone();
+    assert_eq!(loc(&h, "Fox"), IdeaLoc::Library(PathBuf::from("animals")));
+    // the tree's folders drive the view on this tab
+    h.send(Msg::LibFolder(Some(PathBuf::from("animals"))));
+    h.settle();
+    assert_eq!(h.state.folder_view.path, PathBuf::from("input/library/animals"));
+    assert_eq!(shown(&h).len(), 1);
+    // ideas can't be renamed here; discarding one asks first
+    h.send(Msg::FvSelectAll);
+    h.send(Msg::FvRename);
+    assert!(h.state.renaming.is_none());
+    h.send(Msg::FvDelete);
+    h.send(Msg::ConfirmYes);
+    h.settle();
+    assert_eq!(loc(&h, "Fox"), IdeaLoc::Discarded);
+
+    // keys: type-ahead, arrows, rubber band (a set)
+    h.send(Msg::FvGo(PathBuf::from("input/library")));
+    h.settle();
+    let names: Vec<String> = h.state.folder_view.shown().iter().map(|e| e.name.clone()).collect();
+    assert_eq!(names[0], "animals", "folders first");
+    h.send(Msg::FvMoveCursor { by: 1, extend: false });
+    assert_eq!(h.state.folder_view.selected, [names[0].clone()].into(), "nothing selected: the first");
+    h.send(Msg::FvMoveCursor { by: 1, extend: true });
+    assert_eq!(h.state.folder_view.selected.len(), 2, "Shift extends from the anchor");
+    h.send(Msg::FvMoveCursor { by: -100, extend: false });
+    assert_eq!(h.state.folder_view.selected, [names[0].clone()].into(), "clamped at the start");
+    h.state.now = 100.0;
+    h.send(Msg::FvTypeAhead("a".into()));
+    h.send(Msg::FvTypeAhead("n".into()));
+    assert_eq!(h.state.folder_view.selected, ["animals".to_string()].into());
+    h.state.now = 102.0; // after a pause, typing starts over
+    h.send(Msg::FvTypeAhead("f".into()));
+    assert_eq!(h.state.folder_view.selected, [names[1].clone()].into(), "an idea by its title (Fern)");
+    h.send(Msg::FvSelectSet(names.iter().cloned().collect()));
+    assert_eq!(h.state.folder_view.selected.len(), names.len());
+
+    // Idea inbox → Folder: input/ without the library
+    h.send(Msg::Tab(Tab::IdeaInbox));
+    h.send(Msg::InboxTab(InboxTab::Folder));
+    h.settle();
+    assert_eq!(h.state.folder_view.place, FvPlace::Inbox);
+    let top: Vec<String> = shown(&h).into_iter().map(|(n, _)| n).collect();
+    assert!(top.contains(&"unreviewed".to_string()) && !top.contains(&"library".to_string()), "{top:?}");
+    h.send(Msg::FvOpen("unreviewed".into()));
+    h.settle();
+    assert_eq!(shown(&h).iter().map(|(_, i)| i.as_str()).collect::<Vec<_>>(), ["Lighthouse"]);
+    h.send(Msg::FvSelectAll);
+    h.send(Msg::FvDelete);
+    assert!(h.state.confirm.is_none(), "the inbox's ideas are reviewed in the Grid");
+
+    // collections: "smart" is the smart folders' name at the top
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    h.send(Msg::OutputTab(OutputTab::Folder));
+    h.settle();
+    h.send(Msg::FvNewFolder);
+    h.settle();
+    h.send(Msg::EditRename("Smart".into()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert!(h.errors().iter().any(|e| e.contains("reserved")), "{:?}", h.errors());
+    // each view kept its place
+    h.send(Msg::Tab(Tab::InputLibrary));
+    assert_eq!(h.state.folder_view.path, PathBuf::from("input/library"));
+}
+
+#[test]
+fn duplicate_keeps_the_runs_images_and_adds_the_picked_one() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    let run = Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    // the run had a reference and a start image
+    let dir = h.state.index.project(&project).unwrap().dir.clone();
+    let file = h.root.join(&dir).join("runs").join(run.as_str()).join("run.rsn");
+    let mut r: increart_core::model::Run = increart_core::rsnfmt::read(&file).unwrap();
+    r.refs = vec![imgs[1].clone()];
+    r.mode = increart_core::model::Mode::Edit { init: Some(imgs[1].clone()), strength: 0.4 };
+    increart_core::rsnfmt::write(&file, &r).unwrap();
+    h.rt.run(Effect::Rescan);
+    h.settle();
+
+    h.send(Msg::UseImage(imgs[0].clone(), UseTarget::DuplicateProject));
+    h.send(Msg::ConfirmNewProject);
+    h.settle();
+    let g = &h.state.generate;
+    assert_eq!(g.refs(), [imgs[1].clone(), imgs[0].clone()], "the run's reference, then the picked image");
+    assert_eq!((g.init(), g.strength), (Some(imgs[1].clone()), 0.4), "the run's start image, as it was");
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn image_list_roles_order_and_prompt_retag_with_confirmation() {
+    use increart_core::model::GenerateImage;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    let (a, b) = (imgs[0].clone(), imgs[1].clone());
+
+    // two references, named in the prompt
+    h.send(Msg::AddRefs(vec![a.clone(), b.clone()]));
+    let mut f = h.state.generate.clone();
+    f.prompt = "the fox from <image1> beside the cat from <Image 2>".into();
+    h.send(Msg::Generate(f));
+    assert_eq!(h.state.generate.refs(), [a.clone(), b.clone()]);
+    assert!(h.state.retag.is_none(), "adding at the end renumbers nothing");
+
+    // b becomes the start image too (one start image only)
+    h.send(Msg::ImageRoles { index: 1, reference: true, start: true });
+    h.send(Msg::ImageRoles { index: 0, reference: true, start: true });
+    assert_eq!(h.state.generate.init(), Some(a.clone()));
+    assert_eq!(h.state.generate.images.iter().filter(|i| i.start).count(), 1);
+
+    // moving swaps the numbers: asks before touching the prompt
+    h.send(Msg::MoveImage { from: 1, to: 0 });
+    let r = h.state.retag.clone().unwrap();
+    assert_eq!(r.changes, [(1, Some(2)), (2, Some(1))]);
+    assert_eq!(h.state.generate.prompt, "the fox from <image1> beside the cat from <Image 2>", "not yet");
+    h.send(Msg::RetagConfirm);
+    h.settle();
+    assert_eq!(h.state.generate.prompt, "the fox from <image2> beside the cat from <image1>");
+    assert!(h.state.retag.is_none());
+
+    // parking b (neither role): <image1> is gone; leaving the prompt as it is
+    h.send(Msg::ImageRoles { index: 0, reference: false, start: false });
+    assert_eq!(h.state.retag.as_ref().unwrap().changes, [(1, None), (2, Some(1))]);
+    h.send(Msg::RetagDismiss);
+    assert_eq!(h.state.generate.prompt, "the fox from <image2> beside the cat from <image1>");
+    assert_eq!(h.state.generate.images.len(), 2, "parked, still in the list");
+    assert_eq!(h.state.generate.refs(), std::slice::from_ref(&a));
+
+    // removing the start image clears it; the draft keeps the list as is
+    h.send(Msg::ClearInit);
+    assert!(h.state.generate.init().is_none());
+    h.send(Msg::Tick(h.state.now + 10.0));
+    h.settle();
+    let d = h.state.index.project(&project).unwrap().draft.clone().unwrap();
+    assert_eq!(
+        d.images,
+        [
+            GenerateImage { image: b.clone(), reference: false, start: false },
+            GenerateImage { image: a.clone(), reference: true, start: false }
+        ]
+    );
+    assert_eq!((d.refs, d.init), (vec![a.clone()], None), "what it sends, for older readers");
+    // and the history kept the prompt before the tags changed
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn outside_changes_are_picked_up_and_the_drop_folder_imports_itself() {
+    let mut h = Harness::new();
+    let until = |h: &mut Harness, what: &str, ok: &dyn Fn(&AppState) -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !ok(&h.state) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for: {what}");
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                h.send(m);
+            }
+        }
+    };
+    until(&mut h, "the watch to start", &|s| {
+        s.watch_status.contains("watching") || s.watch_status.contains("checking")
+    });
+
+    // a phone sync drops a text file into inbox_drop: it becomes an idea
+    std::fs::write(h.root.join("input/inbox_drop/note.txt"), "a heron at dawn").unwrap();
+    until(&mut h, "the dropped file imported", &|s| {
+        s.unreviewed_ideas().iter().any(|e| e.idea.text == "a heron at dawn")
+    });
+    assert!(h.root.join("input/inbox_drop/imported/note.txt").is_file(), "original kept in imported/");
+    h.settle();
+
+    // a file manager deletes that idea's folder: it leaves the inbox
+    let dir = h.state.unreviewed_ideas()[0].dir.clone();
+    std::fs::remove_dir_all(h.root.join(dir)).unwrap();
+    until(&mut h, "the deleted idea gone", &|s| s.unreviewed_ideas().is_empty());
+
+    // a folder made outside appears in the project tree
+    std::fs::create_dir(h.root.join("projects/made-outside")).unwrap();
+    until(&mut h, "the new folder listed", &|s| s.index.project_folders.contains(&PathBuf::from("made-outside")));
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn prompt_presets_apply_insert_save_and_edit() {
+    use increart_core::HistoryKey;
+    use increart_core::history::HistoryKind;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let p = h.state.project.clone().unwrap();
+    let tasks = &h.state.prompt_presets.tasks;
+    let (cel, solid) = (
+        tasks[0].presets.iter().position(|x| x.name == "Anime cel-shaded").unwrap(),
+        tasks[1].presets.iter().position(|x| x.name == "Solid colour background").unwrap(),
+    );
+
+    // a click replaces the prompt; the old one goes to the history
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    h.send(Msg::Generate(f));
+    h.send(Msg::PresetsPanel(true));
+    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Task(0), "no favourites: the first task");
+    h.send(Msg::ApplyPreset { task: 0, preset: cel, insert_at: None });
+    h.settle();
+    assert!(h.state.generate.prompt.starts_with("Convert <image1> into a flat 2D anime cel-shaded"));
+    let n = h.state.generate.prompt.chars().count();
+    assert_eq!(h.state.prompt_select, Some(n..n), "no slot: the cursor at the end");
+    let e = history(&mut h, HistoryKey::Project(p));
+    assert_eq!((e[0].kind.clone(), e[0].text.as_str()), (HistoryKind::BeforePreset, "a fox"));
+
+    // Shift+click inserts at the cursor, its {slot} selected; Queue refuses it
+    h.send(Msg::PromptSelected);
+    let mut f = h.state.generate.clone();
+    f.prompt = "ab".into();
+    h.send(Msg::Generate(f));
+    h.send(Msg::ApplyPreset { task: 1, preset: solid, insert_at: Some(1) });
+    let prompt = h.state.generate.prompt.clone();
+    assert!(prompt.starts_with("a Replace the background") && prompt.ends_with("clean edges. b"), "{prompt}");
+    let sel = h.state.prompt_select.clone().unwrap();
+    assert_eq!(prompt.chars().skip(sel.start).take(sel.len()).collect::<String>(), "{colour}");
+    h.send(Msg::PromptSelected);
+    h.send(Msg::QueueGenerate);
+    assert!(h.errors().last().unwrap().contains("Fill in {colour}"), "{:?}", h.errors());
+    assert!(h.state.prompt_select.is_some(), "the slot selected again");
+
+    // favourites; not saved without a presets folder
+    assert!(h.send(Msg::PresetFavourite(0, cel)).is_empty());
+    let folder = h.root.join("prompt-presets");
+    h.state.presets_path = Some(folder.clone());
+    let fx = h.send(Msg::PresetFavourite(1, solid));
+    assert!(matches!(&fx[..], [Effect::SavePresets(..)]));
+    h.settle();
+    let load = || increart_core::prompts::PromptPresets::load_dir(&folder).unwrap().0;
+    assert_eq!(load(), h.state.prompt_presets);
+
+    // Save as preset: a name taken in the task is refused, then saved
+    h.send(Msg::PresetsShow(PresetsView::Task(1)));
+    h.send(Msg::OpenSavePreset);
+    let mut d = h.state.save_preset.clone().unwrap();
+    assert_eq!((d.task, d.preset.prompt.as_str()), (1, prompt.as_str()));
+    d.preset.name = "solid colour BACKGROUND".into();
+    h.send(Msg::EditSavePreset(d.clone()));
+    h.send(Msg::ConfirmSavePreset);
+    assert!(h.state.save_preset.as_ref().unwrap().error.as_ref().unwrap().contains("already has"));
+    d.preset.name = "  Mine ".into();
+    h.send(Msg::EditSavePreset(d));
+    h.send(Msg::ConfirmSavePreset);
+    assert!(h.state.save_preset.is_none());
+    assert_eq!(h.state.prompt_presets.tasks[1].presets.last().unwrap().name, "Mine");
+    h.settle();
+    assert!(folder.join("Remove background/Mine.rsn").is_file());
+    assert_eq!(load(), h.state.prompt_presets);
+
+    // the editor: checked on Save, dropped on Close, defaults restorable
+    h.send(Msg::OpenPresetEditor(1, None));
+    let mut e = h.state.presets_editor.clone().unwrap();
+    e.list.tasks[2].name = " ".into();
+    h.send(Msg::EditPresetEditor(e.clone()));
+    h.send(Msg::SavePresetEditor);
+    assert_eq!(h.state.presets_editor.as_ref().unwrap().error.as_deref(), Some("A task has no name"));
+    e.list.tasks.truncate(2);
+    h.send(Msg::EditPresetEditor(e));
+    h.send(Msg::SavePresetEditor);
+    assert!(h.state.presets_editor.is_none());
+    assert_eq!(h.state.prompt_presets.tasks.len(), 2);
+    h.send(Msg::OpenPresetEditor(0, None));
+    h.send(Msg::RestorePresetDefaults);
+    h.send(Msg::SavePresetEditor);
+    assert_eq!(h.state.prompt_presets, increart_core::prompts::builtin());
+    h.settle();
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "only default-presets.rsn left");
+}
+
+#[test]
+fn switching_libraries_keeps_the_servers_and_can_go_back() {
+    let mut h = Harness::new();
+    let first = h.root.clone();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_eq!(h.state.index.projects.len(), 1);
+    h.state.servers = vec![ServerStatus {
+        name: "box".into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    }];
+    let presets = h.state.prompt_presets.clone();
+
+    // the library screen, then back: nothing changes
+    h.send(Msg::OtherLibrary(None));
+    assert!(matches!(h.state.phase, Phase::Library(_)) && h.state.switching.is_some());
+    h.send(Msg::CancelSwitch);
+    assert_eq!((h.state.phase.clone(), h.state.library.as_deref()), (Phase::Main, Some(first.as_path())));
+
+    // create another: fresh state, same servers, straight to the main window
+    let second = h._tmp.path().join("second");
+    h.send(Msg::OtherLibrary(Some((LibraryWizard::Create, second.to_string_lossy().into()))));
+    h.send(Msg::CreateLibrary);
+    h.settle();
+    assert_eq!(h.state.phase, Phase::Main);
+    assert_eq!(h.state.library.as_deref(), Some(second.as_path()));
+    assert!(h.state.index.projects.is_empty() && h.state.project.is_none());
+    assert_eq!(h.state.servers.len(), 1);
+    assert_eq!(h.state.prompt_presets, presets);
+    assert!(h.state.switching.is_none() && h.state.nav.back.is_empty());
+
+    // and back to the first from the menu (the open one is ignored)
+    assert!(h.send(Msg::SwitchLibrary(second.to_string_lossy().into())).is_empty());
+    h.send(Msg::SwitchLibrary(first.to_string_lossy().into()));
+    h.settle();
+    assert_eq!(h.state.library.as_deref(), Some(first.as_path()));
+    assert_eq!(h.state.index.projects.len(), 1);
+    assert_eq!(h.state.config.recent_libraries[0], first.to_string_lossy());
+
+    // while runs generate, it asks first
+    h.state.active_runs.insert(h.state.index.projects[0].project.id.clone());
+    h.send(Msg::SwitchLibrary(second.to_string_lossy().into()));
+    assert!(h.state.confirm.as_ref().unwrap().text.contains("1 run(s) are generating"));
+    assert_eq!(h.state.phase, Phase::Main);
+}
+
+#[test]
+fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
+    use increart_core::prompts::{PromptPreset, PromptPresets, PromptTask, SweepSource};
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let preset =
+        |name: &str, prompt: &str| PromptPreset { name: name.into(), prompt: prompt.into(), ..Default::default() };
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Looks".into(),
+            description: String::new(),
+            presets: vec![
+                preset("Clay", "claymation"),
+                preset("Ink", "ink in a {mood} mood"),
+                preset("Restyle", "<image1> as a woodcut"),
+            ],
+        }],
+    };
+
+    // Selected: ticked in the Presets window; nothing ticked is refused
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox, {preset}".into();
+    f.sweep.on = true;
+    f.seeds = 2;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    assert!(h.errors().last().unwrap().contains("No styles chosen"), "{:?}", h.errors());
+    for p in 0..3 {
+        h.send(Msg::SweepToggle(0, p));
+    }
+    // Tick all / Untick all for those listed, Clear all ticks for every one
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1)], false));
+    assert_eq!(h.state.generate.sweep.selected.len(), 1);
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1), (0, 2)], true));
+    assert_eq!(h.state.generate.sweep.selected.len(), 3, "no preset twice");
+    h.send(Msg::SweepClearTicks);
+    assert!(h.state.generate.sweep.selected.is_empty());
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1), (0, 2)], true));
+
+    // the window opens on the Ticked view, which keeps an unticked one
+    // listed; a tick whose preset is gone can be unticked by its key
+    h.send(Msg::PresetsPanel(true));
+    let all = h.state.generate.sweep.selected.clone();
+    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(all.clone()));
+    h.send(Msg::SweepToggle(0, 1));
+    assert_eq!(h.state.generate.sweep.selected.len(), 2);
+    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(all.clone()), "still listed");
+    h.send(Msg::SweepToggle(0, 1));
+    let gone = increart_core::prompts::PresetKey { task: "Looks".into(), name: "Old".into() };
+    h.state.generate.sweep.selected.push(gone.clone());
+    h.send(Msg::SweepToggleKey(gone));
+    let sorted = |mut v: Vec<_>| {
+        v.sort();
+        v
+    };
+    assert_eq!(sorted(h.state.generate.sweep.selected.clone()), sorted(all));
+    h.send(Msg::PresetsShow(PresetsView::Task(0)));
+    h.send(Msg::SweepToggle(0, 1));
+    h.send(Msg::PresetsShow(PresetsView::Ticked(vec![])));
+    let now = h.state.generate.sweep.selected.clone();
+    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(now), "listed afresh");
+    h.send(Msg::SweepToggle(0, 1));
+    h.send(Msg::PresetsPanel(false));
+    // the one needing a reference image is left out; {mood} asked once
+    let err = update::sweep_runs(&h.state).unwrap_err();
+    assert!(err.contains("Fill in {mood}"), "{err}");
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.insert("mood".into(), "gloomy".into());
+    h.send(Msg::Generate(f));
+    let (runs, unfit) = update::sweep_runs(&h.state).unwrap();
+    assert_eq!(unfit, 1);
+    let label = h.state.generate.label.clone();
+    let names: Vec<_> = runs.iter().map(|(f, _)| (f.label.clone(), f.prompt.clone())).collect();
+    assert_eq!(
+        names,
+        [
+            (format!("{label} · Clay"), "a fox, claymation".to_string()),
+            (format!("{label} · Ink"), "a fox, ink in a gloomy mood".to_string()),
+        ]
+    );
+    // one at a time: asks to spread the sweep instead; Cancel queues nothing
+    h.send(Msg::JobOrder(increart_core::scheduler::Order::Sequential));
+    h.send(Msg::QueueGenerate);
+    assert_eq!(h.state.sweep_order_ask, Some(false));
+    h.send(Msg::SweepOrderAnswer(None));
+    h.settle();
+    assert!(h.state.project_entry().unwrap().runs.is_empty(), "cancelled");
+    h.send(Msg::QueueGenerate);
+    let fx = h.send(Msg::SweepOrderAnswer(Some(true)));
+    assert!(fx.iter().any(|f| matches!(f, Effect::SetJobOrder(increart_core::scheduler::Order::Spread))));
+    assert_eq!(h.state.config.job_order, increart_core::scheduler::Order::Spread);
+    assert!(h.state.sweep_order_ask.is_none() && !h.state.sweep_order_asked);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.runs.len(), 2, "{:?}", h.errors());
+    assert!(p.runs.iter().all(|r| r.sweep.as_ref().unwrap().name == label));
+    assert_eq!(
+        p.runs[0].all_seeds().map(|(_, s)| s).collect::<Vec<_>>(),
+        p.runs[1].all_seeds().map(|(_, s)| s).collect::<Vec<_>>(),
+        "the same seeds"
+    );
+    assert_eq!(h.state.generate.label, "r01", "a sweep counts as one label");
+    let project = p.project.id.clone();
+    let ids: Vec<_> = {
+        let mut v: Vec<_> = p.runs.iter().map(|r| r.id.clone()).collect();
+        v.sort();
+        v
+    };
+    let seeds: Vec<u64> = p.runs[0].all_seeds().map(|(_, s)| s).collect();
+
+    // the label is taken now; a big sweep asks first
+    let mut f = h.state.generate.clone();
+    f.label = label.clone();
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    assert!(h.errors().last().unwrap().contains("already has"), "{:?}", h.errors());
+    let mut f = h.state.generate.clone();
+    f.label = "big".into();
+    f.seeds = 60;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    assert!(h.state.confirm.as_ref().unwrap().text.contains("120 images"));
+    h.state.confirm = None;
+
+    // three of four images in; the sheet shows the missing one pending
+    Library_::steal(&h.root).write_seeds(&ids[0], &seeds);
+    Library_::steal(&h.root).write_seeds(&ids[1], &seeds[..1]);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    // from an image in Review, its sheet opens with that image selected
+    h.send(Msg::ReviewScope(Some(project.clone())));
+    let at = h.state.review_queue().iter().position(|o| o.name.run == ids[1]).unwrap();
+    h.send(Msg::ReviewCursor(at));
+    h.send(Msg::ReviewSweep(project.clone(), label.clone()));
+    assert_eq!(h.state.review_view, ReviewView::Sheet);
+    assert_eq!(h.state.sheet_cell, (1, 0));
+    // the name filter: rows with every word, the seed columns stay
+    h.send(Msg::SheetFilter("IN".into()));
+    let sh = h.state.sheet().unwrap();
+    assert_eq!((sh.rows.len(), sh.hidden, sh.seeds.len()), (1, 1, 2));
+    assert_eq!(sh.rows[0].run.sweep.as_ref().unwrap().preset, "Ink");
+    assert_eq!(h.state.sheet_cell, (0, 0));
+    h.send(Msg::SheetFilter("ink nothing".into()));
+    assert!(h.state.sheet().unwrap().rows.is_empty());
+    h.send(Msg::SheetFilter(String::new()));
+    assert_eq!(h.state.sheet().unwrap().rows.len(), 2);
+    // zoom: kept in the config, within the thumbnails' size
+    assert_eq!(h.state.sheet_cell_size(), SHEET_CELL_DEFAULT);
+    h.send(Msg::SheetZoom { size: 5000, save: true });
+    assert_eq!(h.state.sheet_cell_size(), SHEET_CELL_MAX);
+    h.send(Msg::SheetZoom { size: 10, save: false });
+    assert_eq!(h.state.config.sheet_cell, SHEET_CELL_MIN);
+    h.send(Msg::SheetCell(0, 0));
+    assert_eq!(h.state.review_queue().len(), 3);
+    let sh = h.state.sheet().unwrap();
+    assert_eq!(sh.seeds, seeds);
+    assert!(matches!(sh.rows[1].cells[1], SheetCell::Pending));
+
+    // keys rate the selected cell and move on; row buttons rate the rest
+    h.send(Msg::SheetRate(Verdict::Good));
+    h.settle();
+    assert_eq!(h.state.sheet_cell, (0, 1));
+    h.send(Msg::SheetRow(0, Verdict::Bad));
+    h.settle();
+    let sh = h.state.sheet().unwrap();
+    let v: Vec<_> = sh.rows[0]
+        .cells
+        .iter()
+        .map(|c| match c {
+            SheetCell::Image(o) => o.verdict,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(v, [Some(Verdict::Good), Some(Verdict::Bad)], "the reviewed one kept its verdict");
+    h.send(Msg::SheetMove(5, 5));
+    assert_eq!(h.state.sheet_cell, (1, 1));
+
+    // the large preview steps through the sheet's images row by row,
+    // skipping the pending cell, and the selected cell follows
+    let row0: Vec<_> = match &h.state.sheet().unwrap().rows[0].cells[..] {
+        [SheetCell::Image(a), SheetCell::Image(b)] => vec![a.image.clone(), b.image.clone()],
+        c => panic!("{c:?}"),
+    };
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::Preview(Some(row0[1].clone())));
+    assert_eq!(h.state.preview_position(), Some((1, 3)));
+    h.send(Msg::PreviewStep(1));
+    assert_eq!(h.state.preview_position(), Some((2, 3)));
+    assert_eq!(h.state.sheet_cell, (1, 0), "on to the next row");
+    h.send(Msg::PreviewStep(1));
+    assert_eq!(h.state.preview_position(), Some((2, 3)), "stops at the last");
+    h.send(Msg::PreviewStep(-2));
+    assert_eq!(h.state.preview.as_ref(), Some(&row0[0]));
+    assert_eq!(h.state.sheet_cell, (0, 0));
+    // rating there re-rates and steps on
+    h.send(Msg::PreviewRate(Verdict::Neutral));
+    h.settle();
+    assert_eq!(h.state.preview.as_ref(), Some(&row0[1]));
+    assert!(
+        matches!(&h.state.sheet().unwrap().rows[0].cells[0], SheetCell::Image(o) if o.verdict == Some(Verdict::Neutral))
+    );
+    // ↑ / ↓: the same seed, a style up or down; the pending cell below
+    // row 0 seed 1 has no image, so that stays
+    h.send(Msg::PreviewRow(1));
+    assert_eq!(h.state.preview.as_ref(), Some(&row0[1]));
+    h.send(Msg::PreviewStep(-1));
+    h.send(Msg::PreviewRow(1));
+    assert_eq!(h.state.sheet_cell, (1, 0));
+    assert_eq!(h.state.preview_position(), Some((2, 3)));
+    h.send(Msg::PreviewRow(-1));
+    assert_eq!(h.state.preview.as_ref(), Some(&row0[0]));
+    assert_eq!(h.state.sheet_cell, (0, 0));
+    h.send(Msg::Preview(None));
+
+    // a job's details open for a run that exists
+    h.send(Msg::JobInfo(Some(ids[0].clone())));
+    assert_eq!(h.state.job_info.as_ref(), Some(&ids[0]));
+    h.send(Msg::JobInfo(Some("2001.01.01-00.00-0000".parse().unwrap())));
+    assert!(h.state.job_info.is_none(), "no such run");
+
+    // "Use this style": its run back in Generate as a single prompt
+    h.send(Msg::RunInGenerate(ids[1].clone()));
+    assert_eq!(h.state.generate.prompt, "a fox, ink in a gloomy mood");
+    assert!(!h.state.generate.sweep.on);
+    assert_eq!(h.state.generate.sweep.source, SweepSource::Selected);
+
+    // leaving the scope drops the sheet
+    h.send(Msg::ReviewScope(None));
+    assert_eq!((h.state.review_sweep.as_ref(), h.state.review_view), (None, ReviewView::Single));
+
+    // a single run next to the sweep: Review's scope lists both, the
+    // sweep once, and scopes to the run alone
+    let mut f = h.state.generate.clone();
+    f.label = "single".into();
+    f.sweep.on = false;
+    f.seeds = 1;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    let single = p.runs.iter().find(|r| r.sweep.is_none()).unwrap().clone();
+    let rows: Vec<_> = h
+        .state
+        .review_runs(p)
+        .into_iter()
+        .map(|r| match r {
+            ReviewRun::Single(r) => r.label.clone(),
+            ReviewRun::Sweep(name) => format!("sweep {name}"),
+        })
+        .collect();
+    assert_eq!(rows, ["single".to_string(), format!("sweep {label}")], "newest first");
+    let seeds: Vec<u64> = single.all_seeds().map(|(_, s)| s).collect();
+    Library_::steal(&h.root).write_seeds(&single.id, &seeds);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::ReviewSweep(project.clone(), label.clone()));
+    h.send(Msg::ReviewRun(project.clone(), single.id.clone()));
+    assert_eq!((h.state.review_sweep.as_ref(), h.state.review_view), (None, ReviewView::Single));
+    let q = h.state.review_queue();
+    assert!(!q.is_empty() && q.iter().all(|o| o.name.run == single.id), "only the run's images");
+    let n = q.len();
+    h.send(Msg::ReviewScope(Some(project.clone())));
+    assert!(h.state.review_run.is_none());
+    assert!(h.state.review_queue().len() > n);
+
+    // picking on the sheet: Ctrl+click starts from the cursor, Shift+click
+    // adds the range from the last picked
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::ReviewSweep(project.clone(), label.clone()));
+    h.send(Msg::SheetCell(0, 0));
+    let all = h.state.pickable();
+    assert_eq!(all.len(), 3, "two styles: two images and one");
+    h.send(Msg::PickImage(all[2].clone(), SelectHow::Toggle));
+    assert_eq!(h.state.picked, [all[0].clone(), all[2].clone()]);
+    h.send(Msg::PickImage(all[1].clone(), SelectHow::Range));
+    assert_eq!(h.state.picked, [all[0].clone(), all[2].clone(), all[1].clone()]);
+    h.send(Msg::PickImage(all[2].clone(), SelectHow::Toggle));
+    h.send(Msg::PickImage(all[2].clone(), SelectHow::Toggle));
+    assert_eq!(h.state.picked.last(), Some(&all[2]), "toggled off and on: picked last");
+
+    // tiled as they sit on the sheet, captioned by style
+    h.send(Msg::OpenTile);
+    let cells: Vec<_> = h.state.tile.as_ref().unwrap().layout.tiles.iter().map(|t| (t.col, t.row)).collect();
+    assert_eq!(cells, [(0, 0), (1, 0), (0, 1)], "in pick order, where they sit on the sheet");
+    h.send(Msg::TileCaptions(CaptionFill::Style));
+    let captions: Vec<_> = h.state.tile.as_ref().unwrap().layout.tiles.iter().map(|t| t.caption.clone()).collect();
+    assert_eq!(captions, ["Clay", "Clay", "Ink"]);
+    // a text block in the hole, a title above: composed, not a source
+    h.send(Msg::TileAddText(1, 1));
+    h.send(Msg::TileText(3, "Clay vs Ink".into()));
+    h.send(Msg::TileTitle("Styles".into(), "r02".into()));
+    let t = h.state.tile.as_ref().unwrap();
+    assert_eq!((t.selected, t.layout.tiles[3].col, t.layout.tiles[3].row), (Some(3), 1, 1));
+    h.send(Msg::TileCaptions(CaptionFill::Style));
+    assert_eq!(h.state.tile.as_ref().unwrap().layout.tiles[3].caption, "", "text keeps no caption");
+    // a caption format: kept as typed, filled per image (unknown ones stay)
+    h.send(Msg::TileCaptionFormat("#{n} {style} · seed {seed} {nope}".into()));
+    let t = h.state.tile.as_ref().unwrap();
+    assert_eq!(t.layout.tiles[3].caption, "", "not text blocks");
+    let seed = h.state.output_link(t.layout.tiles[1].image().unwrap()).unwrap().name.seed;
+    let shown = h.state.caption_text(&t.layout.tiles[1].caption, t.layout.tiles[1].image(), 2);
+    assert_eq!(shown, format!("#2 Clay · seed {seed} {{nope}}"));
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("tiles");
+    h.send(Msg::Picked(PickKind::TileFile, vec![file.clone()]));
+    h.settle();
+    let png = image::open(file.with_extension("png")).unwrap();
+    assert!(png.width() > 0 && png.height() > 0, "{:?}", h.errors());
+    h.send(Msg::TileOut(TileTarget::Library));
+    h.settle();
+    use increart_core::model::IdeaSource;
+    let tiled = h.state.index.ideas.iter().find(|e| matches!(e.idea.source, IdeaSource::Tiled { .. })).unwrap();
+    assert_eq!(tiled.idea.source, IdeaSource::Tiled { images: h.state.picked.clone() });
+    assert_eq!(tiled.idea.images.len(), 1);
+    h.send(Msg::CloseTile);
+
+    // rated together; the sheet keeps them picked, another tab drops them
+    h.send(Msg::RatePicked(Verdict::Bad));
+    h.settle();
+    assert!(all.iter().all(|i| h.state.output_link(i).unwrap().verdict == Some(Verdict::Bad)));
+    assert_eq!(h.state.picked.len(), 3);
+    h.send(Msg::Tab(Tab::Projects));
+    assert!(h.state.picked.is_empty());
+
+    // a kept image: its run under the project in the Output library
+    h.send(Msg::PickSet(vec![all[0].clone()]));
+    h.send(Msg::RatePicked(Verdict::Good));
+    h.settle();
+    let run = h.state.output_link(&all[0]).unwrap().name.run.clone();
+    let p = h.state.index.projects.iter().find(|p| p.project.id == project).unwrap();
+    let kept: Vec<_> = h.state.kept_runs(p).into_iter().map(|(r, n)| (r.id.clone(), n)).collect();
+    assert_eq!(kept, [(run, 1)]);
+    // the project tree's runs: hidden (kept in config)
+    h.send(Msg::ProjectRuns(false));
+    h.settle();
+    assert!(h.state.config.hide_project_runs);
+}
+
+#[test]
+fn image_usage_counts_runs_as_ref_and_as_start() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    let first = Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    let (a, b) = (imgs[0].clone(), imgs[1].clone());
+    assert_eq!(h.state.usage(&a), Usage::default());
+    assert_eq!(h.state.usage(&a).label(), None);
+
+    // a as <image1>, b as the start image
+    h.send(Msg::AddRefs(vec![a.clone(), b.clone()]));
+    h.send(Msg::ImageRoles { index: 1, reference: false, start: true });
+    let mut f = h.state.generate.clone();
+    f.prompt = "the fox from <image1>".into();
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    assert_eq!(h.state.usage(&a), Usage { ref_runs: 1, start_runs: 0, images: 0 });
+    assert_eq!(h.state.usage(&b), Usage { ref_runs: 0, start_runs: 1, images: 0 });
+    assert_eq!(h.state.usage(&a).label().unwrap(), "ref in 1 run · 0 images");
+    // a second run with a as a ref again
+    h.send(Msg::ImageRoles { index: 1, reference: false, start: false });
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert_eq!(h.state.usage(&a).ref_runs, 2);
+    assert_eq!(h.state.usage(&b).start_runs, 1);
+    assert!(h.state.index.run(&first).is_some());
+}
+
+#[test]
+fn generate_history_keeps_settings_and_runs() {
+    use increart_core::HistoryKey;
+    use increart_core::history::HistoryKind;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let p = h.state.project.clone().unwrap();
+    let key = HistoryKey::Project(p.clone());
+    let r01 = Library_::steal(&h.root).write_two(&p);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    let edit_at = |h: &mut Harness, t: f64, change: &dyn Fn(&mut GenerateForm)| {
+        h.send(Msg::Tick(t));
+        let mut f = h.state.generate.clone();
+        change(&mut f);
+        h.send(Msg::Generate(f));
+        h.send(Msg::Tick(t + 2.5));
+        h.settle();
+    };
+
+    // the whole form is kept, and the run it follows
+    h.send(Msg::AddRefs(vec![imgs[0].clone()]));
+    edit_at(&mut h, 100.0, &|f| {
+        f.prompt = "a fox from <image1>".into();
+        f.label = "r02".into();
+        f.steps = 30;
+    });
+    let e = history(&mut h, key.clone());
+    let form = e[0].form.as_ref().expect("the form");
+    assert_eq!((form.steps, form.refs.clone()), (30, vec![imgs[0].clone()]));
+    assert_eq!(e[0].after.as_ref(), Some(&r01));
+
+    // queued: the checkpoint names its run
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let r02 = h.state.project_entry().unwrap().runs.iter().find(|r| r.label == "r02").unwrap().id.clone();
+    let e = history(&mut h, key.clone());
+    assert_eq!(e[0].kind, HistoryKind::Queued("r02".into()));
+    assert_eq!((e[0].runs.clone(), e[0].after.clone()), (vec![r02.clone()], Some(r01.clone())));
+    assert_eq!(e[0].form.as_ref().unwrap().steps, 30);
+
+    // a settings change is an entry; another one soon after merges into it
+    edit_at(&mut h, 110.0, &|f| f.steps = 40);
+    edit_at(&mut h, 120.0, &|f| f.cfg = 3.5);
+    h.send(Msg::OpenHistory(key.clone()));
+    h.settle();
+    let v = h.state.history_view.clone().unwrap();
+    // (the edit queued unchanged became the queued checkpoint)
+    assert_eq!(v.entries.len(), 2, "{:?}", v.entries.iter().map(|e| &e.kind).collect::<Vec<_>>());
+    assert_eq!((v.entries[0].kind.clone(), v.after[0].clone()), (HistoryKind::Edit, Some(r02.clone())));
+    assert_eq!(v.changes(0), ["steps 30 → 40", "cfg 2 → 3.5"]);
+    h.send(Msg::HistorySettingsOnly(true));
+    assert_eq!(h.state.history_view.as_ref().unwrap().shown().len(), 1);
+    h.send(Msg::HistorySettingsOnly(false));
+
+    // Restore all: settings and images back; the label stays the next run's
+    let label = h.state.generate.label.clone();
+    h.send(Msg::RemoveImage(0));
+    edit_at(&mut h, 200.0, &|f| f.prompt = "a cat".into());
+    assert!(h.state.generate.images.is_empty());
+    h.send(Msg::OpenHistory(key.clone()));
+    h.settle();
+    let i = h.state.history_view.as_ref().unwrap().entries.iter().position(|e| e.runs == [r02.clone()]).unwrap();
+    h.send(Msg::HistorySelect(i));
+    h.send(Msg::HistoryRestore(Restore::All));
+    h.settle();
+    let g = &h.state.generate;
+    assert_eq!((g.prompt.as_str(), g.steps, g.cfg), ("a fox from <image1>", 30, 2.0));
+    assert_eq!(g.refs(), vec![imgs[0].clone()]);
+    assert_eq!(g.label, label);
+
+    // Show in history: what led to r02, at its checkpoint
+    h.send(Msg::RunHistory(r02.clone()));
+    h.settle();
+    let v = h.state.history_view.clone().unwrap();
+    assert_eq!(v.run_filter, Some((r02.clone(), Some(r01.clone()))));
+    assert_eq!(v.runs_of(v.selected), std::slice::from_ref(&r02));
+    let shown: Vec<_> = v.shown().iter().map(|r| r.entry.kind.clone()).collect();
+    assert_eq!(shown, [HistoryKind::Queued("r02".into())], "not the edits since");
+    h.send(Msg::CloseHistory);
+
+    // older entries (prompt only) find their runs by label and time
+    let file = h.root.join("projects/new project/prompt-history.jsonl");
+    let now = increart_core::id::now();
+    std::fs::remove_file(&file).unwrap();
+    for (kind, text) in [(HistoryKind::Queued("r02".into()), "x"), (HistoryKind::Edit, "y")] {
+        let e = increart_core::history::HistoryEntry::text(now, kind, text.into(), String::new());
+        increart_core::history::record(&file, &e, false).unwrap();
+    }
+    h.send(Msg::OpenHistory(key.clone()));
+    h.settle();
+    let v = h.state.history_view.clone().unwrap();
+    assert_eq!(v.runs, [vec![], vec![r02.clone()]]);
+    assert_eq!(v.after[0], Some(r02.clone()), "the newest run before it");
+    h.send(Msg::CloseHistory);
+
+    // an image gone from the library is left out of a restore
+    std::fs::remove_file(h.root.join(imgs[0].rel_path())).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    h.send(Msg::Tick(300.0));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    h.send(Msg::OpenHistory(key));
+    h.settle();
+    h.send(Msg::HistorySelect(0));
+    h.send(Msg::HistoryRestore(Restore::All));
+    h.settle();
+    assert!(h.state.generate.images.is_empty());
+    assert!(h.errors().iter().any(|e| e.contains("no longer in the library")), "{:?}", h.errors());
+}
+
+fn plays(fx: &[Effect]) -> usize {
+    fx.iter().filter(|f| matches!(f, Effect::PlaySound { test: false, .. })).count()
+}
+
+fn idle_server(s: &mut AppState, i: usize, idle: bool) {
+    update(
+        s,
+        Msg::Engine(increart_core::engine::Event::Server { server: i, state: "ready".into(), model: None, idle }),
+    );
+}
+
+#[test]
+fn gpu_idle_alert_repeats_while_it_lasts() {
+    let mut s = dialog_state(vec![], None);
+    let mut n = s.config.notifications.clone();
+    n.gpu_idle.on = true;
+    n.gpu_idle.threshold = 5;
+    n.gpu_idle.repeat_minutes = 10;
+    n.player = "true {file}".into();
+    update(&mut s, Msg::SetNotifications(n));
+    let gpu = |name: &str| ServerStatus {
+        name: name.into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    };
+    s.servers = vec![gpu("a"), gpu("b")];
+    let at = |s: &mut AppState, min: f64| plays(&update(s, Msg::Tick(min * 60.0)));
+
+    // no engine: nothing
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 6.0), 0);
+    s.engine_running = true;
+    assert_eq!(at(&mut s, 4.0), 0, "under the threshold");
+    assert_eq!(at(&mut s, 5.0), 1);
+    assert_eq!(s.alerts.idle_text.as_deref(), Some("a idle for 5 min"));
+    assert!(s.alerts.attention);
+    assert_eq!(at(&mut s, 10.0), 0, "not again before the repeat");
+    assert_eq!(at(&mut s, 15.0), 1);
+
+    // work resets it; idle again counts from then
+    idle_server(&mut s, 0, false);
+    assert_eq!(at(&mut s, 16.0), 0);
+    assert!(s.alerts.idle_text.is_none());
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 20.0), 0);
+    assert_eq!(at(&mut s, 21.0), 1);
+
+    // "all GPUs": b has to be idle too
+    let mut n = s.config.notifications.clone();
+    n.all_gpus = true;
+    update(&mut s, Msg::SetNotifications(n));
+    assert_eq!(at(&mut s, 40.0), 0);
+    idle_server(&mut s, 1, true);
+    assert_eq!(at(&mut s, 44.0), 0);
+    assert_eq!(at(&mut s, 45.0), 1);
+    assert_eq!(s.alerts.idle_text.as_deref(), Some("All GPUs idle for 5 min"));
+
+    // snoozed: held back, then played when the snooze ends
+    update(&mut s, Msg::Snooze(Some(30.0 * 60.0)));
+    assert_eq!(at(&mut s, 60.0), 0);
+    assert_eq!(at(&mut s, 75.0), 1);
+    update(&mut s, Msg::Snooze(None));
+    assert_eq!(at(&mut s, 200.0), 0, "muted until restart");
+    update(&mut s, Msg::Unsnooze);
+    assert_eq!(at(&mut s, 201.0), 1);
+
+    // only while another window is active
+    let mut n = s.config.notifications.clone();
+    n.only_unfocused = true;
+    update(&mut s, Msg::SetNotifications(n));
+    update(&mut s, Msg::Focused(true));
+    assert_eq!(at(&mut s, 300.0), 0);
+    update(&mut s, Msg::Focused(false));
+    assert_eq!(at(&mut s, 301.0), 1);
+
+    // off
+    let mut n = s.config.notifications.clone();
+    n.gpu_idle.on = false;
+    update(&mut s, Msg::SetNotifications(n));
+    assert_eq!(at(&mut s, 400.0), 0);
+    assert!(s.alerts.idle_text.is_none());
+}
+
+#[test]
+fn queue_cleared_alert_sounds_once_when_a_gpu_finishes() {
+    let mut s = dialog_state(vec![], None);
+    let mut n = s.config.notifications.clone();
+    n.queue_cleared.on = true;
+    n.player = "true {file}".into();
+    update(&mut s, Msg::SetNotifications(n));
+    let gpu = |name: &str| ServerStatus {
+        name: name.into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    };
+    s.servers = vec![gpu("a"), gpu("b")];
+    s.engine_running = true;
+    let at = |s: &mut AppState, sec: f64| plays(&update(s, Msg::Tick(sec)));
+
+    // ready from the start: no news
+    idle_server(&mut s, 0, true);
+    idle_server(&mut s, 1, true);
+    assert_eq!(at(&mut s, 1.0), 0);
+
+    // a job, then none: once, at once
+    idle_server(&mut s, 0, false);
+    idle_server(&mut s, 1, false);
+    assert_eq!(at(&mut s, 2.0), 0);
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 3.0), 1);
+    assert_eq!(s.alerts.cleared_text.as_deref(), Some("a finished its queue"));
+    assert!(s.alerts.attention);
+    assert_eq!(at(&mut s, 400.0), 0, "no repeat");
+    update(&mut s, Msg::Focused(true));
+    assert!(s.alerts.cleared_text.is_none(), "seen");
+    update(&mut s, Msg::Focused(false));
+
+    // "all GPUs": only when the last busy one clears
+    let mut n = s.config.notifications.clone();
+    n.queue_cleared_all = true;
+    update(&mut s, Msg::SetNotifications(n));
+    idle_server(&mut s, 0, false);
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 401.0), 0, "b is still working");
+    idle_server(&mut s, 1, true);
+    assert_eq!(at(&mut s, 402.0), 1);
+    assert_eq!(s.alerts.cleared_text.as_deref(), Some("All GPUs finished their queues"));
+
+    // snoozed: shown, not played (and not later)
+    update(&mut s, Msg::Snooze(Some(60.0)));
+    idle_server(&mut s, 0, false);
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 403.0), 0);
+    assert_eq!(at(&mut s, 500.0), 0);
+
+    // off
+    update(&mut s, Msg::Unsnooze);
+    let mut n = s.config.notifications.clone();
+    n.queue_cleared.on = false;
+    update(&mut s, Msg::SetNotifications(n));
+    idle_server(&mut s, 0, false);
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 600.0), 0);
+}
+
+#[test]
+fn review_backlog_alert_counts_unreviewed_images() {
+    let mut h = Harness::new();
+    let mut n = h.state.config.notifications.clone();
+    n.review_backlog.on = true;
+    n.review_backlog.threshold = 1;
+    n.player = "true {file}".into();
+    h.send(Msg::SetNotifications(n));
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    assert_eq!(plays(&h.send(Msg::Tick(10.0))), 0);
+    {
+        let lib = Library_::steal(&h.root);
+        lib.write_two(&project);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    assert_eq!(plays(&h.send(Msg::Tick(20.0))), 1, "two over one");
+    assert_eq!(h.state.alerts.backlog_text.as_deref(), Some("2 images waiting for review"));
+    h.settle();
+    assert_eq!(h.state.alerts.sound_error, None, "played with `true`");
+    h.send(Msg::ReviewCurrent(Verdict::Good));
+    h.settle();
+    h.send(Msg::Tick(30.0));
+    assert!(h.state.alerts.backlog_text.is_none(), "one isn't more than one");
+}
+
+#[test]
+fn preview_steps_through_review_and_the_output_library() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    {
+        let lib = Library_::steal(&h.root);
+        lib.write_two(&project);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+
+    // Review: the queue, and the cursor follows
+    h.send(Msg::Tab(Tab::Review));
+    let queue: Vec<increart_core::ImageRef> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    assert_eq!(queue.len(), 2);
+    h.send(Msg::Preview(Some(queue[0].clone())));
+    assert_eq!(h.state.preview_position(), Some((0, 2)));
+    h.send(Msg::PreviewStep(-1));
+    assert_eq!(h.state.preview.as_ref(), Some(&queue[0]), "stops at the first");
+    h.send(Msg::PreviewStep(1));
+    assert_eq!(h.state.preview.as_ref(), Some(&queue[1]));
+    assert_eq!(h.state.review_cursor, 1);
+    h.send(Msg::PreviewStep(1));
+    assert_eq!(h.state.preview.as_ref(), Some(&queue[1]), "stops at the last");
+    h.send(Msg::Preview(None));
+
+    // the Output library's grid: its images, and the selection follows
+    for _ in 0..2 {
+        h.send(Msg::ReviewCurrent(Verdict::Good));
+        h.settle();
+    }
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    let shown: Vec<increart_core::ImageRef> = h.state.output_source_images().iter().map(|o| o.image.clone()).collect();
+    assert_eq!(shown.len(), 2);
+    h.send(Msg::Preview(Some(shown[1].clone())));
+    h.send(Msg::PreviewStep(-1));
+    assert_eq!(h.state.preview.as_ref(), Some(&shown[0]));
+    assert_eq!(h.state.output_selected.as_ref(), Some(&shown[0]));
+
+    // elsewhere (or an image not in the list): nothing to step through
+    h.send(Msg::Tab(Tab::Projects));
+    assert_eq!(h.state.preview_position(), None);
+    h.send(Msg::PreviewStep(1));
+    assert_eq!(h.state.preview.as_ref(), Some(&shown[0]));
+}
+
+#[test]
+fn setting_sweeps_vary_cfg_steps_or_the_model() {
+    use increart_core::prompts::SweepVary;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let label = h.state.generate.label.clone();
+
+    // CFG: the values in order, without repeats; the rest as the form has it
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    f.sweep.on = true;
+    f.sweep.vary = SweepVary::Cfg;
+    f.sweep.values = "3, 1;2 2".into();
+    f.seeds = 2;
+    f.steps = 12;
+    h.send(Msg::Generate(f.clone()));
+    let (runs, _) = update::sweep_runs(&h.state).unwrap();
+    let got: Vec<_> = runs.iter().map(|(f, t)| (f.label.clone(), f.cfg, f.steps, t.row())).collect();
+    assert_eq!(
+        got,
+        [
+            (format!("{label} · cfg 1"), 1.0, 12, "cfg 1".to_string()),
+            (format!("{label} · cfg 2"), 2.0, 12, "cfg 2".to_string()),
+            (format!("{label} · cfg 3"), 3.0, 12, "cfg 3".to_string()),
+        ]
+    );
+
+    // what's wrong is said
+    let recipes = h.state.config.recipes.clone();
+    let err = |f: &increart_gui_core::GenerateForm| update::param_runs(f, &recipes).unwrap_err();
+    let mut bad = f.clone();
+    bad.sweep.values = "2, x".into();
+    assert!(err(&bad).contains("“x” isn't a number"));
+    bad.sweep.values = "40".into();
+    assert!(err(&bad).contains("CFG goes from 0 to 30"));
+    bad.sweep.vary = SweepVary::Steps;
+    bad.sweep.values = "8, 12.5".into();
+    assert!(err(&bad).contains("whole numbers"));
+    bad.sweep.vary = SweepVary::Strength;
+    assert!(err(&bad).contains("needs a start image"));
+    bad.sweep.vary = SweepVary::Steps;
+    bad.sweep.values = "8".into();
+    bad.prompt = "a fox, {preset}".into();
+    assert!(err(&bad).contains("for style sweeps"));
+    bad.prompt = "a {animal}".into();
+    assert!(err(&bad).contains("Fill in {animal}"));
+    bad.sweep.values = String::new();
+    bad.prompt = "a fox".into();
+    assert!(err(&bad).contains("Type the values"));
+
+    // defaults around the form's own; a range fills the field
+    assert_eq!(update::sweep_defaults(SweepVary::Steps, &f), "6, 9, 12, 18, 24");
+    let mut two = f.clone();
+    two.cfg = 2.0;
+    assert_eq!(update::sweep_defaults(SweepVary::Cfg, &two), "1, 1.5, 2, 3, 4");
+    assert_eq!(update::range_values(0.3, 0.9, 0.15), "0.3, 0.45, 0.6, 0.75, 0.9");
+
+    // queued: a run each, tagged with its value; the sheet's rows say it
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.runs.len(), 3, "{:?}", h.errors());
+    let mut runs: Vec<_> = p.runs.clone();
+    runs.sort_by(|a, b| a.id.cmp(&b.id));
+    assert!(runs.iter().all(|r| r.sweep.as_ref().unwrap().name == label));
+    assert_eq!(runs.iter().map(|r| r.sample.cfg).collect::<Vec<_>>(), [1.0, 2.0, 3.0]);
+    assert_eq!(increart_gui_core::settings_line(&runs[1]), "12 steps · cfg 2");
+    let project = p.project.id.clone();
+    let seeds: Vec<u64> = runs[0].all_seeds().map(|(_, s)| s).collect();
+    for r in &runs {
+        Library_::steal(&h.root).write_seeds(&r.id, &seeds);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::ReviewSweep(project, label.clone()));
+    let sh = h.state.sheet().unwrap();
+    let rows: Vec<_> = sh.rows.iter().map(|r| r.run.sweep.as_ref().unwrap().row()).collect();
+    assert_eq!(rows, ["cfg 1", "cfg 2", "cfg 3"]);
+    // tile captions: the row, the row and seed, the settings
+    let img = match &sh.rows[2].cells[1] {
+        SheetCell::Image(o) => o.image.clone(),
+        c => panic!("{c:?}"),
+    };
+    use increart_gui_core::CaptionFill;
+    assert_eq!(h.state.caption(&img, CaptionFill::Style), "cfg 3");
+    assert_eq!(h.state.caption(&img, CaptionFill::StyleSeed), format!("cfg 3 · seed {}", seeds[1]));
+    assert_eq!(h.state.caption(&img, CaptionFill::Settings), "12 steps · cfg 3");
+
+    // Model: each model preset with its own steps and CFG
+    let mut m = f.clone();
+    m.sweep.vary = SweepVary::Model;
+    assert!(err(&m).contains("Tick the models"));
+    m.sweep.models = recipes.iter().map(|r| r.name.clone()).collect();
+    let runs = update::param_runs(&m, &recipes).unwrap();
+    assert_eq!(runs.len(), recipes.len());
+    for ((r, t), p) in runs.iter().zip(&recipes) {
+        assert_eq!(
+            (r.preset, r.steps, r.cfg, t.row()),
+            (recipes.iter().position(|x| x.name == p.name).unwrap(), p.steps, p.cfg, p.name.clone())
+        );
+    }
+}
+
+#[test]
+fn output_library_search_moves_between_images_and_project_names() {
+    let mut h = Harness::new();
+    let mut f = h.state.output_filter.clone();
+    f.text = "fox".into();
+    h.send(Msg::OutputFilter(f));
+    // to project names: what's typed goes along, the images' filter clears
+    h.send(Msg::OutputSearchProjects(true));
+    assert!(h.state.output_search_projects);
+    assert_eq!(h.state.output_project_search, "fox");
+    assert!(h.state.output_filter.text.is_empty());
+    h.send(Msg::OutputProjectSearch("cafe".into()));
+    h.send(Msg::OutputSearchProjects(true));
+    assert_eq!(h.state.output_project_search, "cafe", "choosing it again changes nothing");
+    h.send(Msg::OutputSearchProjects(false));
+    assert_eq!(h.state.output_filter.text, "cafe");
+    assert!(h.state.output_project_search.is_empty());
+}
+
+#[test]
+fn rating_in_the_preview() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    {
+        let lib = Library_::steal(&h.root);
+        lib.write_two(&project);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+
+    // Review's queue: the rated image leaves it, the preview goes on
+    h.send(Msg::Tab(Tab::Review));
+    let queue: Vec<increart_core::ImageRef> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    h.send(Msg::Preview(Some(queue[0].clone())));
+    h.send(Msg::PreviewRate(Verdict::Good));
+    assert_eq!(h.state.preview.as_ref(), Some(&queue[1]));
+    h.settle();
+    assert_eq!(h.state.preview_position(), Some((0, 1)));
+    assert_eq!(h.state.review_cursor, 0);
+    // the last one closes it; undo brings it back to the queue
+    h.send(Msg::PreviewRate(Verdict::Bad));
+    assert_eq!(h.state.preview, None);
+    h.settle();
+    assert!(h.state.review_queue().is_empty());
+    h.send(Msg::UndoReview);
+    h.settle();
+    assert_eq!(h.state.review_queue().len(), 1);
+
+    // the Output library: re-rating keeps the image shown
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    let shown = h.state.output_source_images().first().map(|o| o.image.clone()).unwrap();
+    h.send(Msg::Preview(Some(shown.clone())));
+    h.send(Msg::PreviewRate(Verdict::Neutral));
+    h.settle();
+    assert_eq!(h.state.preview.as_ref(), Some(&shown));
+    let o = h.state.index.projects.iter().flat_map(|p| &p.outputs).find(|o| o.image == shown).unwrap();
+    assert_eq!(o.verdict, Some(Verdict::Neutral));
+}
+
+#[test]
+fn selecting_a_project_narrows_the_grid_only_to_a_folder_with_others() {
+    let mut h = Harness::new();
+    let promote = |h: &mut Harness, name: &str, folder: Option<&str>| {
+        h.send(Msg::Draft(IdeaDraft { title: name.into(), text: "x".into(), ..Default::default() }));
+        h.send(Msg::AddIdea(AddIdea::Promote));
+        h.send(Msg::PromoteParent(PathBuf::new()));
+        h.send(Msg::PromoteNewFolder(folder.map(String::from)));
+        h.send(Msg::ConfirmPromote);
+        h.settle();
+        h.state.project.clone().unwrap()
+    };
+    let fox = promote(&mut h, "Fox", Some("Fox"));
+    promote(&mut h, "Owl", Some("Owl"));
+    let deer = promote(&mut h, "deer tail", Some("Deer"));
+    promote(&mut h, "deer river", Some("deer"));
+    let top = promote(&mut h, "Top", None);
+    let scope = |h: &mut Harness, id: &increart_core::Id| {
+        h.send(Msg::SelectProject(id.clone()));
+        (h.state.project_scope(), h.state.projects_in_scope().len())
+    };
+    // with others in its folder it narrows; alone, the grid stays
+    h.send(Msg::SelectProjectFolder(Some(PathBuf::new())));
+    assert_eq!(scope(&mut h, &fox), (PathBuf::new(), 5), "alone in Fox/: the grid stays");
+    assert_eq!(scope(&mut h, &deer), (PathBuf::from("Deer"), 2), "Deer/ has two");
+    assert_eq!(scope(&mut h, &top), (PathBuf::new(), 5), "at the top level, with the rest");
+    // alone and outside what the grid shows: the folder above its own
+    h.send(Msg::SelectProjectFolder(Some("Deer".into())));
+    assert_eq!(scope(&mut h, &fox), (PathBuf::new(), 5));
+    h.send(Msg::SelectProjectFolder(Some("Fox".into())));
+    assert_eq!(h.state.projects_in_scope().len(), 1, "a chosen folder is kept");
+
+    // unticked: a project never narrows it
+    h.send(Msg::NarrowToSiblings(false));
+    assert!(h.state.config.project_click_keeps_scope);
+    h.send(Msg::SelectProjectFolder(Some(PathBuf::new())));
+    assert_eq!(scope(&mut h, &deer), (PathBuf::new(), 5));
+    h.send(Msg::NarrowToSiblings(true));
+
+    // newest first, or A–Z (any case), a config setting
+    h.send(Msg::SelectProjectFolder(Some(PathBuf::new())));
+    let names = |h: &Harness| h.state.projects_in_scope().iter().map(|p| p.name()).collect::<Vec<_>>();
+    assert_eq!(names(&h), ["Top", "deer river", "deer tail", "Owl", "Fox"]);
+    h.send(Msg::ProjectsByName(true));
+    assert!(h.state.config.projects_by_name);
+    assert_eq!(names(&h), ["deer river", "deer tail", "Fox", "Owl", "Top"]);
+}
+
+#[test]
+fn promote_into_a_new_or_existing_folder() {
+    let mut h = Harness::new();
+    h.send(Msg::Draft(IdeaDraft { title: "Fox".into(), text: "a red fox".into(), ..Default::default() }));
+    h.send(Msg::AddIdea(AddIdea::Promote));
+    // step 2: a new folder at the top
+    h.send(Msg::EditPromoteName("Fox cafe".into()));
+    h.send(Msg::PromoteChoose(true));
+    h.send(Msg::PromoteNewFolder(Some("Fox cafe".into())));
+    let d = h.state.promote.clone().unwrap();
+    assert_eq!(promote_folder(&h.state, &d), (PathBuf::from("Fox cafe"), false));
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    assert_eq!(h.state.project_entry().unwrap().dir, Path::new("projects/Fox cafe/Fox cafe"));
+    assert!(h.state.index.project_folders.contains(&PathBuf::from("Fox cafe")));
+
+    // the next one starts next to a project's own folder, not in it; in a
+    // folder chosen otherwise, where the last went; without a new folder, if
+    // unticked
+    let fox = h.state.library_ideas()[0].idea.id.clone();
+    h.send(Msg::Promote(vec![fox.clone()]));
+    assert_eq!(h.state.promote.as_ref().unwrap().parent, Path::new(""), "next to the last one's folder");
+    h.send(Msg::EditPromoteName("Fox bar".into()));
+    h.send(Msg::PromoteNewFolder(Some("bars".into())));
+    h.send(Msg::EditPromoteName("Fox pub".into()));
+    assert_eq!(h.state.promote.as_ref().unwrap().new_folder.as_deref(), Some("bars"), "a folder named otherwise stays");
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    assert_eq!(h.state.project_entry().unwrap().dir, Path::new("projects/bars/Fox pub"));
+    h.send(Msg::Promote(vec![fox.clone()]));
+    assert_eq!(h.state.promote.as_ref().unwrap().parent, Path::new("bars"), "where the last one went");
+    h.send(Msg::PromoteNewFolder(None));
+    h.send(Msg::EditPromoteName("Fox inn".into()));
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    assert_eq!(h.state.project_entry().unwrap().dir, Path::new("projects/bars/Fox inn"), "no new folder");
+
+    // a "new" folder that exists (any case) is used; a name taken there is refused
+    h.send(Msg::Promote(vec![fox]));
+    h.send(Msg::PromoteChoose(true));
+    h.send(Msg::PromoteParent(PathBuf::new()));
+    h.send(Msg::PromoteNewFolder(Some("fox cafe".into())));
+    h.send(Msg::EditPromoteName("Fox cafe".into()));
+    let d = h.state.promote.clone().unwrap();
+    assert_eq!(promote_folder(&h.state, &d), (PathBuf::from("Fox cafe"), true));
+    h.send(Msg::ConfirmPromote);
+    assert!(h.state.promote.is_some() && !h.errors().is_empty(), "the name is taken in that folder");
+    h.send(Msg::EditPromoteName("Fox night".into()));
+    h.send(Msg::ConfirmPromote);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    assert_eq!(p.dir, Path::new("projects/Fox cafe/Fox night"));
+    assert_eq!(h.state.index.project_folders.len(), 2);
+}
+
+#[test]
+fn project_folders_collapse_and_are_remembered() {
+    let mut h = Harness::new();
+    h.send(Msg::NewFolder(increart_core::Tree::Projects, PathBuf::new()));
+    h.settle();
+    let a = h.state.index.project_folders[0].clone();
+    h.send(Msg::NewFolder(increart_core::Tree::Projects, a.clone()));
+    h.settle();
+    let b = h.state.index.project_folders.iter().find(|f| **f != a).unwrap().clone();
+    assert!(!h.state.folder_collapsed(&a));
+
+    h.send(Msg::ToggleProjectFolder(a.clone()));
+    // remembered per library in the config
+    assert_eq!(h.state.config.collapsed_folders.values().collect::<Vec<_>>(), [&vec![a.clone()]]);
+    assert!(h.state.folder_collapsed(&a) && !h.state.folder_collapsed(&b));
+    h.send(Msg::ToggleProjectFolder(a.clone()));
+    assert!(!h.state.folder_collapsed(&a));
+    assert!(h.state.config.collapsed_folders.is_empty(), "nothing collapsed, nothing saved");
+
+    h.send(Msg::CollapseProjectFolders(true));
+    assert!(h.state.folder_collapsed(&a) && h.state.folder_collapsed(&b));
+    // a folder that's gone drops out on the next change
+    h.state.index.project_folders.retain(|f| *f != b);
+    h.send(Msg::ToggleProjectFolder(a.clone()));
+    assert!(h.state.config.collapsed_folders.is_empty());
+    h.send(Msg::CollapseProjectFolders(true));
+    h.send(Msg::CollapseProjectFolders(false));
+    assert!(!h.state.folder_collapsed(&a));
+}
+
+#[test]
+fn interface_zoom_steps_and_stays_in_range() {
+    let mut h = Harness::new();
+    assert_eq!(h.state.ui_zoom(), 100);
+    h.send(Msg::UiZoomStep(true));
+    assert_eq!((h.state.ui_zoom(), h.state.config.ui_zoom), (110, 110));
+    // a typed value steps to the next 10% either way
+    h.send(Msg::UiZoom { percent: 125, save: true });
+    h.send(Msg::UiZoomStep(true));
+    assert_eq!(h.state.ui_zoom(), 130);
+    h.send(Msg::UiZoom { percent: 125, save: true });
+    h.send(Msg::UiZoomStep(false));
+    assert_eq!(h.state.ui_zoom(), 120);
+    // 70% to 300%
+    h.send(Msg::UiZoom { percent: 500, save: true });
+    assert_eq!(h.state.ui_zoom(), 300);
+    h.send(Msg::UiZoomStep(true));
+    assert_eq!(h.state.ui_zoom(), 300);
+    h.send(Msg::UiZoom { percent: 70, save: true });
+    h.send(Msg::UiZoomStep(false));
+    assert_eq!(h.state.ui_zoom(), 70);
+    // 100% isn't stored
+    h.send(Msg::UiZoom { percent: 100, save: true });
+    assert_eq!(h.state.config.ui_zoom, 0);
+}
+
+#[test]
+fn reference_picker_browses_the_libraries_and_adds_the_chosen() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    h.send(Msg::ReviewLink(h.state.output_link(&imgs[0]).unwrap().path.clone(), Some(Verdict::Good)));
+    h.settle();
+
+    // no input images: it opens on the outputs, kept ones by default
+    h.send(Msg::RefPicker(true));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().source, RefSource::Outputs(OutputSource::AllProjects));
+    let shown = |h: &Harness| h.state.ref_candidates().into_iter().map(|c| c.image).collect::<Vec<_>>();
+    assert_eq!(shown(&h), [imgs[0].clone()]);
+    h.send(Msg::RefPickerRatings(Ratings::ALL));
+    assert_eq!(shown(&h).len(), 2);
+    h.send(Msg::RefPickerText("no such prompt".into()));
+    assert!(shown(&h).is_empty());
+    h.send(Msg::RefPickerText(String::new()));
+
+    // choose both, unchoose one, add
+    h.send(Msg::RefPickerToggle(imgs[1].clone()));
+    h.send(Msg::RefPickerToggle(imgs[0].clone()));
+    h.send(Msg::RefPickerToggle(imgs[1].clone()));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().chosen, [imgs[0].clone()]);
+    h.send(Msg::RefPickerAdd);
+    assert!(h.state.ref_picker.is_none());
+    assert_eq!(h.state.generate.refs(), [imgs[0].clone()]);
+
+    // an added image can't be chosen again; it reopens where it was
+    h.send(Msg::RefPicker(true));
+    h.send(Msg::RefPickerToggle(imgs[0].clone()));
+    assert!(h.state.ref_picker.as_ref().unwrap().chosen.is_empty());
+    h.send(Msg::RefPickerSource(RefSource::Inputs(None)));
+    assert!(shown(&h).is_empty());
+    h.send(Msg::RefPicker(false));
+    h.send(Msg::RefPicker(true));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().source, RefSource::Inputs(None));
+    assert_eq!(h.state.generate.refs().len(), 1, "closing adds nothing");
+}
+
+#[test]
+fn output_images_get_titles_found_by_search() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let imgs: Vec<_> = h.state.review_queue().iter().map(|o| o.image.clone()).collect();
+    for img in &imgs {
+        h.send(Msg::ReviewLink(h.state.output_link(img).unwrap().path.clone(), Some(Verdict::Good)));
+        h.settle();
+    }
+
+    h.send(Msg::TitleDialog(Some(imgs[0].clone())));
+    assert_eq!(h.state.title_edit.as_ref().unwrap().text, "");
+    h.send(Msg::EditTitle("  Harbour   at dusk ".into()));
+    h.send(Msg::CommitTitle);
+    h.settle();
+    assert!(h.state.title_edit.is_none());
+    assert_eq!(h.state.image_title(&imgs[0]), Some("Harbour at dusk"));
+    assert_eq!(h.state.image_title(&imgs[1]), None);
+    // kept in project.rsn
+    let rsn = std::fs::read_to_string(h.root.join(&h.state.project_entry().unwrap().dir).join("project.rsn")).unwrap();
+    assert!(rsn.contains("Harbour at dusk"), "{rsn}");
+
+    // the Output library's search finds it by title (any case)
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    let mut f = h.state.output_filter.clone();
+    f.text = "harbour".into();
+    h.send(Msg::OutputFilter(f.clone()));
+    let shown: Vec<_> = h.state.output_source_images().iter().map(|o| o.image.clone()).collect();
+    assert_eq!(shown, [imgs[0].clone()]);
+
+    // reopening shows it; emptying removes it
+    h.send(Msg::TitleDialog(Some(imgs[0].clone())));
+    assert_eq!(h.state.title_edit.as_ref().unwrap().text, "Harbour at dusk");
+    h.send(Msg::EditTitle(" ".into()));
+    h.send(Msg::CommitTitle);
+    h.settle();
+    assert_eq!(h.state.image_title(&imgs[0]), None);
+    assert!(h.state.output_source_images().is_empty());
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn runs_finish_and_stop_or_stop_now() {
+    use increart_core::engine::{Event, Stop};
+    let mut s = dialog_state(vec![], None);
+    let t0 = chrono::Utc::now();
+    let (a, b) = (increart_core::Id::new(t0, 1), increart_core::Id::new(t0, 2));
+    update(&mut s, Msg::RunsQueued(vec![a.clone(), b.clone()]));
+    assert_eq!(update(&mut s, Msg::CancelRun(a.clone(), Stop::Finish)), [Effect::CancelRun(a.clone(), Stop::Finish)]);
+    assert!(s.finishing.contains(&a));
+    // Stop now after Finish & stop: no longer just finishing
+    update(&mut s, Msg::CancelRun(a.clone(), Stop::Now));
+    assert!(!s.finishing.contains(&a));
+    let fx = update(&mut s, Msg::StopAll(Stop::Finish));
+    assert_eq!(fx, [Effect::CancelRun(a.clone(), Stop::Finish), Effect::CancelRun(b.clone(), Stop::Finish)]);
+    update(&mut s, Msg::Engine(Event::RunDone { run: a.clone() }));
+    assert!(!s.finishing.contains(&a) && s.finishing.contains(&b));
+    update(&mut s, Msg::RunsQueued(vec![]));
+    assert!(s.finishing.is_empty());
+}
+
+#[test]
+fn status_messages_are_dismissed_one_by_one_or_cleared() {
+    let mut h = Harness::new();
+    for m in ["one", "two", "three"] {
+        h.send(Msg::Info(m.into()));
+    }
+    let texts = |h: &Harness| h.state.messages.iter().map(|m| m.text.clone()).collect::<Vec<_>>();
+    assert_eq!(texts(&h), ["one", "two", "three"]);
+    h.send(Msg::DismissMessage(1));
+    assert_eq!(texts(&h), ["one", "three"]);
+    h.send(Msg::ClearMessages);
+    assert!(h.state.messages.is_empty());
+}

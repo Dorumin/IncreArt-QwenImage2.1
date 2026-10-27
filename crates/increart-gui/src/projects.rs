@@ -1,0 +1,2210 @@
+//! Projects: the tree, Grid (one tile per project), Generate and Jobs.
+
+use std::path::{Path, PathBuf};
+
+use eframe::egui::{self, ComboBox, Panel, RichText, ScrollArea};
+use increart_core::engine::Stop;
+use increart_core::{Tree, Verdict};
+use increart_gui_core::{AppState, Msg, OutputSource, PickKind, ProjectsTab, Tab, UseTarget, counts, cover};
+
+use crate::textures::Textures;
+use crate::tree;
+use crate::widgets::{ACCENT, BAD, GOOD, NEUTRAL, card, ic, ph, short, thumb};
+
+pub fn view(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
+    Panel::left("proj_tree").default_size(250.0).show(ui, |ui| {
+        Panel::bottom("proj_keys").show(ui, |ui| key_hints(ui, st.projects_tab));
+        // right to left: the clear button, then the field takes what's left
+        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut q = st.project_search.clone();
+            if !q.is_empty() && ui.small_button(ph::X).on_hover_text("clear").clicked() {
+                out.push(Msg::ProjectSearch(String::new()));
+            }
+            let field = egui::TextEdit::singleline(&mut q)
+                .hint_text(ic(ph::MAGNIFYING_GLASS, "Search projects"))
+                .desired_width(ui.available_width());
+            let r = ui.add(field);
+            if r.changed() {
+                out.push(Msg::ProjectSearch(q.clone()));
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                out.push(Msg::ProjectSearch(String::new()));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let mut show = !st.config.hide_project_runs;
+            if ui.checkbox(&mut show, "runs").on_hover_text("list the selected project's runs under it").changed() {
+                out.push(Msg::ProjectRuns(show));
+            }
+            let by_name = st.config.projects_by_name;
+            let label = |n: bool| if n { "A–Z" } else { "Newest first" };
+            egui::ComboBox::from_id_salt("project_order")
+                .selected_text(ic(ph::SORT_ASCENDING, label(by_name)))
+                .show_ui(ui, |ui| {
+                    for n in [false, true] {
+                        if ui.selectable_label(by_name == n, label(n)).clicked() && by_name != n {
+                            out.push(Msg::ProjectsByName(n));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("the order of projects in the tree and the grid (folders stay A–Z)");
+            let mut narrow = !st.config.project_click_keeps_scope;
+            let tip = "selecting a project shows its folder in the grid, when that holds other projects \
+                       (else the grid stays as it is)";
+            if ui.checkbox(&mut narrow, "narrow to siblings").on_hover_text(tip).changed() {
+                out.push(Msg::NarrowToSiblings(narrow));
+            }
+        });
+        ui.horizontal(|ui| {
+            // at the top level; a folder's right-click menu makes them in it
+            let tip = "at the top level (right-click a folder to make one in it)";
+            if ui.button(ic(ph::ROCKET_LAUNCH, "New project")).on_hover_text(tip).clicked() {
+                out.push(Msg::NewProject(PathBuf::new()));
+            }
+            if ui.button(ic(ph::FOLDER_PLUS, "New folder")).on_hover_text(tip).clicked() {
+                out.push(Msg::NewFolder(Tree::Projects, PathBuf::new()));
+            }
+        });
+        ui.separator();
+        ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| tree::projects(ui, st, out));
+    });
+    Panel::top("proj_tabs").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (t, label) in [
+                (ProjectsTab::Grid, ic(ph::SQUARES_FOUR, "Grid")),
+                (ProjectsTab::Folder, ic(ph::FOLDER, "Folder")),
+                (ProjectsTab::Generate, ic(ph::MAGIC_WAND, "Generate")),
+                (ProjectsTab::Jobs, ic(ph::QUEUE, &format!("Jobs ({})", st.active_runs.len()))),
+            ] {
+                if ui.selectable_label(st.projects_tab == t, label).clicked() {
+                    out.push(Msg::ProjectsTab(t));
+                }
+            }
+        });
+    });
+    egui::CentralPanel::default().show(ui, |ui| match st.projects_tab {
+        ProjectsTab::Grid => grid(ui, st, tex, out),
+        ProjectsTab::Folder => crate::folderview::view(ui, st, tex, out),
+        ProjectsTab::Generate => generate(ui, st, tex, out),
+        ProjectsTab::Jobs => jobs(ui, st, out),
+    });
+}
+
+/// The Projects tab's keys, folded away at the bottom of the project tree;
+/// the Folder tab's own, else those of an opened image.
+fn key_hints(ui: &mut egui::Ui, tab: ProjectsTab) {
+    const FOLDER: &[(&str, &str)] = &[
+        ("Enter", "open"),
+        ("Backspace", "up a folder"),
+        ("Alt+← →", "back / forward"),
+        ("arrows", "move (Shift: select)"),
+        ("Ctrl+A", "select all"),
+        ("Ctrl+C X V", "copy / cut / paste"),
+        ("F2", "rename"),
+        ("Delete", "to the trash"),
+        ("Ctrl+H", "show .rsn files"),
+        ("Ctrl+L", "type a path"),
+        ("Esc", "clear the selection"),
+    ];
+    const IMAGE: &[(&str, &str)] = &[
+        ("← →", "previous / next"),
+        ("1 / G", "good"),
+        ("2 / N", "neutral"),
+        ("3 / B", "bad"),
+        ("Ctrl+Z", "undo"),
+        ("E", "edit this image"),
+        ("D", "duplicate its project"),
+        ("R", "→ input library"),
+        ("I", "→ new idea"),
+        ("+ − 0", "zoom / fit"),
+        ("Esc", "close"),
+    ];
+    // (the folder's Alt+← → are its own back / forward)
+    const ANYWHERE: &[(&str, &str)] = &[("Alt+← →", "back / forward"), ("Ctrl+N", "new idea")];
+    const FOLDER_ANYWHERE: &[(&str, &str)] = &[("Ctrl+N", "new idea")];
+    let groups = match tab {
+        ProjectsTab::Folder => [("In the folder", FOLDER), ("Anywhere", FOLDER_ANYWHERE)],
+        _ => [("In an opened image", IMAGE), ("Anywhere", ANYWHERE)],
+    };
+    egui::CollapsingHeader::new(RichText::new(ic(ph::KEYBOARD, "Keys")).strong())
+        .id_salt("proj_keys")
+        .default_open(true)
+        .show(ui, |ui| {
+            for (heading, keys) in groups {
+                ui.weak(RichText::new(heading).small());
+                for &(k, what) in keys {
+                    ui.horizontal(|ui| {
+                        ui.monospace(k);
+                        ui.weak(what);
+                    });
+                }
+            }
+        });
+}
+
+/// A cover with no output image yet: the project's references and start
+/// images as small thumbnails scattered around it, clear of the empty-image
+/// icon in the middle. Each project keeps its own scatter.
+fn scattered_inputs(
+    ui: &egui::Ui,
+    cover: egui::Rect,
+    id: &increart_core::Id,
+    root: &Path,
+    tex: &mut Textures,
+    p: &increart_core::scan::ProjectEntry,
+) {
+    const SIZE: f32 = 50.0;
+    // top-left corners, in a 200 × 200 cover; the middle 60 × 60 stays clear
+    const SLOTS: [(f32, f32); 8] = [
+        (12.0, 12.0),
+        (138.0, 14.0),
+        (14.0, 138.0),
+        (136.0, 136.0),
+        (75.0, 8.0),
+        (8.0, 75.0),
+        (142.0, 75.0),
+        (75.0, 142.0),
+    ];
+    let scale = cover.width() / 200.0;
+    let painter = ui.painter_at(cover);
+    for (i, (image, (x, y))) in increart_gui_core::project_inputs(p).iter().zip(SLOTS).enumerate() {
+        // a small nudge per project and slot, so it looks scattered
+        let h = id
+            .as_str()
+            .bytes()
+            .chain(image.id.as_str().bytes())
+            .fold(i as u32 * 7919, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+        let jitter = |k: u32| ((h >> k) % 9) as f32 - 4.0;
+        let at = cover.min + egui::vec2(x + jitter(0), y + jitter(8)) * scale;
+        let rect = egui::Rect::from_min_size(at, egui::Vec2::splat(SIZE * scale));
+        painter.rect_filled(rect.translate(egui::vec2(2.0, 2.0)), 3.0, egui::Color32::from_black_alpha(90));
+        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(55));
+        crate::widgets::image_cover(&painter, rect.shrink(2.0), tex.thumb(root, image).as_ref());
+    }
+}
+
+fn grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
+    let Some(root) = st.library.clone() else { return };
+    breadcrumb(ui, st, out);
+    let ps = st.projects_in_scope();
+    if ps.is_empty() {
+        ui.weak("No projects here. Promote ideas, or right-click the tree → New project.");
+        return;
+    }
+    ui.weak("Click to select (it becomes the current project); Review / Generate on the tile; double-click: review, or generate if nothing is new; right-click for more.");
+    ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for p in ps {
+                let selected = st.project.as_ref() == Some(&p.project.id);
+                let [g, n, b, u] = counts(p);
+                let cov = cover(p).and_then(|c| tex.thumb(&root, &c));
+                let r = card(ui, selected, 200.0, 270.0, |ui| {
+                    let badge = (u > 0).then_some(ACCENT);
+                    let r = thumb(ui, cov.as_ref(), 200.0, false, badge);
+                    if cov.is_none() {
+                        scattered_inputs(ui, r.rect, &p.project.id, &root, tex, p);
+                    }
+                    ui.label(RichText::new(short(&p.name(), 26)).strong());
+                    ui.horizontal(|ui| {
+                        ui.colored_label(GOOD, g.to_string());
+                        ui.colored_label(NEUTRAL, n.to_string());
+                        ui.colored_label(BAD, b.to_string());
+                        ui.colored_label(ACCENT, format!("{u} new"));
+                        if p.runs.iter().any(|r| st.active_runs.contains(&r.id)) {
+                            ui.label(ph::SPARKLE);
+                        }
+                    });
+                    ui.weak(p.dir.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
+                });
+                // drag onto a folder in the tree to move it
+                let r = crate::widgets::drag_source(&r, &p.dir, || vec![p.dir.clone()]);
+                if r.clicked() {
+                    out.push(Msg::SelectProject(p.project.id.clone()));
+                }
+                // Double-click: Review if there is something to review, else Generate.
+                if r.double_clicked() {
+                    if u > 0 {
+                        out.push(Msg::ReviewScope(Some(p.project.id.clone())));
+                        out.push(Msg::Tab(Tab::Review));
+                    } else {
+                        out.push(Msg::OpenInGenerate(p.project.id.clone()));
+                    }
+                }
+                // The selected (or hovered) tile shows its two actions on the
+                // cover. Placed after the tile's click area, so they're on top
+                // and get the clicks.
+                if selected || ui.rect_contains_pointer(r.rect) {
+                    let cover = egui::Rect::from_min_size(r.rect.min + egui::vec2(7.0, 7.0), egui::vec2(200.0, 200.0));
+                    let y = cover.bottom() - 34.0;
+                    let review = egui::Rect::from_min_size(egui::pos2(cover.left() + 6.0, y), egui::vec2(92.0, 28.0));
+                    let generate =
+                        egui::Rect::from_min_size(egui::pos2(cover.left() + 102.0, y), egui::vec2(92.0, 28.0));
+                    let fill =
+                        |b: egui::Button<'static>| b.fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 220));
+                    let rv = overlay(ui, review, fill(egui::Button::new(ic(ph::EYE, &format!("Review {u}")))));
+                    if rv.on_hover_text("review this project's new images").clicked() {
+                        out.push(Msg::ReviewScope(Some(p.project.id.clone())));
+                        out.push(Msg::Tab(Tab::Review));
+                    }
+                    if selected {
+                        // where the button is, for the screenshot tour's click check
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_generate_button"), generate));
+                    }
+                    if overlay(ui, generate, fill(egui::Button::new(ic(ph::MAGIC_WAND, "Generate")))).clicked() {
+                        out.push(Msg::OpenInGenerate(p.project.id.clone()));
+                    }
+                    // top left: the top right has the "new images" dot
+                    let outputs = egui::Rect::from_min_size(cover.min + egui::vec2(6.0, 6.0), egui::vec2(28.0, 28.0));
+                    let ov = overlay(ui, outputs, fill(egui::Button::new(ph::IMAGES)));
+                    if ov.on_hover_text(format!("show its outputs ({} kept)", g + n)).clicked() {
+                        out.push(Msg::ShowOutputs(OutputSource::Project(p.project.id.clone())));
+                    }
+                }
+                r.context_menu(|ui| project_menu(ui, st, p, out));
+            }
+        });
+    });
+}
+
+/// A widget drawn at `rect` on top of others, taking no space in `ui`'s
+/// layout (`ui.put` would: in the wrapped grid that pushes the next tiles
+/// along when a hovered tile shows its buttons, so they jump around).
+fn overlay(ui: &mut egui::Ui, rect: egui::Rect, w: impl egui::Widget) -> egui::Response {
+    let layout = egui::Layout::centered_and_justified(egui::Direction::LeftToRight);
+    ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout)).add(w)
+}
+
+/// Right-click on a project tile: generate more of its latest run, open it,
+/// review it, and the tree's actions.
+fn project_menu(ui: &mut egui::Ui, st: &AppState, p: &increart_core::scan::ProjectEntry, out: &mut Vec<Msg>) {
+    let id = &p.project.id;
+    if let Some(run) = st.latest_run(p) {
+        ui.label(RichText::new(format!("Generate more of {}", run.label)).strong());
+        ui.weak(short(&run.prompt, 50));
+        ui.horizontal(|ui| {
+            for n in [4, 8, 16] {
+                if ui.button(format!("+{n} seeds")).clicked() {
+                    out.push(Msg::MoreSeeds(run.id.clone(), n));
+                    ui.close();
+                }
+            }
+        });
+        if !st.engine_running {
+            ui.weak("no servers: they run once servers are connected");
+        }
+        ui.separator();
+    }
+    if ui.button(ic(ph::MAGIC_WAND, "Open in Generate")).clicked() {
+        out.push(Msg::OpenInGenerate(id.clone()));
+        ui.close();
+    }
+    if counts(p)[3] > 0 && ui.button(ic(ph::EYE, "Review its images")).clicked() {
+        out.push(Msg::ReviewScope(Some(id.clone())));
+        out.push(Msg::Tab(Tab::Review));
+        ui.close();
+    }
+    if crate::review::show_outputs_button(ui, st, OutputSource::Project(id.clone()), out) {
+        ui.close();
+    }
+    ui.separator();
+    let rel = p.dir.strip_prefix("projects").map(std::path::Path::to_path_buf).unwrap_or_default();
+    if ui.button(ic(ph::COPY, "Duplicate")).clicked() {
+        out.push(Msg::DuplicateProject(rel.clone()));
+        ui.close();
+    }
+    if ui.button(ic(ph::PENCIL_SIMPLE, "Rename")).clicked() {
+        out.push(Msg::SelectProject(id.clone()));
+        out.push(Msg::StartRename(Tree::Projects, rel.clone()));
+        ui.close();
+    }
+    if ui.button(ic(ph::FOLDER_OPEN, "Open in file manager")).clicked() {
+        out.push(Msg::ShowInFileManager(p.dir.clone()));
+        ui.close();
+    }
+    if ui.button(ic(ph::TRASH, "Delete… (to the trash)")).clicked() {
+        let text = format!(
+            "Delete project {}? {}. It goes to the trash; the images stay in the store until Clean up.",
+            p.name(),
+            st.delete_summary(Tree::Projects, &rel)
+        );
+        out.push(Msg::Ask(text, Box::new(Msg::DeleteNode(Tree::Projects, rel))));
+        ui.close();
+    }
+}
+
+/// "All projects › clients › acme": the Grid's scope; click a part to go up.
+fn breadcrumb(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    let scope = st.project_scope();
+    ui.horizontal(|ui| {
+        if ui.link(ic(ph::FOLDERS, "All projects")).clicked() {
+            out.push(Msg::SelectProjectFolder(Some(Default::default())));
+        }
+        let mut acc = std::path::PathBuf::new();
+        for c in scope.components() {
+            acc.push(c);
+            ui.weak("›");
+            if ui.link(c.as_os_str().to_string_lossy()).clicked() {
+                out.push(Msg::SelectProjectFolder(Some(acc.clone())));
+            }
+        }
+        ui.weak(format!("· {} project(s) here and below", st.projects_in_scope().len()));
+        crate::review::show_outputs_button(ui, st, OutputSource::ProjectFolder(scope.clone()), out);
+    });
+}
+
+/// The Generate form's images: one list, each image a reference
+/// (`<imageN>`, numbered in list order), the img2img start image (at most
+/// one), both, or parked (neither: kept, not sent).
+fn images_pane(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    root: &std::path::Path,
+    tex: &mut Textures,
+    f: &mut increart_gui_core::GenerateForm,
+    out: &mut Vec<Msg>,
+) {
+    let refs = f.refs();
+    ui.horizontal(|ui| {
+        ui.heading(ic(ph::IMAGES, "Images"));
+        let text = format!("{} / {} references", refs.len(), increart_gui_core::MAX_REFS);
+        if refs.len() > increart_gui_core::MAX_REFS {
+            ui.colored_label(BAD, format!("{text}: more than Qwen-Image 2.1 takes"));
+        } else {
+            ui.weak(text);
+        }
+    });
+    ui.weak("<imageN>: a reference, numbered in this order. start: the img2img start image (one). Neither: parked, not sent.");
+    ui.horizontal(|ui| {
+        if ui.button(ic(ph::FILE_PLUS, "Add file…")).clicked() {
+            out.push(Msg::Pick(PickKind::GenerateRefs));
+        }
+        if ui.button(ic(ph::IMAGES, "From library…")).on_hover_text("browse the input and output libraries").clicked()
+        {
+            out.push(Msg::RefPicker(true));
+        }
+    });
+    ui.weak("or drop image files here");
+    // what the prompt names vs what's there
+    let tags: std::collections::BTreeSet<usize> =
+        increart_gui_core::image_tags(&f.prompt).into_iter().map(|(_, n)| n).collect();
+    for n in tags.iter().filter(|n| **n == 0 || **n > refs.len()) {
+        let why = if refs.is_empty() && f.init().is_some() {
+            " (the start image isn't a reference: turn on its <imageN>)"
+        } else {
+            ""
+        };
+        ui.colored_label(BAD, format!("The prompt names <image{n}>, but there are {} reference(s){why}", refs.len()));
+    }
+    ui.separator();
+    if f.images.is_empty() {
+        ui.weak("No images: the run is text-to-image.");
+    }
+    let n = f.images.len();
+    ScrollArea::vertical().auto_shrink([false, true]).id_salt("gen_images_scroll").show(ui, |ui| {
+        for i in 0..n {
+            let x = f.images[i].clone();
+            let tag = f.tag_of(i);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let t = tex.thumb(root, &x.image);
+                    let resp = thumb(ui, t.as_ref(), 84.0, x.start, None);
+                    if !x.reference && !x.start {
+                        ui.painter().rect_filled(resp.rect, 2.0, egui::Color32::from_black_alpha(150));
+                    }
+                    if tag == Some(1) {
+                        // where it is, for the screenshot tour's double-click check
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_first_ref"), resp.rect));
+                    }
+                    let resp = resp.on_hover_text("double-click to view · right-click to copy");
+                    if resp.double_clicked() {
+                        out.push(Msg::Preview(Some(x.image.clone())));
+                    }
+                    resp.context_menu(|ui| {
+                        crate::widgets::copy_image_item(ui, root, &x.image, out);
+                        if ui.button(ic(ph::ARROWS_OUT, "View large")).clicked() {
+                            out.push(Msg::Preview(Some(x.image.clone())));
+                            ui.close();
+                        }
+                    });
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.weak(tex.dims_text(root, &x.image));
+                            if let Some([w, h]) = tex.dims(root, &x.image) {
+                                let fit = increart_gui_core::fit_size(w, h);
+                                let tip = if fit == (w, h) {
+                                    format!("set the output size to {} × {}", fit.0, fit.1)
+                                } else {
+                                    format!(
+                                        "set the output size to {} × {}: this image's aspect, \
+                                         in multiples of 32 within 256–2048",
+                                        fit.0, fit.1
+                                    )
+                                };
+                                let r = ui.add_enabled(
+                                    fit != (f.width, f.height),
+                                    egui::Button::new(ic(ph::ARROWS_OUT_SIMPLE, "use size")).small(),
+                                );
+                                if r.on_hover_text(tip)
+                                    .on_disabled_hover_text("the output size already matches")
+                                    .clicked()
+                                {
+                                    (f.width, f.height) = fit;
+                                }
+                            }
+                        });
+                        if let Some(u) = st.usage(&x.image).label() {
+                            ui.weak(RichText::new(u).small());
+                        }
+                        ui.horizontal(|ui| {
+                            let label = tag.map_or("<imageN>".to_string(), |k| format!("<image{k}>"));
+                            if ui
+                                .selectable_label(x.reference, label)
+                                .on_hover_text("a reference the prompt can name (Qwen-Image's editing)")
+                                .clicked()
+                            {
+                                out.push(Msg::ImageRoles { index: i, reference: !x.reference, start: x.start });
+                            }
+                            if ui
+                                .selectable_label(x.start, "start")
+                                .on_hover_text("the img2img start image: the run starts from it, keeping its layout")
+                                .clicked()
+                            {
+                                out.push(Msg::ImageRoles { index: i, reference: x.reference, start: !x.start });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if let Some(k) = tag
+                                && ui
+                                    .small_button(ph::TEXT_T)
+                                    .on_hover_text(format!("insert <image{k}> into the prompt"))
+                                    .clicked()
+                            {
+                                let (g, end) = with_tag(f, &format!("<image{k}>"), crate::presets::selection(ui.ctx()));
+                                *f = g;
+                                crate::presets::focus_prompt_at(ui.ctx(), end);
+                            }
+                            if ui
+                                .add_enabled(i > 0, egui::Button::new(ph::ARROW_UP).small())
+                                .on_hover_text("move up")
+                                .clicked()
+                            {
+                                out.push(Msg::MoveImage { from: i, to: i - 1 });
+                            }
+                            if ui
+                                .add_enabled(i + 1 < n, egui::Button::new(ph::ARROW_DOWN).small())
+                                .on_hover_text("move down")
+                                .clicked()
+                            {
+                                out.push(Msg::MoveImage { from: i, to: i + 1 });
+                            }
+                            if ui.small_button(ph::X).on_hover_text("remove from the list").clicked() {
+                                out.push(Msg::RemoveImage(i));
+                            }
+                        });
+                        if x.reference && !tags.contains(&tag.unwrap_or(0)) {
+                            ui.weak("not named in the prompt");
+                        }
+                        if !x.reference && !x.start {
+                            ui.weak("parked: not sent");
+                        }
+                    });
+                });
+                if x.start {
+                    // shown as how much of the start image to keep; sd-server
+                    // gets strength = 1 − keep (how much is redrawn)
+                    let mut keep = ((1.0 - f.strength) * 100.0).round();
+                    let r = ui
+                        .add(egui::Slider::new(&mut keep, 0.0..=95.0).step_by(5.0).suffix(" %").text("keep"))
+                        .on_hover_text(
+                            "How much of the start image the result keeps.\n\
+                             90 %: barely changed · 50 %: same layout, details redrawn · 0 %: start image ignored\n\
+                             (sent to sd-server as strength = 1 − keep)",
+                        );
+                    if r.changed() {
+                        f.strength = 1.0 - keep / 100.0;
+                    }
+                    // measured: the same image as start + <imageN> comes back nearly unchanged
+                    // whatever the prompt asks, even at strength 0.75
+                    ui.colored_label(
+                        NEUTRAL,
+                        "With a start image the result stays close to it, whatever the prompt asks. \
+                         For instruction edits (remove, change, add …) untick start and keep <imageN>.",
+                    );
+                    if let Some([w, h]) = tex.dims(root, &x.image)
+                        && (w, h) != (f.width, f.height)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak(format!("resized to {} × {}", f.width, f.height));
+                            let fit = increart_gui_core::fit_size(w, h);
+                            if fit != (f.width, f.height)
+                                && ui
+                                    .small_button(format!("Use {} × {}", fit.0, fit.1))
+                                    .on_hover_text("output size with the start image's aspect (multiples of 32)")
+                                    .clicked()
+                            {
+                                (f.width, f.height) = fit;
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Names the project "New project from this image" or "Duplicate project
+/// with this image" makes.
+pub fn new_project_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
+    let (Some(d), Some(root)) = (&st.new_project, &st.library) else { return };
+    let duplicate = d.target == increart_gui_core::UseTarget::DuplicateProject;
+    let source = st.output_link(&d.image).and_then(|o| st.project_of_link(o));
+    let m = egui::Modal::new(egui::Id::unique("new_project_name")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        let title = if duplicate { "Duplicate project with this image" } else { "New project from this image" };
+        ui.heading(ic(if duplicate { ph::COPY } else { ph::ROCKET_LAUNCH }, title));
+        ui.horizontal(|ui| {
+            let t = tex.thumb(root, &d.image);
+            thumb(ui, t.as_ref(), 72.0, false, None);
+            ui.vertical(|ui| {
+                if let Some(p) = source {
+                    let parent = p.dir.parent().map(|x| x.display().to_string()).unwrap_or_default();
+                    ui.weak(if duplicate {
+                        format!("A copy of {} (settings, sources, draft; no images), in {parent}/", p.name())
+                    } else {
+                        format!("A new project next to {}, in {parent}/", p.name())
+                    });
+                }
+                ui.label("Name");
+                let mut name = d.name.clone();
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0));
+                crate::widgets::focus_until_done(&r);
+                if name != d.name {
+                    out.push(Msg::EditNewProjectName(name.clone()));
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    out.push(Msg::ConfirmNewProject);
+                }
+                if let Err(e) = increart_core::library::validate_name(name.trim()) {
+                    ui.colored_label(BAD, e.to_string());
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(ic(ph::CHECK, "Create   Enter")).strong()).clicked() {
+                out.push(Msg::ConfirmNewProject);
+            }
+            if ui.button("Cancel   Esc").clicked() {
+                out.push(Msg::CancelNewProject);
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::CancelNewProject);
+    }
+}
+
+/// Names the copy a project's Duplicate makes.
+pub fn duplicate_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    let Some(d) = &st.duplicate else { return };
+    let m = egui::Modal::new(egui::Id::unique("duplicate_project")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        ui.heading(ic(ph::COPY, "Duplicate project"));
+        let source = d.path.file_name().unwrap_or_default().to_string_lossy();
+        let parent = d.path.parent().map(|x| x.display().to_string()).unwrap_or_default();
+        ui.weak(format!("A copy of {source} (settings, sources, draft; no images), in projects/{parent}"));
+        ui.label("Name");
+        let mut name = d.name.clone();
+        let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+        crate::widgets::focus_until_done(&r);
+        if name != d.name {
+            out.push(Msg::EditDuplicateName(name.clone()));
+        }
+        let problem = match increart_core::library::validate_name(name.trim()) {
+            Err(e) => Some(e.to_string()),
+            Ok(()) if st.project_name_taken(&d.path, name.trim()) => Some("already exists here".to_string()),
+            Ok(()) => None,
+        };
+        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && problem.is_none() {
+            out.push(Msg::ConfirmDuplicate);
+        }
+        if let Some(e) = &problem {
+            ui.colored_label(BAD, e);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Duplicate   Enter")).strong());
+            if ui.add_enabled(problem.is_none(), create).clicked() {
+                out.push(Msg::ConfirmDuplicate);
+            }
+            if ui.button("Cancel   Esc").clicked() {
+                out.push(Msg::CancelDuplicate);
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::CancelDuplicate);
+    }
+}
+
+/// Promote into project: step 1 names it (Create puts it where the dialog
+/// says), step 2 picks the folder from a tree, optionally a new folder in it.
+pub fn promote_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    let Some(d) = &st.promote else { return };
+    let m = egui::Modal::new(egui::Id::unique("promote_ideas")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        let step = if d.choosing { "Promote into project · location" } else { "Promote into project" };
+        ui.heading(ic(ph::ROCKET_LAUNCH, step));
+        let what = match d.ideas.len() {
+            0 => "The new idea goes to the input library and into a new project.".to_string(),
+            1 => "The idea goes into a new project.".to_string(),
+            n => format!("The {n} ideas go into a new project."),
+        };
+        ui.weak(what);
+        if d.choosing {
+            promote_location(ui, st, d, out);
+        } else {
+            promote_name_step(ui, st, d, out);
+        }
+    });
+    if m.should_close() {
+        out.push(Msg::CancelPromote);
+    }
+}
+
+fn promote_name_step(ui: &mut egui::Ui, st: &AppState, d: &increart_gui_core::PromoteDialog, out: &mut Vec<Msg>) {
+    ui.label("Project name");
+    let mut name = d.name.clone();
+    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY).hint_text("project name"));
+    crate::widgets::focus_until_done(&r);
+    // the dialog as edited this frame
+    let mut d = d.clone();
+    if name != d.name {
+        out.push(Msg::EditPromoteName(name.clone()));
+        d.name = name.clone();
+    }
+    let problem = increart_gui_core::promote_problem(st, &d);
+    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && problem.is_none() {
+        out.push(Msg::ConfirmPromote);
+    }
+    if let Some(e) = &problem
+        && !name.trim().is_empty()
+    {
+        ui.colored_label(BAD, e);
+    }
+    let mut in_folder = d.new_folder.is_some();
+    let label = match d.new_folder.as_deref().map(str::trim) {
+        Some(f) if !d.own_folder() => format!("In a new folder “{f}”"),
+        _ => "In a new folder of the same name".to_string(),
+    };
+    if ui.checkbox(&mut in_folder, label).changed() {
+        let folder = in_folder.then(|| d.name.trim().to_string());
+        out.push(Msg::PromoteNewFolder(folder.clone()));
+        d.new_folder = folder;
+    }
+    ui.add_space(4.0);
+    promote_result(ui, st, &d);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Create here   Enter")).strong());
+        if ui.add_enabled(problem.is_none(), create).clicked() {
+            out.push(Msg::ConfirmPromote);
+        }
+        if ui.button(ic(ph::FOLDER_OPEN, "Choose location…")).clicked() {
+            out.push(Msg::PromoteChoose(true));
+        }
+        if ui.button("Cancel   Esc").clicked() {
+            out.push(Msg::CancelPromote);
+        }
+    });
+}
+
+/// Where the project will be, as a path under `projects/`.
+fn promote_result(ui: &mut egui::Ui, st: &AppState, d: &increart_gui_core::PromoteDialog) {
+    let (at, exists) = increart_gui_core::promote_folder(st, d);
+    let name = if d.name.trim().is_empty() { "…" } else { d.name.trim() };
+    let path = Path::new("projects").join(&at).join(name);
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("→");
+        ui.label(RichText::new(path.display().to_string()).monospace());
+        if !exists {
+            ui.weak("(new folder)");
+        }
+    });
+}
+
+fn promote_location(ui: &mut egui::Ui, st: &AppState, d: &increart_gui_core::PromoteDialog, out: &mut Vec<Msg>) {
+    let mut filter = d.filter.clone();
+    // Enter in the filter (or the new folder's name) only leaves the field
+    let mut field_enter = false;
+    ui.horizontal(|ui| {
+        ui.label(ph::MAGNIFYING_GLASS);
+        let r =
+            ui.add(egui::TextEdit::singleline(&mut filter).hint_text("filter folders").desired_width(f32::INFINITY));
+        field_enter |= r.lost_focus();
+    });
+    if filter != d.filter {
+        out.push(Msg::PromoteFilter(filter.clone()));
+    }
+    let words: Vec<String> = filter.to_lowercase().split_whitespace().map(String::from).collect();
+    let folders = &st.index.project_folders;
+    // shown: matches and their ancestors (the selected folder always)
+    let matches = |f: &Path| words.iter().all(|w| f.to_string_lossy().to_lowercase().contains(w));
+    let shown = |f: &Path| words.is_empty() || f == d.parent || folders.iter().any(|g| g.starts_with(f) && matches(g));
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+            folder_row(ui, d, Path::new(""), "projects", 0, out);
+            let mut sorted: Vec<&PathBuf> = folders.iter().filter(|f| shown(f)).collect();
+            sorted.sort_by_key(|f| f.to_string_lossy().to_lowercase());
+            for f in sorted {
+                let depth = f.components().count();
+                let label = f.file_name().unwrap_or_default().to_string_lossy();
+                folder_row(ui, d, f, &label, depth, out);
+            }
+            if !words.is_empty() && !folders.iter().any(|g| matches(g)) {
+                ui.weak("No folder matches.");
+            }
+        });
+    });
+    let here = if d.parent.as_os_str().is_empty() {
+        "projects".to_string()
+    } else {
+        d.parent.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    };
+    if d.new_folder.is_none()
+        && ui
+            .button(ic(ph::FOLDER_PLUS, &format!("New folder in “{here}”")))
+            .on_hover_text("made when you create the project")
+            .clicked()
+    {
+        out.push(Msg::PromoteNewFolder(Some(d.name.trim().to_string())));
+    }
+    let mut d = d.clone();
+    if let Some(new) = d.new_folder.clone() {
+        ui.horizontal(|ui| {
+            ui.label(ic(ph::FOLDER_PLUS, &format!("New folder in “{here}”")));
+            let mut name = new.clone();
+            let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("folder name").desired_width(200.0));
+            if ui.memory(|m| m.focused().is_none()) && !field_enter {
+                r.request_focus();
+            }
+            field_enter |= r.lost_focus();
+            if name != new {
+                out.push(Msg::PromoteNewFolder(Some(name.clone())));
+            }
+            if ui.small_button(ph::X).on_hover_text("no new folder").clicked() {
+                out.push(Msg::PromoteNewFolder(None));
+            }
+            d.new_folder = Some(name);
+        });
+    }
+    let problem = increart_gui_core::promote_problem(st, &d);
+    if let Some(e) = &problem {
+        ui.colored_label(BAD, e);
+    }
+    promote_result(ui, st, &d);
+    ui.add_space(4.0);
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.horizontal(|ui| {
+        if ui.button(ic(ph::ARROW_LEFT, "Back")).clicked() {
+            out.push(Msg::PromoteChoose(false));
+        }
+        let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Create   Enter")).strong());
+        if ui.add_enabled(problem.is_none(), create).clicked() || enter && !field_enter && problem.is_none() {
+            out.push(Msg::ConfirmPromote);
+        }
+        if ui.button("Cancel   Esc").clicked() {
+            out.push(Msg::CancelPromote);
+        }
+    });
+}
+
+/// One folder in the location tree: indented, selectable.
+fn folder_row(
+    ui: &mut egui::Ui,
+    d: &increart_gui_core::PromoteDialog,
+    path: &Path,
+    label: &str,
+    depth: usize,
+    out: &mut Vec<Msg>,
+) {
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * 16.0);
+        let selected = d.parent == path;
+        let icon = if selected { ph::FOLDER_OPEN } else { ph::FOLDER };
+        if ui.selectable_label(selected, ic(icon, label)).clicked() {
+            out.push(Msg::PromoteParent(path.to_path_buf()));
+        }
+    });
+}
+
+/// Asks before renumbering the prompt's `<imageN>` tags after the image
+/// list changed.
+pub fn retag_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    let Some(r) = &st.retag else { return };
+    let m = egui::Modal::new(egui::Id::unique("retag")).show(ctx, |ui| {
+        ui.set_max_width(520.0);
+        ui.heading(ic(ph::TEXT_T, "Update the prompt's image tags?"));
+        ui.label("The image list changed the numbers of images the prompt names:");
+        for (old, new) in &r.changes {
+            match new {
+                Some(n) => ui.label(format!("    <image{old}>  →  <image{n}>")),
+                None => ui.label(format!("    <image{old}>  →  [removed image]   (no longer a reference)")),
+            };
+        }
+        ui.add_space(6.0);
+        ui.weak("The current prompt is saved to its history first.");
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(ic(ph::CHECK, "Update prompt")).strong()).clicked() {
+                out.push(Msg::RetagConfirm);
+            }
+            if ui.button("Leave the prompt as it is").clicked() {
+                out.push(Msg::RetagDismiss);
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::RetagDismiss);
+    }
+}
+
+/// A reference or start image shown large, in a fixed box nearly the
+/// window's size (hairline border, over a dark backdrop), scaled to fit.
+/// The wheel, `+` / `-` and the bar below zoom (the wheel at the pointer),
+/// dragging pans, `0` fits and `1` is 100%; ← / → step through the list it
+/// was opened from (Review, its contact sheet, the Output library's grid).
+/// There the image can be rated as in Review — 1 / G, 2 / N, 3 / B (so `1`
+/// no longer zooms), Ctrl+Z, the bar's Good · Neutral · Bad · undo, or the
+/// right-click menu — and used (E, D, R, I, the menu). A click (when not
+/// zoomed in), Esc or a click outside closes it.
+/// `keys_open` opens the shortcuts popover (for the tour).
+pub fn preview_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, keys_open: bool, out: &mut Vec<Msg>) {
+    let (Some(img), Some(root)) = (&st.preview, &st.library) else { return };
+    // the large version once it's loaded, the thumbnail until then
+    let t = tex.full(root, img).or_else(|| tex.thumb(root, img));
+    let [w, h] = tex.dims(root, img).unwrap_or([1024, 1024]);
+    let full = egui::vec2(w as f32, h as f32);
+    const BAR: f32 = 30.0;
+    let room = ctx.content_rect().size() * 0.95 - egui::vec2(0.0, BAR);
+    let fit = (room.x / full.x).min(room.y / full.y);
+    let view_id = egui::Id::unique("image_preview_view");
+    let mut v = ctx
+        .data(|d| d.get_temp::<PreviewView>(view_id))
+        .filter(|v| v.image == *img)
+        .unwrap_or_else(|| PreviewView::new(img.clone(), full, fit));
+    v.fit = fit;
+    // ← / →: the previous / next image where it was opened from, an output
+    // there, so it can be rated (its verdict) and used
+    let at = st.preview_position();
+    let verdict = at.and_then(|(i, _)| Some(st.preview_list()?.get(i)?.verdict));
+    let rates = verdict.is_some();
+    // opened from the contact sheet: ↑ / ↓ move between its style rows
+    let rows = at.is_some() && st.tab == Tab::Review && st.review_view == increart_gui_core::ReviewView::Sheet;
+    let keys = ctx.input(|i| {
+        let k = |key| i.key_pressed(key);
+        let actual = k(egui::Key::Num1) && !rates;
+        (k(egui::Key::Plus) || k(egui::Key::Equals), k(egui::Key::Minus), k(egui::Key::Num0), actual)
+    });
+    let used = out.len();
+    if at.is_some() {
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                out.push(Msg::PreviewStep(-1));
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                out.push(Msg::PreviewStep(1));
+            }
+            if rows {
+                if i.key_pressed(egui::Key::ArrowUp) {
+                    out.push(Msg::PreviewRow(-1));
+                }
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    out.push(Msg::PreviewRow(1));
+                }
+            }
+            if !rates {
+                return;
+            }
+            for (keys, v) in [
+                ([egui::Key::Num1, egui::Key::G], Verdict::Good),
+                ([egui::Key::Num2, egui::Key::N], Verdict::Neutral),
+                ([egui::Key::Num3, egui::Key::B], Verdict::Bad),
+            ] {
+                if !i.modifiers.command && keys.iter().any(|k| i.key_pressed(*k)) {
+                    out.push(Msg::PreviewRate(v));
+                }
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+                out.push(Msg::UndoReview);
+            }
+            if !i.modifiers.command {
+                for (key, msg) in [
+                    (egui::Key::E, Msg::UseImage(img.clone(), UseTarget::Edit)),
+                    (egui::Key::D, Msg::UseImage(img.clone(), UseTarget::DuplicateProject)),
+                    (egui::Key::R, Msg::ToInputLibrary(img.clone())),
+                    (egui::Key::I, Msg::NewIdeaFromImage(img.clone())),
+                ] {
+                    if i.key_pressed(key) {
+                        out.push(msg);
+                    }
+                }
+            }
+        });
+    }
+    let frame = egui::Frame::NONE
+        .fill(egui::Color32::from_gray(16))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(90)))
+        .inner_margin(1.0);
+    let m = egui::Modal::new(egui::Id::unique("image_preview"))
+        .frame(frame)
+        .backdrop_color(egui::Color32::from_black_alpha(200))
+        .show(ctx, |ui| {
+            let (zoom_in, zoom_out, fit_key, actual) = keys;
+            if zoom_in {
+                v.zoom(v.scale() * 1.25, egui::Vec2::ZERO);
+            }
+            if zoom_out {
+                v.zoom(v.scale() / 1.25, egui::Vec2::ZERO);
+            }
+            if fit_key {
+                v.reset();
+            }
+            if actual {
+                v.zoom(1.0, egui::Vec2::ZERO);
+            }
+
+            // a fixed box, nearly the whole window: zooming changes only the image
+            let view = room;
+            let (rect, resp) = ui.allocate_exact_size(view, egui::Sense::click_and_drag());
+            if let Some(p) = resp.hover_pos() {
+                let (wheel, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+                let f = pinch * (wheel / 200.0).exp();
+                if f != 1.0 {
+                    v.zoom(v.scale() * f, p - rect.center());
+                }
+            }
+            if resp.dragged() {
+                v.center -= resp.drag_delta() / v.scale();
+            }
+            let zoomed_in = v.scale() > fit * 1.001;
+            if resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if resp.hovered() && zoomed_in {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            v.clamp(view);
+            let scale = v.scale();
+            let shown = egui::Rect::from_min_size(rect.center() - v.center * scale, full * scale);
+            crate::widgets::image_fit(&ui.painter_at(rect), shown, t.as_ref());
+            let arrows = match (at.is_some(), rows) {
+                (true, true) => " · ← → previous / next · ↑ ↓ style above / below",
+                (true, false) => " · ← → previous / next",
+                _ => "",
+            };
+            let close = if zoomed_in { "drag to move · Esc to close" } else { "click or Esc to close" };
+            let (hundred, menu) = if rates { ("", "rate and use") } else { (", 1 100%", "copy") };
+            let rate = if rates { " · 1 / 2 / 3 Good / Neutral / Bad, Ctrl+Z undo" } else { "" };
+            let resp = resp.on_hover_text(format!(
+                "{}\n{:.0}% · wheel or + / − zoom, 0 fit{hundred}{arrows}{rate} · {close} · right-click to {menu}",
+                crate::widgets::size_info(w, h),
+                scale * 100.0
+            ));
+            resp.context_menu(|ui| {
+                if !rates {
+                    return crate::widgets::copy_image_item(ui, root, img, out);
+                }
+                if ui.horizontal(|ui| verdict_buttons(ui, verdict.flatten(), false, out)).inner {
+                    ui.close();
+                }
+                ui.separator();
+                crate::review::use_menu(ui, root, img, out);
+            });
+
+            let mut close_clicked = false;
+            // the bar's choices (both its sides can't borrow `out`)
+            let mut picked = vec![];
+            ui.allocate_ui_with_layout(
+                egui::vec2(view.x, BAR - 2.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    // right to left: drawn from the close button back
+                    let bar = |ui: &mut egui::Ui| {
+                        close_clicked = ui.small_button(ph::X).on_hover_text("close (Esc)").clicked();
+                        let keys = ui.small_button(ph::KEYBOARD).on_hover_text("keyboard shortcuts");
+                        let mut popup = egui::Popup::from_toggle_button_response(&keys);
+                        if keys_open {
+                            popup = popup.open_memory(egui::SetOpenCommand::Bool(true));
+                        }
+                        popup
+                            .align(egui::RectAlign::TOP_END)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| preview_keys(ui, at.is_some(), rows, rates));
+                        ui.separator();
+                        if rates {
+                            // right to left, so Good · Neutral · Bad read left to right
+                            ui.menu_button(ph::DOTS_THREE, |ui| crate::review::use_menu(ui, root, img, &mut picked))
+                                .response
+                                .on_hover_text("use this image");
+                            verdict_buttons(ui, verdict.flatten(), true, &mut picked);
+                            let undo = ui.add_enabled(
+                                !st.review_undo.is_empty(),
+                                egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE),
+                            );
+                            if undo.on_hover_text("undo the last rating (Ctrl+Z)").clicked() {
+                                picked.push(Msg::UndoReview);
+                            }
+                            ui.separator();
+                        }
+                        let one = (scale - 1.0).abs() < 1e-3;
+                        let hint = if rates {
+                            "one image pixel per screen pixel"
+                        } else {
+                            "one image pixel per screen pixel (1)"
+                        };
+                        if ui.selectable_label(one, "100%").on_hover_text(hint).clicked() {
+                            v.zoom(1.0, egui::Vec2::ZERO);
+                        }
+                        if ui.selectable_label(v.zoom.is_none(), "Fit").on_hover_text("fit the window (0)").clicked() {
+                            v.reset();
+                        }
+                        if ui.small_button(ph::MAGNIFYING_GLASS_PLUS).on_hover_text("zoom in (+)").clicked() {
+                            v.zoom(scale * 1.25, egui::Vec2::ZERO);
+                        }
+                        ui.label(RichText::new(format!("{:.0}%", scale * 100.0)).monospace());
+                        if ui.small_button(ph::MAGNIFYING_GLASS_MINUS).on_hover_text("zoom out (−)").clicked() {
+                            v.zoom(scale / 1.25, egui::Vec2::ZERO);
+                        }
+                    };
+                    let left = |ui: &mut egui::Ui| {
+                        if let Some((i, n)) = at {
+                            let prev = ui.add_enabled(i > 0, egui::Button::new(ph::CARET_LEFT).small());
+                            if prev.on_hover_text("previous image (←)").clicked() {
+                                out.push(Msg::PreviewStep(-1));
+                            }
+                            ui.label(RichText::new(format!("{} / {n}", i + 1)).monospace());
+                            let next = ui.add_enabled(i + 1 < n, egui::Button::new(ph::CARET_RIGHT).small());
+                            if next.on_hover_text("next image (→)").clicked() {
+                                out.push(Msg::PreviewStep(1));
+                            }
+                            ui.separator();
+                        }
+                        ui.weak(crate::widgets::size_info(w, h));
+                    };
+                    egui::Sides::new().show(ui, left, bar);
+                },
+            );
+            out.append(&mut picked);
+            close_clicked || resp.clicked() && !zoomed_in
+        });
+    // a use that opens another tab leaves the preview
+    let left = out[used..].iter().any(|m| matches!(m, Msg::UseImage(..)));
+    if m.inner || m.should_close() || left {
+        ctx.data_mut(|d| d.remove::<PreviewView>(view_id));
+        out.push(Msg::Preview(None));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(view_id, v));
+    }
+}
+
+/// The large preview's keyboard shortcuts, those that apply: stepping when
+/// it was opened from a list (between style rows on the contact sheet),
+/// rating and using when that list is outputs.
+fn preview_keys(ui: &mut egui::Ui, steps: bool, rows: bool, rates: bool) {
+    let mut groups: Vec<(&str, Vec<(&str, &str)>)> = vec![];
+    if steps {
+        let mut nav = vec![("← / →", "previous / next image")];
+        if rows {
+            nav.push(("↑ / ↓", "same seed, style above / below"));
+        }
+        groups.push(("Navigate", nav));
+    }
+    if rates {
+        groups.push((
+            "Rate",
+            vec![("1 / G", "Good"), ("2 / N", "Neutral"), ("3 / B", "Bad"), ("Ctrl+Z", "undo the last rating")],
+        ));
+        groups.push((
+            "Use",
+            vec![
+                ("E", "edit this image"),
+                ("D", "duplicate the project with this image"),
+                ("R", "to the input library as a ref"),
+                ("I", "new idea from this image"),
+            ],
+        ));
+    }
+    let mut zoom = vec![("wheel  + / −", "zoom in / out"), ("0", "fit the window")];
+    if !rates {
+        zoom.push(("1", "100%"));
+    }
+    zoom.push(("drag", "move, when zoomed in"));
+    groups.push(("Zoom", zoom));
+    groups.push(("Close", vec![("Esc", "close"), ("click", "close, when not zoomed in")]));
+    egui::Grid::new("preview_keys").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+        for (i, (title, rows)) in groups.into_iter().enumerate() {
+            if i > 0 {
+                ui.end_row();
+            }
+            ui.label(RichText::new(title).strong());
+            ui.end_row();
+            for (key, what) in rows {
+                ui.label(RichText::new(key).monospace());
+                ui.label(what);
+                ui.end_row();
+            }
+        }
+    });
+}
+
+/// Good · Neutral · Bad for the preview's image, the `current` verdict
+/// marked (drawn in reverse for a right-to-left bar). Whether one was clicked.
+fn verdict_buttons(ui: &mut egui::Ui, current: Option<Verdict>, rtl: bool, out: &mut Vec<Msg>) -> bool {
+    let mut clicked = false;
+    let mut all: Vec<_> = crate::review::VERDICTS.iter().zip(1..).collect();
+    if rtl {
+        all.reverse();
+    }
+    for ((label, v, color), key) in all {
+        let b = egui::Button::new(RichText::new(*label).color(*color).strong()).selected(current == Some(*v));
+        let hint = format!("{label} ({key} / {})", &label[..1]);
+        if ui.add(b).on_hover_text(hint).clicked() {
+            out.push(Msg::PreviewRate(*v));
+            clicked = true;
+        }
+    }
+    clicked
+}
+
+/// The large preview's zoom and position, kept while it shows one image.
+#[derive(Clone)]
+struct PreviewView {
+    image: increart_core::ImageRef,
+    full: egui::Vec2,
+    /// The scale that fits the window (it follows the window's size).
+    fit: f32,
+    /// `None`: fit.
+    zoom: Option<f32>,
+    /// The image point (in image pixels) at the middle of the view.
+    center: egui::Vec2,
+}
+
+impl PreviewView {
+    fn new(image: increart_core::ImageRef, full: egui::Vec2, fit: f32) -> Self {
+        PreviewView { image, full, fit, zoom: None, center: full / 2.0 }
+    }
+
+    fn scale(&self) -> f32 {
+        self.zoom.unwrap_or(self.fit)
+    }
+
+    fn reset(&mut self) {
+        (self.zoom, self.center) = (None, self.full / 2.0);
+    }
+
+    /// To scale `s` (from a quarter of fit or 100% to 800%), keeping the
+    /// image point `at` (from the view's middle) where it is.
+    fn zoom(&mut self, s: f32, at: egui::Vec2) {
+        let s = s.clamp(self.fit.min(1.0) * 0.25, self.fit.max(8.0));
+        self.center += at / self.scale() - at / s;
+        self.zoom = Some(s);
+    }
+
+    /// No blank edges: an axis smaller than the view stays centred.
+    fn clamp(&mut self, view: egui::Vec2) {
+        let (s, full) = (self.scale(), self.full);
+        let half = view / 2.0 / s;
+        let axis = |c: f32, f: f32, v: f32, h: f32| if f * s <= v { f / 2.0 } else { c.clamp(h, f - h) };
+        self.center =
+            egui::vec2(axis(self.center.x, full.x, view.x, half.x), axis(self.center.y, full.y, view.y, half.y));
+    }
+}
+
+/// The Scale dialog: a new size with the same aspect, from megapixels or
+/// one side, rounded to multiples of 32.
+pub fn scale_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_gui_core::ScaleBy;
+    let Some(d) = &st.scale else { return };
+    let mut e = d.clone();
+    let (lo, hi) = e.limits();
+    let mut apply = false;
+    let m = egui::Modal::new(egui::Id::unique("scale_dialog")).show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.heading(ic(ph::ARROWS_OUT, "Scale"));
+        ui.weak(format!("From {}", crate::widgets::size_info(d.width, d.height)));
+        ui.add_space(6.0);
+        egui::Grid::new("scale_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.radio_value(&mut e.by, ScaleBy::Megapixels, "Megapixels");
+            let max_mp = hi as f32 * hi as f32 / 1e6;
+            let r = ui.add(egui::DragValue::new(&mut e.megapixels).range(0.05..=max_mp).speed(0.01).fixed_decimals(2));
+            if r.changed() {
+                e.by = ScaleBy::Megapixels;
+            }
+            ui.end_row();
+            for (by, name, current) in [(ScaleBy::Width, "Width", d.width), (ScaleBy::Height, "Height", d.height)] {
+                if ui.radio(e.by == by, name).clicked() && e.by != by {
+                    (e.by, e.side) = (by, current);
+                }
+                let mut v = if e.by == by { e.side } else { current };
+                let r = ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(32).update_while_editing(false));
+                if r.changed() {
+                    (e.by, e.side) = (by, v);
+                }
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        let (w, h) = e.result();
+        ui.label(RichText::new(format!("→ {}", crate::widgets::size_info(w, h))).strong());
+        ui.weak(format!("Same aspect, both sides rounded to multiples of 32, within {lo}–{hi}."));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            apply = ui.button(RichText::new(ic(ph::CHECK, "Apply")).strong()).clicked();
+            if ui.button("Cancel").clicked() {
+                out.push(Msg::CloseScale);
+            }
+        });
+    });
+    if e != *d {
+        out.push(Msg::EditScale(e));
+    }
+    if apply {
+        out.push(Msg::ApplyScale);
+    } else if m.should_close() {
+        out.push(Msg::CloseScale);
+    }
+}
+
+/// The resolutions editor (DESIGN.md, Resolutions): name, size, aspect,
+/// megapixels, a time estimate; default, duplicate, swap, reorder, delete.
+pub fn resolutions_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    let Some(list) = &st.res_editor else { return };
+    let mut l = list.clone();
+    let mut open = true;
+    egui::Window::new(ic(ph::RESIZE, "Resolutions")).open(&mut open).collapsible(false).default_width(760.0).show(
+        ctx,
+        |ui| {
+            ui.weak("Sizes snap to multiples of 32 when saved; one is the default. Saved to config.rsn.");
+            let mut action: Option<(usize, &str)> = None;
+            egui::Grid::new("res").num_columns(8).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+                for h in ["default", "name", "width", "height", "aspect", "MP", "≈ per image", ""] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for (i, r) in l.iter_mut().enumerate() {
+                    if ui.radio(r.default, "").clicked() {
+                        action = Some((i, "default"));
+                    }
+                    ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut r.name));
+                    for v in [&mut r.width, &mut r.height] {
+                        let d = egui::DragValue::new(v).range(32..=4096).speed(32).update_while_editing(false);
+                        if ui.add(d).changed() {
+                            *v = increart_gui_core::round32(*v).min(4096);
+                        }
+                    }
+                    ui.label(crate::widgets::aspect(r.width, r.height));
+                    let mp = r.width as f32 * r.height as f32 / 1e6;
+                    ui.label(format!("{mp:.2}"));
+                    let mut f = st.generate.clone();
+                    (f.width, f.height) = (r.width, r.height);
+                    ui.label(fmt_secs(estimate(&f)));
+                    ui.horizontal(|ui| {
+                        for (icon, tip, what) in [
+                            (ph::COPY, "duplicate", "dup"),
+                            (ph::ARROWS_OUT, "scale… (megapixels, width or height)", "scale"),
+                            (ph::ARROWS_LEFT_RIGHT, "swap width and height", "swap"),
+                            (ph::ARROW_UP, "move up", "up"),
+                            (ph::ARROW_DOWN, "move down", "down"),
+                            (ph::TRASH, "delete", "del"),
+                        ] {
+                            if ui.small_button(icon).on_hover_text(tip).clicked() {
+                                action = Some((i, what));
+                            }
+                        }
+                    });
+                    if r.width % 32 != 0 || r.height % 32 != 0 {
+                        ui.colored_label(BAD, "not a multiple of 32: snaps on save");
+                    }
+                    if !(256..=2048).contains(&r.width) || !(256..=2048).contains(&r.height) {
+                        ui.colored_label(NEUTRAL, "outside 256–2048");
+                    }
+                    ui.end_row();
+                }
+            });
+            match action {
+                Some((i, "default")) => l.iter_mut().enumerate().for_each(|(j, r)| r.default = i == j),
+                Some((i, "dup")) => {
+                    let mut r = l[i].clone();
+                    r.default = false;
+                    l.insert(i + 1, r);
+                }
+                Some((i, "scale")) => out.push(Msg::OpenScale(increart_gui_core::ScaleTarget::Resolution(i))),
+                Some((i, "swap")) => (l[i].width, l[i].height) = (l[i].height, l[i].width),
+                Some((i, "up")) if i > 0 => l.swap(i, i - 1),
+                Some((i, "down")) if i + 1 < l.len() => l.swap(i, i + 1),
+                Some((i, "del")) if l.len() > 1 => {
+                    l.remove(i);
+                }
+                _ => {}
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(ic(ph::PLUS, "Add")).clicked() {
+                    l.push(increart_core::config::Resolution::new("", st.generate.width, st.generate.height));
+                }
+                if ui.button("Reset to built-ins").clicked() {
+                    l = increart_core::config::builtin_resolutions();
+                }
+                if ui.button(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong()).clicked() {
+                    out.push(Msg::EditResolutions(l.clone()));
+                    out.push(Msg::SaveResolutions);
+                }
+                if ui.button("Cancel").clicked() {
+                    out.push(Msg::CloseResolutions);
+                }
+            });
+        },
+    );
+    if &l != list {
+        out.push(Msg::EditResolutions(l));
+    }
+    if !open {
+        out.push(Msg::CloseResolutions);
+    }
+}
+
+fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
+    let Some(p) = st.project_entry() else {
+        ui.weak("Select a project in the tree (Generate needs a single project).");
+        return;
+    };
+    let Some(root) = st.library.clone() else { return };
+    // Files dragged from the desktop onto Generate become references.
+    let (hovering, dropped) = ui.ctx().input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.clone()));
+    if !dropped.is_empty() {
+        out.push(Msg::DropRefs(dropped.iter().map(|f| f.path().to_path_buf()).collect()));
+    }
+    if hovering {
+        let painter =
+            ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("refs_drop")));
+        let r = ui.max_rect().shrink(12.0);
+        painter.rect(
+            r,
+            12.0,
+            egui::Color32::from_rgba_unmultiplied(40, 90, 160, 120),
+            egui::Stroke::new(3.0, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            ic(ph::IMAGES, "Drop to add as references"),
+            egui::FontId::proportional(28.0),
+            egui::Color32::WHITE,
+        );
+    }
+    let mut f = st.generate.clone();
+    Panel::right("gen_images")
+        .default_size(330.0)
+        .resizable(true)
+        .show(ui, |ui| images_pane(ui, st, &root, tex, &mut f, out));
+    // the rest of the space, so the form stays left of the images pane
+    egui::CentralPanel::default().show(ui, |ui| {
+        ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+            ui.heading(ic(ph::MAGIC_WAND, &format!("Generate in {}", p.name())));
+            ui.horizontal(|ui| {
+                ui.label("Label");
+                ui.add(egui::TextEdit::singleline(&mut f.label).desired_width(140.0));
+                ui.label("Model");
+                let preset = st.config.recipes.get(f.preset).map_or("?", |r| r.name.as_str());
+                ComboBox::from_id_salt("preset").selected_text(preset).show_ui(ui, |ui| {
+                    for (i, r) in st.config.recipes.iter().enumerate() {
+                        if ui.selectable_label(i == f.preset, &r.name).clicked() {
+                            out.push(Msg::SelectRecipe(i));
+                        }
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Mode");
+                ui.selectable_value(&mut f.sweep.on, false, ic(ph::SQUARE, "Single prompt"))
+                    .on_hover_text("one run: this prompt × the seeds");
+                ui.selectable_value(&mut f.sweep.on, true, ic(ph::SQUARES_FOUR, "Sweep"))
+                    .on_hover_text("a run per style (prompt preset) or per value of a setting, all with the same seeds");
+            });
+            ui.horizontal(|ui| {
+                let template = f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Style;
+                ui.label(if template { "Template" } else { "Prompt" });
+                if ui
+                    .small_button(ic(ph::CLOCK_COUNTER_CLOCKWISE, "History…"))
+                    .on_hover_text("past prompts of this project")
+                    .clicked()
+                {
+                    out.push(Msg::OpenHistory(increart_core::HistoryKey::Project(p.project.id.clone())));
+                }
+                let open = st.presets_panel.is_some();
+                if ui
+                    .selectable_label(open, ic(ph::SWATCHES, "Presets…"))
+                    .on_hover_text("ready-made prompts by task: styles, background removal, repair…")
+                    .clicked()
+                {
+                    out.push(Msg::PresetsPanel(!open));
+                }
+                if ui
+                    .small_button(ic(ph::FLOPPY_DISK, "Save as preset…"))
+                    .on_hover_text("keep this prompt as a preset (all libraries)")
+                    .clicked()
+                {
+                    out.push(Msg::OpenSavePreset);
+                }
+            });
+            let hint = if f.sweep.on {
+                "Optional: your text with {preset} where each preset's prompt goes, e.g. \
+                 \"the fox from <image1> reading a newspaper, {preset}\". \
+                 Empty or without {preset}: each preset's own prompt."
+            } else {
+                ""
+            };
+            let r = ui.add(
+                egui::TextEdit::multiline(&mut f.prompt)
+                    .id(crate::presets::prompt_id())
+                    .hint_text(hint)
+                    .desired_rows(if f.sweep.on { 3 } else { 6 })
+                    .desired_width(f32::INFINITY),
+            );
+            crate::presets::select_in_prompt(ui, st, &r, out);
+            r.context_menu(|ui| {
+                if ui.button(ic(ph::SWATCHES, "Presets…")).clicked() {
+                    out.push(Msg::PresetsPanel(true));
+                    ui.close();
+                }
+                if ui.button(ic(ph::FLOPPY_DISK, "Save as preset…")).clicked() {
+                    out.push(Msg::OpenSavePreset);
+                    ui.close();
+                }
+            });
+            let slots = increart_core::prompts::slots(&f.prompt);
+            if f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Style {
+                if !f.prompt.trim().is_empty() && !f.prompt.contains(increart_core::prompts::PRESET_SLOT) {
+                    ui.colored_label(NEUTRAL, "No {preset} in the template: each run uses its preset's prompt alone.");
+                }
+            } else if !slots.is_empty() {
+                let names: Vec<&str> = slots.iter().map(|r| &f.prompt[r.clone()]).collect();
+                ui.colored_label(BAD, format!("Fill in {} (type over it) before queueing.", names.join(", ")));
+            }
+            ui.horizontal(|ui| {
+                ui.add_enabled(false, egui::Button::new(ic(ph::MAGIC_WAND, "Rewrite")))
+                    .on_disabled_hover_text("Prompt rewriting is not connected yet");
+                ui.weak("For a transparent background, ask for it in the prompt (e.g. \"make the background transparent\").");
+            });
+            ui.label("Negative prompt");
+            ui.add(egui::TextEdit::singleline(&mut f.negative).desired_width(f32::INFINITY));
+            if f.sweep.on {
+                ui.add_space(6.0);
+                crate::presets::sweep_panel(ui, st, &mut f, out);
+            }
+
+            ui.add_space(6.0);
+            // Size on its own row (it wraps when narrow), the rest in a grid
+            // narrow enough for the space left of the Images pane
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Size");
+                let label = st
+                    .config
+                    .resolutions
+                    .iter()
+                    .find(|r| (r.width, r.height) == (f.width, f.height))
+                    .map_or(format!("{} × {}  custom", f.width, f.height), |r| r.label());
+                let label = format!(
+                    "{label}   {} · {}",
+                    crate::widgets::aspect(f.width, f.height),
+                    crate::widgets::mp(f.width, f.height)
+                );
+                ComboBox::from_id_salt("size").selected_text(label).width(330.0).show_ui(ui, |ui| {
+                    for r in &st.config.resolutions {
+                        let (a, m) = (crate::widgets::aspect(r.width, r.height), crate::widgets::mp(r.width, r.height));
+                        let text = format!("{}   {a} · {m}", r.label());
+                        if ui.selectable_label((r.width, r.height) == (f.width, f.height), text).clicked() {
+                            (f.width, f.height) = (r.width, r.height);
+                        }
+                    }
+                });
+                // typed or dragged sizes snap to multiples of 32 when committed
+                for (i, v) in [&mut f.width, &mut f.height].into_iter().enumerate() {
+                    if i == 1 {
+                        ui.label("×");
+                    }
+                    let r = ui.add(egui::DragValue::new(v).range(256..=2048).speed(32).update_while_editing(false));
+                    if r.changed() {
+                        *v = increart_gui_core::round32(*v).clamp(256, 2048);
+                    }
+                    if i == 0 {
+                        // where it is, for the screenshot tour's rounding check
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_width_field"), r.rect));
+                    }
+                }
+                if ui
+                    .small_button(ic(ph::ARROWS_OUT, "Scale…"))
+                    .on_hover_text("to a number of megapixels, or a width / height, keeping the aspect")
+                    .clicked()
+                {
+                    out.push(Msg::OpenScale(increart_gui_core::ScaleTarget::Generate));
+                }
+                aspect_menu(ui, &root, tex, &mut f);
+                if ui.small_button("Edit…").on_hover_text("the resolution list").clicked() {
+                    out.push(Msg::OpenResolutions);
+                }
+            });
+            egui::Grid::new("gen_params").num_columns(4).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Steps");
+                ui.add(egui::DragValue::new(&mut f.steps).range(1..=100));
+                ui.label("CFG");
+                ui.add(egui::DragValue::new(&mut f.cfg).range(1.0..=20.0).speed(0.1).fixed_decimals(1));
+                ui.end_row();
+                ui.label("Flow shift");
+                ui.horizontal(|ui| {
+                    let mut on = f.flow_shift.is_some();
+                    ui.checkbox(&mut on, "");
+                    let mut v = f.flow_shift.unwrap_or(3.0);
+                    ui.add_enabled(on, egui::DragValue::new(&mut v).range(0.0..=20.0).speed(0.1).fixed_decimals(1));
+                    f.flow_shift = on.then_some(v);
+                    if !on {
+                        ui.weak("recipe schedule");
+                    }
+                });
+                ui.end_row();
+                ui.label("Seeds");
+                ui.add(egui::DragValue::new(&mut f.seeds).range(1..=999));
+                ui.label("First seed");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut f.first_seed));
+                    let next = st.next_seed();
+                    if f.first_seed != 0
+                        && ui
+                            .small_button("0")
+                            .on_hover_text("start at seed 0, so seeds line up with earlier runs for A/B comparison")
+                            .clicked()
+                    {
+                        f.first_seed = 0;
+                    }
+                    if f.first_seed != next
+                        && ui
+                            .small_button(format!("{next}"))
+                            .on_hover_text("continue after this project's last seed")
+                            .clicked()
+                    {
+                        f.first_seed = next;
+                    }
+                });
+                ui.end_row();
+            });
+            if !f.width.is_multiple_of(32) || !f.height.is_multiple_of(32) {
+                ui.colored_label(BAD, "Width and height must be multiples of 32.");
+            }
+            let per = estimate(&f);
+            ui.weak(format!("≈ {} per image on one R9700 (rough estimate)", fmt_secs(per)));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let label = if f.sweep.on {
+                    let runs = increart_gui_core::update::sweep_runs(st).map_or(0, |(r, _)| r.len());
+                    format!("Queue sweep: {runs} runs × {} seed(s)", f.seeds)
+                } else {
+                    format!("Queue {} seed(s)", f.seeds)
+                };
+                if ui.button(RichText::new(ic(ph::PLAY, &label)).strong()).clicked() {
+                    out.push(Msg::QueueGenerate);
+                }
+                if ui
+                    .button(ic(ph::ERASER, "Clear"))
+                    .on_hover_text("reset the form (and this project's draft)")
+                    .clicked()
+                {
+                    out.push(Msg::ClearGenerate);
+                }
+                crate::app::draft_note(ui, st, st.generate_dirty);
+            });
+            if !st.engine_running {
+                ui.weak("No servers: the run is saved and generated once servers are connected.");
+            }
+        });
+    });
+    if f != st.generate {
+        out.push(Msg::Generate(f));
+    }
+}
+
+/// **Aspect**: common ratios (landscape and portrait), a swap, and the
+/// aspect of each reference, at about the same megapixels.
+fn aspect_menu(ui: &mut egui::Ui, root: &std::path::Path, tex: &mut Textures, f: &mut increart_gui_core::GenerateForm) {
+    use increart_gui_core::{ScaleBy, scaled};
+    let mp = f.width as f64 * f.height as f64 / 1e6;
+    let set = |f: &mut increart_gui_core::GenerateForm, w: u32, h: u32| {
+        (f.width, f.height) = scaled(w, h, ScaleBy::Megapixels, mp, (256, 2048));
+    };
+    ui.menu_button(ic(ph::FRAME_CORNERS, "Aspect"), |ui| {
+        ui.weak(format!("at about {mp:.2} MP"));
+        egui::Grid::new("aspects").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+            for (w, h) in [(1, 1), (5, 4), (4, 3), (3, 2), (16, 10), (16, 9), (2, 1), (21, 9)] {
+                if ui.button(format!("{w}:{h}")).clicked() {
+                    set(f, w, h);
+                    ui.close();
+                }
+                if w != h && ui.button(format!("{h}:{w}")).clicked() {
+                    set(f, h, w);
+                    ui.close();
+                }
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        if ui.button(ic(ph::ARROWS_LEFT_RIGHT, "Swap width and height")).clicked() {
+            (f.width, f.height) = (f.height, f.width);
+            ui.close();
+        }
+        for (i, img) in f.refs().iter().enumerate() {
+            let Some([w, h]) = tex.dims(root, img) else { continue };
+            let text = format!("Like <image{}>  ({})", i + 1, crate::widgets::aspect(w, h));
+            if ui.button(text).clicked() {
+                set(f, w, h);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// The form with `tag` in its prompt: in place of the selection (characters;
+/// at the end if the prompt was never focused), spaced from the words
+/// around it. Also the character just after the tag, for the cursor.
+fn with_tag(
+    f: &increart_gui_core::GenerateForm,
+    tag: &str,
+    sel: Option<std::ops::Range<usize>>,
+) -> (increart_gui_core::GenerateForm, usize) {
+    let mut f = f.clone();
+    let p = &mut f.prompt;
+    let n = p.chars().count();
+    let sel = sel.unwrap_or(n..n);
+    let byte = |c: usize| p.char_indices().nth(c).map_or(p.len(), |(i, _)| i);
+    let (a, b) = (byte(sel.start.min(n)), byte(sel.end.min(n)));
+    // no space after an opening bracket or before closing punctuation
+    let before = if a > 0 && !p[..a].ends_with(|c: char| c.is_whitespace() || "([{".contains(c)) { " " } else { "" };
+    let after = if b < p.len() && !p[b..].starts_with(|c: char| c.is_whitespace() || ",.;:!?)]}".contains(c)) {
+        " "
+    } else {
+        ""
+    };
+    let insert = format!("{before}{tag}{after}");
+    let end = p[..a].chars().count() + before.chars().count() + tag.chars().count();
+    p.replace_range(a..b, &insert);
+    (f, end)
+}
+
+/// Rough time per image (DESIGN.md, Measurements): ~1.57 s per step per
+/// model pass at 1024², CFG > 1 doubles the passes, attention grows with
+/// target × (target + ref) tokens.
+pub fn estimate(f: &increart_gui_core::GenerateForm) -> f32 {
+    let t = (f.width / 16 * f.height / 16) as f32;
+    let r = 4096.0 * f.refs().len() as f32;
+    let per_pass = 1.0e-4 * t + 6.9e-8 * t * (t + r);
+    let passes = if f.cfg > 1.0 { 2.0 } else { 1.0 };
+    per_pass * passes * f.steps as f32 + 3.0
+}
+
+pub fn fmt_secs(s: f32) -> String {
+    if s < 90.0 { format!("{s:.0} s") } else { format!("{:.1} min", s / 60.0) }
+}
+
+fn jobs(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    ui.heading(ic(ph::HARD_DRIVES, "Servers"));
+    server_list(ui, st);
+    if ui.button(ic(ph::GEAR, "Change servers…")).clicked() {
+        out.push(Msg::OpenServerDialog);
+    }
+    ui.separator();
+    ui.heading(ic(ph::QUEUE, "Runs"));
+    order_toggle(ui, st, out);
+    // the servers stay in view; the runs scroll
+    ScrollArea::vertical().auto_shrink([false, false]).id_salt("jobs_runs").show(ui, |ui| run_list(ui, st, out));
+}
+
+/// Spread evenly · One at a time: how the queued runs share the servers.
+pub fn order_toggle(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_core::scheduler::Order;
+    ui.horizontal(|ui| {
+        ui.weak("Order");
+        for (o, label, tip) in [
+            (
+                Order::Spread,
+                ic(ph::SHUFFLE_ANGULAR, "Spread evenly"),
+                "every run gets a seed in turn: all runs move along together (style sweeps fill row by row)",
+            ),
+            (
+                Order::Sequential,
+                ic(ph::LIST_NUMBERS, "One at a time"),
+                "each run finishes before the next starts, in queue order",
+            ),
+        ] {
+            if ui.selectable_label(st.config.job_order == o, label).on_hover_text(tip).clicked() {
+                out.push(Msg::JobOrder(o));
+            }
+        }
+    });
+}
+
+/// Queueing a sweep while the jobs go one at a time: spread them instead?
+pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    if st.sweep_order_ask.is_none() {
+        return;
+    }
+    let m = egui::Modal::new(egui::Id::unique("sweep_order")).show(ctx, |ui| {
+        ui.set_max_width(440.0);
+        ui.heading(ic(ph::LIST_NUMBERS, "Jobs run one at a time"));
+        ui.label(
+            "A style sweep is best spread evenly: each style gets a seed in turn, so the contact sheet \
+             fills row by row and you can compare styles early. One at a time finishes each style \
+             (and anything queued before it) before the next starts.",
+        );
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let spread = RichText::new(ic(ph::SHUFFLE_ANGULAR, "Spread evenly & queue   Enter")).strong();
+            if ui.button(spread).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                out.push(Msg::SweepOrderAnswer(Some(true)));
+            }
+            if ui.button("Keep one at a time & queue").clicked() {
+                out.push(Msg::SweepOrderAnswer(Some(false)));
+            }
+            if ui.button("Cancel   Esc").clicked() {
+                out.push(Msg::SweepOrderAnswer(None));
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::SweepOrderAnswer(None));
+    }
+}
+
+/// One row per server: name, device, state, loaded model; a row saying so
+/// when no GPU server is connected, and the PE server's row last.
+pub fn server_list(ui: &mut egui::Ui, st: &AppState) {
+    let weak = ui.visuals().weak_text_color();
+    egui::Grid::new(ui.scope_id().with("servers")).num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+        if st.servers.is_empty() {
+            ui.label(RichText::new("sd-server").strong());
+            ui.label("GPU");
+            ui.colored_label(weak, "○ none connected");
+            ui.label("");
+            ui.end_row();
+        }
+        for s in &st.servers {
+            ui.label(RichText::new(&s.name).strong());
+            ui.label(&s.device);
+            let c = if s.state == "ready" {
+                GOOD
+            } else if s.state.contains("retrying") {
+                BAD
+            } else {
+                NEUTRAL
+            };
+            ui.colored_label(c, &s.state);
+            ui.label(s.model.clone().unwrap_or_default());
+            ui.end_row();
+        }
+        ui.label(RichText::new("PE").strong()).on_hover_text("Prompt enhance");
+        ui.label("chat");
+        ui.colored_label(weak, "○ not connected");
+        ui.label("");
+        ui.end_row();
+    });
+}
+
+/// One block per run in the engine: progress over its seeds, the seeds being
+/// sampled now, and its stop buttons; above them, stop buttons for all.
+pub fn run_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    let jobs = st.jobs();
+    if jobs.is_empty() {
+        ui.weak("Nothing generating.");
+    } else {
+        ui.horizontal(|ui| {
+            let all = st.active_runs.len();
+            let unfinishing = st.active_runs.iter().any(|r| !st.finishing.contains(r));
+            if ui
+                .add_enabled(unfinishing, egui::Button::new(ic(ph::STOP_CIRCLE, "Finish & stop all")))
+                .on_hover_text("the images being generated finish; nothing new starts")
+                .clicked()
+            {
+                out.push(Msg::StopAll(Stop::Finish));
+            }
+            if ui
+                .button(RichText::new(ic(ph::STOP, "Stop all now")).color(BAD))
+                .on_hover_text("everything stops; images being generated are thrown away")
+                .clicked()
+            {
+                let runs = if all == 1 { "the run".to_string() } else { format!("all {all} runs") };
+                let text = format!("Stop {runs} now? The images being generated are thrown away.");
+                out.push(Msg::Ask(text, Box::new(Msg::StopAll(Stop::Now))));
+            }
+        });
+    }
+    for j in jobs {
+        let finishing = st.finishing.contains(&j.run);
+        // the whole block opens the details; its own buttons come first
+        let block = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+            job_block(ui, &j, finishing, out);
+        });
+        let r = block.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("click for details");
+        if r.clicked() {
+            out.push(Msg::JobInfo(Some(j.run.clone())));
+        }
+    }
+}
+
+fn job_block(ui: &mut egui::Ui, j: &increart_gui_core::RunProgress, finishing: bool, out: &mut Vec<Msg>) {
+    {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} · {}", j.project, j.label)).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    stop_buttons(ui, &j.run, finishing, j.sampling.len(), true, out);
+                });
+            });
+            ui.weak(short(&j.prompt, 70));
+            ui.add(egui::ProgressBar::new(j.fraction()).text(format!("{} / {} seeds", j.done, j.total)));
+            sampling_bars(ui, j);
+            if let Some(text) = live_timing(j) {
+                ui.weak(RichText::new(text).small());
+            }
+        });
+    }
+}
+
+/// A running job's timing line: "1.71 s/it · 34.2 s/image · 4 done in
+/// 2 min 16 s · ~2 min 30 s left".
+fn live_timing(j: &increart_gui_core::RunProgress) -> Option<String> {
+    use increart_gui_core::timing::duration;
+    let mut parts = vec![];
+    match (j.step_s, &j.timing) {
+        (Some(s), _) => parts.push(format!("{s:.2} s/it")),
+        (None, Some(t)) => parts.push(t.step_text()),
+        (None, None) => {}
+    }
+    if let Some(s) = j.image_s() {
+        parts.push(format!("{}/image", duration(s)));
+    }
+    if let Some(t) = &j.timing {
+        parts.push(format!("{} done in {}", t.images, duration(t.wall_s)));
+    }
+    if let Some(s) = j.eta_s().filter(|s| *s > 0.0) {
+        parts.push(format!("~{} left", duration(s)));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Timing statistics as grid rows (DESIGN.md, Timing).
+fn timing_rows(t: &increart_gui_core::timing::Timing) -> Vec<(&'static str, String)> {
+    use increart_gui_core::timing::duration;
+    let mut rows = vec![
+        (
+            "per image",
+            if t.images > 1 {
+                format!("{} (fastest {}, slowest {})", duration(t.per_image), duration(t.fastest), duration(t.slowest))
+            } else {
+                duration(t.per_image)
+            },
+        ),
+        ("per step", t.step_text()),
+        ("GPU time", format!("{} for {} image(s)", duration(t.gpu_s), t.images)),
+        ("wall clock", duration(t.wall_s)),
+    ];
+    if t.queued_s >= 0.5 {
+        rows.push(("server queue", format!("{} per image", duration(t.queued_s))));
+    }
+    if t.devices.len() > 1 || t.devices.first().is_some_and(|(d, ..)| !d.is_empty()) {
+        let per: Vec<String> = t
+            .devices
+            .iter()
+            .map(|(d, n, s)| format!("{} {}× {}", if d.is_empty() { "?" } else { d }, n, duration(*s)))
+            .collect();
+        rows.push(("devices", per.join(" · ")));
+    }
+    rows
+}
+
+/// A run's **Finish & stop** (the images being generated finish, nothing
+/// new starts) and **Stop now**; while finishing, a note and Stop now.
+/// `small`: the Jobs list's, in a right-to-left layout.
+fn stop_buttons(
+    ui: &mut egui::Ui,
+    run: &increart_core::Id,
+    finishing: bool,
+    sampling: usize,
+    small: bool,
+    out: &mut Vec<Msg>,
+) {
+    let button = |text: RichText| if small { egui::Button::new(text).small() } else { egui::Button::new(text) };
+    let finish = |ui: &mut egui::Ui, out: &mut Vec<Msg>| {
+        if finishing {
+            let n = match sampling {
+                0 => "finishing…".to_string(),
+                1 => "finishing 1 image…".to_string(),
+                n => format!("finishing {n} images…"),
+            };
+            ui.weak(n);
+        } else if ui
+            .add(button(RichText::new(ic(ph::STOP_CIRCLE, "Finish & stop")).strong()))
+            .on_hover_text("the images being generated finish and are kept; the rest are cancelled")
+            .clicked()
+        {
+            out.push(Msg::CancelRun(run.clone(), Stop::Finish));
+        }
+    };
+    let now = |ui: &mut egui::Ui, out: &mut Vec<Msg>| {
+        if ui
+            .add(button(RichText::new(ic(ph::STOP, "Stop now")).color(BAD)))
+            .on_hover_text("stop at once: images being generated are thrown away")
+            .clicked()
+        {
+            out.push(Msg::CancelRun(run.clone(), Stop::Now));
+        }
+    };
+    // reading order either way: Finish & stop, then Stop now
+    if small {
+        now(ui, out);
+        finish(ui, out);
+    } else {
+        finish(ui, out);
+        now(ui, out);
+    }
+}
+
+/// A bar per seed being sampled now.
+fn sampling_bars(ui: &mut egui::Ui, j: &increart_gui_core::RunProgress) {
+    for (seed, step, n) in &j.sampling {
+        ui.add(
+            egui::ProgressBar::new(*step as f32 / (*n).max(1) as f32)
+                .desired_height(12.0)
+                .text(RichText::new(format!("seed {seed}: step {step}/{n}")).small()),
+        );
+    }
+}
+
+/// A job's details: progress, the prompt, the settings, and the images it
+/// was given (click one to see it large).
+pub fn job_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
+    use increart_core::model::Mode;
+    let Some(id) = &st.job_info else { return };
+    let (Some((p, run)), Some(root)) = (st.index.run(id), &st.library) else { return };
+    let progress = st.run_progress(id);
+    let active = st.active_runs.contains(id);
+    let m = egui::Modal::new(egui::Id::unique("job_info")).show(ctx, |ui| {
+        ui.set_width(640.0);
+        ui.horizontal(|ui| {
+            ui.heading(ic(ph::QUEUE, &format!("{} · {}", p.name(), run.label)));
+        });
+        if let Some(j) = &progress {
+            let state = if active { "generating" } else { "not queued" };
+            ui.add(egui::ProgressBar::new(j.fraction()).text(format!("{} / {} seeds · {state}", j.done, j.total)));
+            sampling_bars(ui, j);
+        }
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.7).show(ui, |ui| {
+            ui.weak("Prompt");
+            ui.add(egui::Label::new(&run.prompt).wrap());
+            if !run.negative_prompt.is_empty() {
+                ui.weak("Negative prompt");
+                ui.add(egui::Label::new(&run.negative_prompt).wrap());
+            }
+            ui.add_space(6.0);
+            // the images it was given: references by their tag, the start image
+            let init = match &run.mode {
+                Mode::Edit { init, .. } => init.as_ref(),
+                Mode::Generate => None,
+            };
+            let mut images: Vec<(String, &increart_core::ImageRef)> = run
+                .refs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let start = if Some(r) == init { " · start" } else { "" };
+                    (format!("<image{}>{start}", i + 1), r)
+                })
+                .collect();
+            if let Some(i) = init.filter(|i| !run.refs.contains(i)) {
+                images.push(("start image".into(), i));
+            }
+            if images.is_empty() {
+                ui.weak("No input images (text to image).");
+            } else {
+                ui.weak("Input images · click to view");
+                ui.horizontal_wrapped(|ui| {
+                    for (label, img) in &images {
+                        ui.vertical(|ui| {
+                            let t = tex.thumb(root, img);
+                            let r = thumb(ui, t.as_ref(), 120.0, false, None)
+                                .on_hover_cursor(egui::CursorIcon::ZoomIn)
+                                .on_hover_text(tex.dims_text(root, img));
+                            if r.clicked() {
+                                out.push(Msg::Preview(Some((*img).clone())));
+                            }
+                            ui.label(RichText::new(label).monospace());
+                        });
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            let mode = match &run.mode {
+                Mode::Generate => "generate".to_string(),
+                Mode::Edit { strength, .. } => format!("img2img, strength {strength}"),
+            };
+            let s = &run.sample;
+            let seeds: Vec<String> = run
+                .revisions
+                .iter()
+                .map(|r| match r.seeds.count {
+                    1 => format!("rev {}: seed {}", r.rev, r.seeds.first),
+                    n => format!("rev {}: seeds {}–{}", r.rev, r.seeds.first, r.seeds.first + n - 1),
+                })
+                .collect();
+            let mut rows: Vec<(&str, String)> = vec![
+                ("created", run.created.format("%Y-%m-%d %H:%M").to_string()),
+                ("mode", mode),
+                ("model", run.model.recipe.clone()),
+                ("size", crate::widgets::size_info(run.width, run.height)),
+                ("steps / cfg", format!("{} / {}", s.steps, s.cfg)),
+                (
+                    "sampler",
+                    if s.scheduler.is_empty() { s.method.clone() } else { format!("{} · {}", s.method, s.scheduler) },
+                ),
+                ("flow shift", s.flow_shift.map_or("recipe schedule".into(), |f| f.to_string())),
+                ("alpha", if run.alpha { "transparent background".into() } else { "no".into() }),
+                ("seeds", if seeds.is_empty() { "none queued".into() } else { seeds.join(" · ") }),
+            ];
+            if let Some(t) = &run.sweep {
+                rows.push(match &t.param {
+                    Some(p) => ("sweep", format!("{} · {}", t.name, p.label())),
+                    None => ("sweep", format!("{} · {} → {}", t.name, t.task, t.preset)),
+                });
+            }
+            if let Some(idea) = run.source_idea.as_ref().and_then(|i| st.index.idea(i)) {
+                let t = &idea.idea.title;
+                rows.push(("from idea", if t.is_empty() { "(untitled)".into() } else { t.clone() }));
+            }
+            let cancelled: u64 = run.cancelled.iter().map(|c| c.count).sum();
+            if cancelled > 0 {
+                rows.push(("cancelled", format!("{cancelled} seed(s)")));
+            }
+            egui::Grid::new("job_info_grid").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+                for (k, v) in rows {
+                    ui.weak(k);
+                    ui.label(v);
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(ic(ph::TIMER, "Timing")).strong());
+            match increart_gui_core::timing::Timing::of_run(run) {
+                Some(t) => {
+                    let mut rows = timing_rows(&t);
+                    if let Some(text) = progress.as_ref().filter(|_| active).and_then(live_timing) {
+                        rows.insert(0, ("now", text));
+                    }
+                    if let Some(all) =
+                        increart_gui_core::timing::Timing::of_runs(&p.runs).filter(|a| a.images > t.images)
+                    {
+                        rows.push((
+                            "project",
+                            format!(
+                                "{} image(s) · {}/image · {} · GPU time {}",
+                                all.images,
+                                increart_gui_core::timing::duration(all.per_image),
+                                all.step_text(),
+                                increart_gui_core::timing::duration(all.gpu_s)
+                            ),
+                        ));
+                    }
+                    egui::Grid::new("job_timing_grid").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+                        for (k, v) in rows {
+                            ui.weak(k);
+                            ui.label(v);
+                            ui.end_row();
+                        }
+                    });
+                }
+                None => {
+                    ui.weak("No timed images yet (images are timed as they are made).");
+                }
+            }
+            if !run.failed.is_empty() {
+                ui.add_space(6.0);
+                ui.colored_label(BAD, format!("{} seed(s) failed", run.failed.len()));
+                for f in run.failed.iter().take(5) {
+                    ui.add(egui::Label::new(RichText::new(format!("seed {}: {}", f.seed, f.error)).small()).wrap());
+                }
+            }
+        });
+        ui.separator();
+        if active {
+            ui.horizontal(|ui| {
+                let finishing = st.finishing.contains(id);
+                let sampling = st.progress.keys().filter(|(r, _)| r == id).count();
+                stop_buttons(ui, id, finishing, sampling, false, out);
+            });
+        }
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                if ui.button(ic(ph::COPY, "Copy prompt")).clicked() {
+                    ui.ctx().copy_text(run.prompt.clone());
+                }
+                if ui
+                    .button(ic(ph::ARROW_SQUARE_OUT, "Open in Generate"))
+                    .on_hover_text("this run's settings in the Generate form")
+                    .clicked()
+                {
+                    out.push(Msg::JobInfo(None));
+                    out.push(Msg::RunInGenerate(id.clone()));
+                }
+                if ui
+                    .button(ic(ph::CLOCK_COUNTER_CLOCKWISE, "Show in history"))
+                    .on_hover_text("the Generate history that led to this run, at its queued checkpoint")
+                    .clicked()
+                {
+                    out.push(Msg::JobInfo(None));
+                    out.push(Msg::RunHistory(id.clone()));
+                }
+            },
+            |ui| ui.button("Close").clicked(),
+        )
+    });
+    if m.inner.1 || m.should_close() {
+        out.push(Msg::JobInfo(None));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_tags_go_in_at_the_cursor() {
+        let mut f = increart_gui_core::GenerateForm::new(&increart_core::config::Config::default());
+        let tag = |f: &increart_gui_core::GenerateForm, sel| {
+            let (g, end) = with_tag(f, "<image1>", sel);
+            (g.prompt, end)
+        };
+        f.prompt = "a fox, café style".into();
+        // never focused: at the end
+        assert_eq!(tag(&f, None), ("a fox, café style <image1>".into(), 26));
+        // mid-word cursor: spaced on both sides; counted in characters (é)
+        assert_eq!(tag(&f, Some(2..2)), ("a <image1> fox, café style".into(), 10));
+        assert_eq!(tag(&f, Some(11..11)), ("a fox, café <image1> style".into(), 20));
+        assert_eq!(tag(&f, Some(10..10)), ("a fox, caf <image1> é style".into(), 19));
+        // a selection is replaced
+        assert_eq!(tag(&f, Some(2..5)), ("a <image1>, café style".into(), 10));
+        f.prompt = "a fox (in ) here".into();
+        assert_eq!(tag(&f, Some(10..10)), ("a fox (in <image1>) here".into(), 18));
+        f.prompt.clear();
+        assert_eq!(tag(&f, Some(0..0)), ("<image1>".into(), 8));
+    }
+}
