@@ -6,8 +6,10 @@
 //!   the fewest seeds dispatched since it was queued.
 //! - Shallow submission: at most `max_in_flight` jobs per server.
 //! - Order: [`Order::Spread`] (the default) is the round-robin above;
-//!   [`Order::Sequential`] gives every free slot to the earliest queued run
-//!   with seeds left, so runs finish one after another.
+//!   [`Order::BySweep`] is the round-robin within the earliest queued group
+//!   (a sweep's runs, or a lone run) with seeds left, so sweeps finish one
+//!   after another; [`Order::Sequential`] gives every free slot to the
+//!   earliest queued run with seeds left, so runs finish one after another.
 //! - Ties: among equally due runs, the one that got a seed longest ago (so a
 //!   round goes through the runs in queue order every time).
 //! - Model switching: work for a model no server has makes one server
@@ -100,6 +102,9 @@ pub enum Order {
     /// Round-robin: every run gets a seed in turn.
     #[default]
     Spread,
+    /// Round-robin within one group (a sweep, or a lone run) at a time, in
+    /// queue order, to completion.
+    BySweep,
     /// One run at a time, in queue order, to completion.
     Sequential,
 }
@@ -115,6 +120,8 @@ struct Server {
 #[derive(Debug)]
 struct RunQueue {
     id: Id,
+    /// Runs of one sweep share it ([`Order::BySweep`]); else the run's id.
+    group: String,
     model: ModelKey,
     pending: VecDeque<(u32, u64)>,
     dispatched: u64,
@@ -202,6 +209,7 @@ impl Scheduler {
             None => {
                 self.runs.push(RunQueue {
                     id: run.clone(),
+                    group: run.to_string(),
                     model: model.clone(),
                     pending: VecDeque::new(),
                     dispatched: 0,
@@ -226,6 +234,13 @@ impl Scheduler {
             r.pending.clear();
         }
         self.add_seeds(run, model, seeds);
+    }
+
+    /// Puts a queued run in a group: the runs of one sweep share one.
+    pub fn set_group(&mut self, run: &Id, group: impl Into<String>) {
+        if let Some(r) = self.runs.iter_mut().find(|r| &r.id == run) {
+            r.group = group.into();
+        }
     }
 
     /// Drops a run's pending seeds and cancels its in-flight ones. Returns
@@ -388,6 +403,20 @@ impl Scheduler {
         actions
     }
 
+    /// How due run `i` is (lowest first): its group's place in the queue
+    /// ([`Order::BySweep`]) or its own ([`Order::Sequential`]), then the
+    /// round-robin's fewest dispatched, longest ago.
+    fn due(&self, i: usize, r: &RunQueue) -> (usize, u64, Option<Ticket>, usize) {
+        match self.order {
+            Order::Spread => (0, r.dispatched, r.last, i),
+            Order::BySweep => {
+                let first = self.runs.iter().position(|q| q.group == r.group).unwrap_or(i);
+                (first, r.dispatched, r.last, i)
+            }
+            Order::Sequential => (i, 0, None, i),
+        }
+    }
+
     /// Models with pending (dispatchable) work, most due first.
     fn demand(&self) -> Vec<ModelKey> {
         let mut runs: Vec<_> = self
@@ -396,10 +425,7 @@ impl Scheduler {
             .enumerate()
             .filter(|(_, r)| !r.pending.is_empty() && !self.broken.contains(&r.model))
             .collect();
-        match self.order {
-            Order::Spread => runs.sort_by_key(|(i, r)| (r.dispatched, *i)),
-            Order::Sequential => runs.sort_by_key(|(i, _)| *i),
-        }
+        runs.sort_by_key(|(i, r)| self.due(*i, r));
         let mut out: Vec<ModelKey> = vec![];
         for (_, r) in runs {
             if !out.contains(&r.model) {
@@ -461,10 +487,7 @@ impl Scheduler {
             .iter()
             .enumerate()
             .filter(|(_, r)| r.model == model && !r.pending.is_empty())
-            .min_by_key(|(i, r)| match self.order {
-                Order::Spread => (r.dispatched, r.last, *i),
-                Order::Sequential => (0, None, *i),
-            })
+            .min_by_key(|(i, r)| self.due(*i, r))
             .map(|(i, _)| i)?;
         let ticket = self.next_ticket;
         self.next_ticket += 1;
@@ -622,6 +645,33 @@ mod tests {
                 .is_some()
         } {}
         assert_eq!(order, [run(0), run(0), run(1), run(1), run(2), run(2)]);
+    }
+
+    #[test]
+    fn by_sweep_spreads_one_sweep_at_a_time() {
+        let (mut s, now) = up(&[Some("a")]);
+        s.max_in_flight = 1;
+        s.order = Order::BySweep;
+        // a sweep (0, 1), a lone run (2), another sweep (3, 4)
+        for (r, group) in [(0, Some("s1")), (1, Some("s1")), (2, None), (3, Some("s2")), (4, Some("s2"))] {
+            s.add_seeds(&run(r), model("a"), seeds(2));
+            if let Some(g) = group {
+                s.set_group(&run(r), g);
+            }
+        }
+        let mut order = vec![];
+        while {
+            let sub = submits(&s.poll(now));
+            sub.first()
+                .cloned()
+                .map(|(_, t, seed)| {
+                    order.push(seed.run);
+                    s.finished(t, Outcome::Done);
+                })
+                .is_some()
+        } {}
+        let want = [0, 1, 0, 1, 2, 2, 3, 4, 3, 4].map(run);
+        assert_eq!(order, want);
     }
 
     #[test]

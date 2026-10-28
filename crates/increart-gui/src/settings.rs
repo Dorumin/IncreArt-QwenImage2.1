@@ -41,6 +41,12 @@ fn notifications(ui: &mut egui::Ui, st: &AppState, n: &mut Notifications, out: &
     });
     ui.horizontal(|ui| {
         ui.add_space(24.0);
+        ui.checkbox(&mut n.pe_counts_as_work, "Prompt enhance asks count as work").on_hover_text(
+            "while prompt enhance is asking nothing counts as idle, and idle time counts again from its last ask",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
         ui.weak("Counts only while servers are connected and ready (not while loading a model).");
     });
     ui.add_space(8.0);
@@ -242,9 +248,12 @@ pub fn bell(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                 out.push(Msg::Unsnooze);
             }
         } else {
-            for (label, secs) in
-                [("Snooze 30 min", Some(1800.0)), ("Snooze 1 h", Some(3600.0)), ("Until restart", None)]
-            {
+            for (label, secs) in [
+                ("Snooze 5 min", Some(300.0)),
+                ("Snooze 30 min", Some(1800.0)),
+                ("Snooze 1 h", Some(3600.0)),
+                ("Until restart", None),
+            ] {
                 if ui.button(ic(ph::BELL_Z, label)).clicked() {
                     out.push(Msg::Snooze(secs));
                 }

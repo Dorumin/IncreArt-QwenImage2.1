@@ -12,6 +12,6 @@ pub mod watch;
 pub use runtime::Runtime;
 pub use state::*;
 pub use update::{
-    AddIdea, DraftSave, Effect, LibOp, Msg, OpOk, Queued, Restore, SelectHow, TileTarget, promote_folder,
-    promote_problem, update,
+    AddIdea, BLANK_RETRIES, DraftSave, Effect, LibOp, Msg, OpOk, PeUse, Queued, Restore, SelectHow, TileTarget,
+    promote_folder, promote_problem, suggest_message, update,
 };

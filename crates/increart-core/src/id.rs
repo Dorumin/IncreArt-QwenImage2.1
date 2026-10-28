@@ -43,6 +43,11 @@ impl Id {
         &self.0[..16]
     }
 
+    /// The creation minute as a time.
+    pub fn time(&self) -> Option<Timestamp> {
+        chrono::NaiveDateTime::parse_from_str(self.minute(), "%Y.%m.%d-%H.%M").ok().map(|t| t.and_utc())
+    }
+
     pub fn seq(&self) -> u32 {
         self.0[17..].parse().expect("validated on construction")
     }
@@ -149,6 +154,7 @@ mod tests {
         assert_eq!(id.as_str(), "2025.01.30-23.45-0001");
         assert_eq!(id.minute(), "2025.01.30-23.45");
         assert_eq!(id.seq(), 1);
+        assert_eq!(id.time(), Some(t(23, 45, 0)));
         assert_eq!("2025.01.30-23.45-0001".parse::<Id>().unwrap(), id);
         assert_eq!("2025.01.30-23.45-10000".parse::<Id>().unwrap().seq(), 10000);
         for bad in [

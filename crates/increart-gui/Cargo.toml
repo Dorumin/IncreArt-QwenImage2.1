@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 eframe = "0.37"
 egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
+egui_extras = { version = "0.37", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
+libc = "0.2.191"
 increart-core = { version = "0.1.0", path = "../increart-core" }
 increart-gui-core = { version = "0.1.0", path = "../increart-gui-core" }
 similar = "2"

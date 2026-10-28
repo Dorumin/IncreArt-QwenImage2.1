@@ -13,6 +13,9 @@ pub struct Notifications {
     pub gpu_idle: AlertRule,
     /// Only when every GPU is idle (else any one).
     pub all_gpus: bool,
+    /// Prompt enhance asks count as work: no GPU is idle while they go,
+    /// and idle time counts again from the last.
+    pub pe_counts_as_work: bool,
     /// At once when a GPU finishes its last job (its queue clears).
     pub queue_cleared: EventRule,
     /// Only when the last busy GPU clears (else each one).
@@ -38,6 +41,7 @@ impl Default for Notifications {
         Notifications {
             gpu_idle: AlertRule { on: false, threshold: 5, repeat_minutes: 5, sound: Sound::Chime },
             all_gpus: false,
+            pe_counts_as_work: true,
             queue_cleared: EventRule { on: false, sound: Sound::DoubleBeep },
             queue_cleared_all: false,
             review_backlog: AlertRule { on: false, threshold: 50, repeat_minutes: 15, sound: Sound::Bell },

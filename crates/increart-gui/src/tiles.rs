@@ -130,6 +130,9 @@ pub fn menu(ui: &mut egui::Ui, st: &AppState, image: &ImageRef, out: &mut Vec<Ms
         out.push(Msg::OpenTile);
         ui.close();
     }
+    if new_sweep_button(ui, st, out) {
+        ui.close();
+    }
     crate::review::collection_menu(ui, st, &st.picked, out);
     if ui.button(ic(ph::EXPORT, &format!("Export the {n} picked…"))).clicked() {
         out.push(Msg::OpenExport(st.picked.clone(), format!("{n} images")));
@@ -196,12 +199,52 @@ pub fn bar(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
             if ui.button(ic(ph::SQUARES_FOUR, "Tile…")).on_hover_text("lay them out as one image (T)").clicked() {
                 out.push(Msg::OpenTile);
             }
+            new_sweep_button(ui, st, out);
             if ui.button(ic(ph::X, "Clear")).on_hover_text("Esc").clicked() {
                 out.push(Msg::PickSet(vec![]));
             }
             ui.weak("Ctrl+click: pick · Shift+click: range · drag: box · Ctrl+A: all");
         });
     });
+}
+
+/// In Review's sweep scope: **New sweep from their K styles** (or values),
+/// the picked images' runs swept again in Generate (the picks bar and the
+/// picked images' menu). Whether it was clicked.
+fn new_sweep_button(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) -> bool {
+    let Some(sweep) = st.review_sweep.as_ref().filter(|_| st.tab == increart_gui_core::Tab::Review) else {
+        return false;
+    };
+    let mut runs: Vec<&increart_core::model::Run> = vec![];
+    for i in &st.picked {
+        let run = st.output_link(i).and_then(|o| st.index.run(&o.name.run)).map(|(_, r)| r);
+        if let Some(r) = run.filter(|r| r.sweep.as_ref().is_some_and(|s| &s.name == sweep))
+            && !runs.iter().any(|x| x.id == r.id)
+        {
+            runs.push(r);
+        }
+    }
+    if runs.is_empty() {
+        return false;
+    }
+    let setting = runs[0].sweep.as_ref().is_some_and(|s| s.param.is_some());
+    let what = match (runs.len(), setting) {
+        (1, false) => "1 style".to_string(),
+        (1, true) => "1 value".to_string(),
+        (n, false) => format!("{n} styles"),
+        (n, true) => format!("{n} values"),
+    };
+    let names: Vec<String> = runs.iter().filter_map(|r| r.sweep.as_ref()).map(|s| s.row()).collect();
+    let tip = format!(
+        "{sweep} again with only these, in Generate (to change and queue): {}\n\
+         its template, values and settings as it was queued, the next label and seeds",
+        names.join(", ")
+    );
+    let clicked = ui.button(ic(ph::STACK, &format!("New sweep from their {what}…"))).on_hover_text(tip).clicked();
+    if clicked {
+        out.push(Msg::SheetNewSweep);
+    }
+    clicked
 }
 
 // ---------------------------------------------------------------- the window

@@ -1,6 +1,8 @@
 # TODO: KoboldCpp support
 
-Status: researched, not started. KoboldCpp could serve two roles: the prompt
+Status: **as the PE server: done** (DESIGN.md, PE server and requests; v1.123.1
+nocuda build in `local/koboldcpp/`, Qwen3-VL-8B-Instruct with vision). As an image
+backend: researched, not started. KoboldCpp could serve two roles: the prompt
 enhancer (PE) server, and an image backend alongside sd-server.
 
 Investigated on 2026-10-26 against **KoboldCpp v1.123.1** (13 Oct 2026). I used

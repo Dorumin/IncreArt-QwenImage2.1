@@ -61,7 +61,17 @@ ideas ──► INPUT QUEUE ──review──► INPUT LIBRARY ──promote (P
   folders.)
 - The output queue (Review) is worked oldest-first by default (the Idea
   inbox grid shows the newest first); the output queue can also be
-  filtered to one run.
+  filtered to one run. **newest ›** jumps to its last image once;
+  **Follow** (in the bar, for the session) stays on the newest unreviewed
+  image as new ones arrive (Single, Grid, and Compare's B; after a rating,
+  the newest left). Going to another image (←, a click, Swap, Go to)
+  turns it off.
+- Review's scope tree has its own **Sort** (config `review_order`, A–Z by
+  default), independent of the Projects tab: Created, Last run and A–Z as
+  the project tree orders projects (folders follow the same choice, by the
+  projects anywhere in them), or Oldest to review (the oldest projects with
+  images to review first, a folder by the oldest such project in it, then
+  those with none). Runs and sweeps under a project stay newest first.
 - The input queue is global (one inbox). The output queue merges the
   `unreviewed/` folders of Review's scope: all projects (the default), a
   folder of projects, or one project.
@@ -149,27 +159,41 @@ button names the last used other one.
 
 ### Startup: servers
 
-When the app starts (after the library is opened) a modal dialog asks how to
-reach sd-server. Its choices are **presets** saved in `config.rsn` (see
-Config file → Servers):
+When the app starts (after the library is opened) a modal dialog asks for
+the session's servers: the sd-servers to generate with and, optionally, the
+chat server prompt enhance uses (see Prompt rewriting). One choice covers
+both: **presets** saved in `config.rsn` (see Config file → Servers), each a
+list of servers that may include one chat server:
 
 - The preset list (the dialog is one column; editing and settings open
   modals). The one used last is tagged "last used",
   the tag in a muted accent colour. Each row shows its servers, e.g. "Start ROCm0 on
-  :1234 · Start ROCm1 on :1235" or "Connect to http://10.0.0.2:1234".
+  :1234 · Start ROCm1 on :1235 · Chat: Qwen3-VL 8B (GPU)" or "Connect to
+  http://10.0.0.2:1234".
   **A click opens a preset**. The bottom row's main button names the last
   used one, **Open ROCm0 only ⏎**, and Enter does the same; not when the
   dialog was reopened from the main window while servers run (**Close**
   keeps them). Each row has
-  ✎ **Edit** and 🗑 **Delete** (which asks first). Mid-session (Settings →
-  Servers), opening a preset asks before stopping the servers in use (and
-  says how many runs are generating).
+  ✎ **Edit** and 🗑 **Delete** (which asks first).
+- Opening a preset only starts and stops what changed. sd-servers in use
+  that it also has (the same entry, and for Start servers the same
+  sd-server settings) are kept as they are, model loaded; the others stop
+  and the new ones start. When its sd-servers are exactly those in use,
+  nothing is opened or restarted at all. Otherwise the engine restarts with
+  the new set, dropping the images being made. The chat server likewise:
+  one running as the preset's (the same `run`) goes on, else it stops and
+  the preset's takes over (started at once if it starts with its preset).
+  Mid-session, opening a preset asks first when it would stop sd-servers
+  ("Stop ROCm0 and open Other? ROCm1 stay as they are.") or drop images
+  being made (and says how many runs are generating); otherwise it opens
+  at once. A preset with only a chat server stops the sd-servers in use.
 - With no presets, **Set up servers…** opens a wizard: the sd-server
   binary and models folder, then the devices from `--list-devices` with
   every GPU ticked (not the CPU) on ports 1234, 1235, …, or a server
-  already running to connect to. **Save as preset and open** names the
-  preset after its devices ("ROCm0 + ROCm1", or "Running server") and
-  opens it.
+  already running to connect to, then optionally **Add a chat server…**
+  for prompt enhance (the chat server settings below). **Save as preset
+  and open** names the preset after its devices ("ROCm0 + ROCm1", or
+  "Running server") and opens it.
 - **sd-server settings…** (bottom right) opens a modal with what every
   preset's Start servers share: the binary, the models folder, leave
   started servers running, and the devices (`sd-server --list-devices`,
@@ -181,23 +205,36 @@ Config file → Servers):
   devices are buttons too: a click adds a Start server on that one (devices
   already in the preset are greyed). **+ Connect** adds a URL; connected
   servers are left running when the app exits. A preset can mix both kinds.
-  Esc cancels; a click outside doesn't. The editor's buttons:
+  **+ Chat server** (greyed once the preset has one) opens the chat server
+  settings, starting from the presets' first chat server (else KoboldCpp
+  on the GPUs); its row shows the name with **Settings…** and ×. The
+  settings window's **Add** / **Done** puts it in the preset being edited;
+  it's stored when the preset is saved. A preset may have only a chat
+  server. Esc cancels; a click outside doesn't. The editor's buttons:
   - **Save** stores the preset, renaming it in place.
   - **Save and open** stores it and opens it.
   - **Open without saving** opens the edited servers once and leaves the
     preset as it was.
   - **Cancel** drops the edits.
-- **Continue without servers** asks first: browsing, review and the
-  libraries work; Generate queues runs that wait for a server. The first
+- **Continue without servers** opens a small dialog first: browsing,
+  review and the libraries work; Generate queues runs that wait for a
+  server. It lists the presets' chat servers (one per process) with
+  **None**, the one in use ticked, so prompt enhance can go on without any
+  sd-server; **Continue** or **Cancel**. Continuing without from the main
+  window by other means (the command line's `--servers none` aside, which
+  has none in use yet) keeps the chat server in use. The first
   Queue of a session with no server (and none starting) warns that the run
   will only wait, with **Set up servers…**, **Queue anyway** and **Cancel**;
   it doesn't ask again until the app restarts.
 - While the servers come up the dialog is **locked**: presets, server rows
   and settings are disabled and dimmed ("locked while the servers open"),
-  and per-server progress stays readable ("starting — 12 s" followed by the
+  and per-sd-server progress stays readable ("starting — 12 s" followed by the
   server log's latest line, e.g. "294/396 · 4.38GB/s" while tensors load;
-  up; or the error with the tail of a started server's log). When servers
-  were in use they're stopped first ("stopping the servers in use first"). Two buttons:
+  up; or the error with the tail of a started server's log), with the
+  chat server's state on a row of its own: it never holds the sd-servers
+  up, and its failure doesn't stop the preset opening. sd-servers in use
+  that the preset doesn't keep are stopped first ("stopping the servers in
+  use first"). Two buttons:
   - **Continue in background**: the main window opens at once; the top bar
     shows each server as "starting… <latest log line>" / "failed", failures are reported in
     the status bar, and the engine starts with the servers that came up when
@@ -222,8 +259,7 @@ Config file → Servers):
 - Reopened from the main window, the dialog can be left again: **Close**
   (or Esc) goes back keeping the servers in use, and **Continue without
   servers** becomes **Stop the servers, continue without** while servers
-  are in use. Opening a preset asks first if servers are in use, then
-  stops the ones the app started.
+  are in use.
 - A **Start** server finds an sd-server already answering on its port (e.g.
   one left over from a crash) and uses it instead of failing on a port in
   use.
@@ -366,34 +402,188 @@ text-to-image and one for edit (i2i). The i2i one is already present:
 
 ### PE server and requests
 
-- Config (`config.rsn`), next to the sd-server presets:
+Built so far: **KoboldCpp** (or any OpenAI-compatible chat server), with
+vision, suggesting values for a sweep's blanks, rewriting the Generate
+prompt and ideas' text, and describing images. Still to come from the plan
+above: queued rewrites from idea cards (`W`, card states, Accept all ready
+rewrites).
+
+- Config (`config.rsn`): a chat server is an entry of a server preset
+  (Config file → Servers), at most one per preset; the system prompts and
+  sampling are shared by every chat server:
   ```rsn
+  ServerPreset { name: "Both GPUs", servers: [
+      Start { name: "gpu0", port: 1234, device: "ROCm0" },
+      Chat(PeServer {
+          name: "Qwen3-VL 8B (GPU)",
+          run: KoboldCpp {
+              binary: "/workspace/local/koboldcpp/koboldcpp",
+              model: "…/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+              mmproj: "…/mmproj-Qwen3VL-8B-Instruct-F16.gguf",  // vision; empty: text only
+              host: "127.0.0.1",
+              port: 1240,
+              device: Gpu { devices: [1] },  // or Cpu { threads: 16 }; missing: Auto (KoboldCpp's choice)
+              context: 8192,                 // --contextsize; missing or 0: KoboldCpp's default
+              // args: ["--blasthreads", "24"],  // more arguments, last
+          },
+          start: AtLaunch,  // missing: OnDemand (when first asked)
+      }),
+      // Chat(PeServer { name: "…", run: Connect { url: "http://127.0.0.1:5001" } }),
+  ] },
   pe: Pe {
-      // Start: the app runs llama-server on demand; Connect: an existing
-      // OpenAI-compatible endpoint.
-      server: Start { binary: "llama-server", port: 1240, device: "CPU", args: ["-c", "8192"] },
-      // server: Connect { url: "http://127.0.0.1:8080" },
-      models: {
-          "t2i": PeModel { file: "/models/qwen3.5-9b-pe-t2i-Q4_K_M.gguf" },
-          "i2i": PeModel { file: "/models/qwen3.5-9b-pe-i2i-Q4_K_M.gguf", mmproj: "/models/…-mmproj.gguf" },
-      },
-      system_prompts: { "t2i": "…", "i2i": "…" },  // from the Qwen-Image 2.1 repo
-      idle_stop_s: 300,
-  }
+      // system_prompts: { "rewrite": "…" },  // fill_blanks / style_prompt / rewrite / describe; empty or missing: built in
+      // sampling: { "fill_blanks": Sampling { temperature: 1.1, min_p: 0.05 } },
+  },
   ```
-  With `Start`, the server is launched when the first rewrite is queued and
-  stopped after `idle_stop_s` without work; switching between the t2i and
-  i2i model restarts it (llama-server serves one model).
-- Requests: one chat completion per rewrite (system prompt + the user's text;
-  for i2i, the ref images as `image_url` parts in `ref_images` order).
-  Rewrites run one at a time from a queue the GUI shows (top bar PE status).
-- **Reference tags are preserved**: the user's text may name refs as
-  `<image1>`, `<image2>`, …; a rewrite that drops or renumbers a tag that was
-  in the input is flagged in the diff view (and the tags are listed in the
-  request so the model keeps them).
-- The recipe's `rewrite` field records the PE model file's SHA-256 (cached
-  like the diffusion weights) and the system prompt's hash.
-- Not yet obtained: GGUF weights for both PE models (see Open questions).
+- Older configs listed PE servers under `pe: Pe { server, servers }`, each
+  with its own system prompts and sampling. Loading one moves them: the one
+  used (`server`, else the first) into every preset without a chat server,
+  its system prompts and sampling becoming everyone's, and each other one
+  into a new preset of its own (named after it); the file is saved so at
+  once, the old one kept beside it as `config.rsn.before-chat-presets`, and
+  the status bar says what moved.
+- The chat server in use is the open preset's, or the one picked to
+  continue without sd-servers; none until then.
+- `device`: `Cpu { threads }` adds `--usecpu [--threads N]`; `Gpu { devices }`
+  adds `--usevulkan [ids…] --gpulayers 999` (every layer on the GPU; no ids:
+  every GPU, the model split across them). The ids are Vulkan's numbering,
+  listed by `vulkaninfo --summary` (software renderers left out); on this
+  machine 0 is the Intel iGPU and 1, 2 the R9700s (03:00.0, 06:00.0), and one
+  GPU is quicker than a split. Measured on 13 blanks: about 0.5–1 s an ask on
+  one R9700, against 3–7 s on 16 CPU threads; it takes about 7.2 GB of the
+  card beside sd-server's (the 8B Q4 model 4.5, its 8192-token cache 1.2,
+  the vision projector 1.1, working memory 0.5).
+- `start`: `OnDemand` starts it on the first request; `AtLaunch` when its
+  preset opens (or it's picked to continue without sd-servers), so the
+  first ask doesn't wait for the model to load. Another chat server taking
+  over stops the one running first (it holds memory).
+- **Chat server** settings (a preset's chat row **Settings…**, or **+ Chat
+  server**, in the preset editor and the setup wizard): name, KoboldCpp or
+  Connect, binary / model / vision files (Browse…), address and port,
+  **Runs on** GPU (the listed GPUs ticked; none: every GPU) / CPU (threads)
+  / KoboldCpp's choice, context, more args, and **Starts** when first asked
+  / when the preset opens. **Add** / **Done** checks the name is set and
+  the files needed are named, and puts it in the preset being edited; it's
+  stored when the preset is saved, and a change to how the one in use runs
+  takes effect when the preset is opened again (it restarts then). The
+  server status window's PE row has the chat server in use, its state,
+  **Start now** / **Connect** when off or failed (loads the model now) and
+  **Stop** while running (frees its memory; asks waiting are dropped; one
+  stopped while starting is Off, not Failed). Asking with no chat server
+  in use says to add one to a preset (Servers…); the Generate panel's
+  prompt-enhance hints have a **Servers…** button for it.
+- `KoboldCpp` is started as `start` says (`--model --mmproj --host --port
+  --skiplauncher --quiet --jinja`, the `device` and `context` flags, then
+  `args`), logging to
+  `logs/pe-<name>.log`; one already answering on that port is used as is. It
+  gets up to 5 minutes to load, and is stopped with the app. Its Linux build
+  is a launcher running the server as its child, so it runs in its own
+  process group, and stopping it stops the group (TERM, then KILL after 5 s).
+  It is also started with the parent-death signal (`PR_SET_PDEATHSIG`,
+  SIGTERM; the launcher passes it on), so a killed or crashed app doesn't
+  leave it running. The app itself closes as its close button does on
+  SIGTERM, SIGINT or SIGHUP (drafts saved, servers it started stopped).
+  Changing how it runs (`run`) starts it afresh on the next request; its
+  system prompts and sampling don't (they go with each request). Starts
+  and stops go through the same queue as the requests, in order, so a
+  restarted server's port is free before the new one starts.
+  `Connect` only checks the server answers (`/v1/models`).
+- Requests go one at a time from a queue on their own thread: one chat
+  completion each (`/v1/chat/completions`, at most 300 tokens for blanks,
+  50 per value asked when more, and 700 for text; a fresh connection each,
+  as KoboldCpp closes one after answering). Each carries the job's
+  **sampling**, per job like the system prompts (temperature
+  and `min_p`, a slider each under the job's system prompt, with Default):
+  by default 1.1 / 0.05 for blanks, for variety kept sensible, and 0.9 / 0
+  for rewriting and describing. Each also carries a fresh random `seed`:
+  without one KoboldCpp can answer the same ask word for word. Images are scaled to at most 512 px for blanks (their
+  gist is enough; Qwen3-VL reads one as ~180 tokens rather than ~400) and
+  768 px for rewriting and describing, and sent as PNG `image_url` data
+  parts *before* the text, and a blank's message has what every blank's
+  ask shares first (the images' line, the template) and its own part last
+  (its styles, values offered, instructions): KoboldCpp doesn't read again
+  the start a request shares with the one before, so the asks of a sweep
+  read its images once (on CPU, ~8.5 s an ask saved; 13 blanks went from
+  200 s to about 80 s); a transparent one is
+  flattened over a checkerboard first (models read the colour of fully
+  transparent pixels as if it were there). A KoboldCpp without `mmproj`
+  gets no images, and can't describe.
+- **System prompts** are per job (`fill_blanks`, `rewrite`, `describe`),
+  shared by every chat server, with a built-in default for each. The
+  server status window's Prompt enhance section shows the chat server in
+  use, how it runs, its state, and each job's system prompt in a
+  collapsed section to edit (the default until changed, "(changed)"
+  otherwise; **Default** puts it back; an edit equal to the default is
+  stored as none).
+- Filling blanks: the system prompt asks for only a JSON array of short,
+  concrete, varied values that read in place of the blank, looking at the
+  images. The message gives the template, the style prompt(s) using the
+  blank ("one value is used in all N of these styles" for a shared one),
+  the blanks already filled, which images are attached (`<image1>`…, then
+  the start image) and asks for 6. The answer's JSON array is used, else
+  its lines (bullets and numbers dropped); repeats and empties are dropped.
+- **Rewriting** (Generate's **Rewrite**, **Rewrite with PE** in Edit idea
+  and the New idea form): the system prompt asks for a clearer, more
+  specific and visual prompt keeping the user's intent, `<imageN>` tags,
+  `{blanks}` and `{preset}`, and only the prompt back. The message gives
+  the text (a sweep template says what `{preset}` is), which images are
+  attached (Generate: the references, then the start image; an idea: its
+  images) and the instructions, if any. The answer is cleaned (code fences,
+  a "Rewritten prompt:" label and quotes around it all are dropped).
+- **Describing** (**Describe with PE…** in any image's right-click menu,
+  next to Copy image): the image alone, asking for a one-paragraph
+  description as a prompt (subject, composition, setting, lighting,
+  colours, materials, style; text in it quoted).
+- Both open the **rewrite window** (not modal; the button shows "…" while
+  it waits): **Instructions** ("more cinematic, shorter") with **Rewrite
+  again** / **Describe again**; for a rewrite, **Changes**, a word diff of
+  the original against the answer (removed words struck through in red,
+  added ones green); the answer to edit (**As answered** undoes edits),
+  warning about `<imageN>` tags or `{blanks}` it lost. **Use as the
+  prompt** / **Use as the text** / **Use as the Generate prompt** replaces
+  the text, its old version kept in its history ("before rewrite");
+  **Keep as a variant** (Edit idea) adds it to the idea's variants with
+  origin `Rewritten { model: <server name>, system_prompt_hash }` (the
+  first 12 hex digits of the system prompt's SHA-256), leaving its text;
+  using it on an idea closed meanwhile also keeps it as a variant.
+  **Copy**, **Discard**. A newer ask replaces an older one: its answer, or
+  one coming after the window closed, is dropped.
+- **Progress**: answers are streamed (`"stream": true`; Server-Sent Events,
+  about one token a piece; a server answering all at once works too). Each
+  ask goes through queued ("queued, 2 ahead", or the server's start with
+  its time), preparing the images, reading the prompt and images (the time
+  so far and how long it took last time with that many images), and
+  writing ("~84 tokens, 6.2/s"), reported at most 4 times a second (the
+  rate from the first second on, worked out at most twice a second). The
+  rewrite window shows the step with **Stop**, and the answer and its diff
+  as they're written. The top bar's PE item shows the number of asks and
+  the first one's step, its tooltip every ask in order; the servers list's
+  PE row (its device: "GPU 1", "CPU", or "chat" for one connected to; on a
+  GPU an sd-server also uses, its asks slow the images down) and the
+  status window show the same state ("no chat server", "starts
+  when asked", "starting… N s", "ready", "working (N): …", "failed"); a
+  failure also goes to the messages.
+- **In Jobs**: Projects → Jobs has a **Prompt enhance** section between the
+  servers and the runs (while a chat server is set up; "Nothing asked."
+  when idle), and the status bar's jobs popover the same while asks wait. A
+  block per batch, not per ask: **Suggest values**, **Enhance style
+  prompts** (both with their project), **Rewrite the prompt** / **Rewrite
+  the idea** (its title) / **Describe the image**; Stop first (it stays put
+  as the text changes), "4 of 41", the step of the ask being worked on, a
+  bar over the batch, and every ask in the tooltip. Clicking the name goes
+  where it was asked: the Generate form (blanks, styles, the prompt's
+  rewrite) or the rewrite window brought to the front. The status bar's
+  indicator adds "PE 4 / 41" over every batch ("· PE 4 / 41" after the runs;
+  alone, instead of "no jobs"), its bar staying the images'. Asks aren't
+  runs: not saved, not in the engine's queue or its order, no Job details.
+- **Stopping** an ask (Stop, Discard or closing the rewrite window, a new
+  ask from the same window, a blank's spinner): queued, it's dropped;
+  being answered, the app stops reading it and asks KoboldCpp to stop
+  (`/api/extra/abort`), so the next ask doesn't wait behind it. Asks are
+  numbered; an answer to one stopped is dropped.
+- Measured with Qwen3-VL-8B-Instruct Q4_K_M on CPU (16 threads): loading
+  takes about 60 s; a request with one image about 18 s (the image takes
+  ~13 s to encode), without one a few seconds.
 
 ## Caching
 
@@ -453,8 +643,8 @@ User settings live in one RSN file, `config.rsn`, in
 `$XDG_CONFIG_HOME/increart/` (default `~/.config/increart/config.rsn`). It
 holds machine and user preferences, not library data, plus the recent
 libraries (see Startup: library). Older configs' single `library` entry is
-read into that list. Other sections (PE system prompts) are added as they
-are specified. The GUI rewrites the whole file when a setting is saved, so hand
+read into that list, and their PE servers into the server presets (see
+Prompt rewriting → PE server and requests). The GUI rewrites the whole file when a setting is saved, so hand
 comments are not preserved.
 
 ### Servers
@@ -468,6 +658,7 @@ Config {
         ] },
         ServerPreset { name: "Remote box", servers: [
             Connect { name: "box", url: "http://10.0.0.2:1234", device: "ROCm0" },
+            Chat(PeServer { name: "Box chat", run: Connect { url: "http://10.0.0.2:5001" } }),
         ] },
     ],
     last_preset: "Both GPUs",
@@ -490,6 +681,9 @@ Config {
   directory.
 - `Connect` servers take a `url`; `device` is optional and only recorded in
   recipes.
+- `Chat` is the preset's chat server for prompt enhance, at most one (see
+  Prompt rewriting → PE server and requests); it isn't an sd-server and
+  generates nothing.
 - `sdserver.preview` is the preview mode sent with every job (`none`,
   `proj`, `tae`, `vae`); `commit` is recorded in recipes as `sdcpp`.
 
@@ -1157,9 +1351,54 @@ figures: soft clay, fingerprints, slightly lumpy handmade shapes"). Artist,
 studio and brand names are left out of the built-in set.
 
 Prompts name reference images `<image1>`, `<image2>`… and leave blanks as
-`{slot}` (a short name in braces: `{colour}`, `{scene}`). Modify style prompts
-read "Convert <image1> into …. Keep the composition, pose and identity
-unchanged." Styles that turn a flat image into 3D (**Voxel**, **Animatronic**)
+`{slot}` (a short name in braces: `{colour}`, `{scene}`).
+
+Restyling is three tasks, first in the list, split by what they ask of the
+user:
+
+- **Lazy Modify Style**: no `{slot}`, so a sweep of any of them needs
+  nothing filled in. Prompts read "Convert <image1> into …. Keep the
+  composition, pose and identity unchanged."
+- **Effortful Modify Style**: at least one `{slot}`. Prompts read
+  "Transform <image1> …. Keep the subject recognisable." and may change the
+  scene, scale, time or physics, not only the look ("Giant monster", "Split in
+  time", "Snow globe"). Slots come from a shared few (`{material}`,
+  `{element}`, `{objects}`, `{place}`, `{backdrop}`, `{era}`, `{genre}`,
+  `{topic}`, `{surface}`, `{colour}`, `{style}`, `{creature}`, `{animal}`,
+  `{plant}`, `{action}`, `{weather}`, `{mood}`, `{amount}` (a price or
+  reward), `{flavour}`, `{music}` (a music genre), `{era2}`, …), so a sweep
+  of the task asks for few values. Every built-in style has at least two,
+  in different roles and varied between neighbouring styles (Giant monster
+  `{place}` + `{weather}`, Tiny world `{objects}` + `{animal}`), and
+  each has one job, so one value suits every style that has it: `{place}`
+  where it happens ("Giant monster", "Billboard"), `{backdrop}` what's
+  behind or blended in ("Double exposure", "Dream merge"); `{genre}` a kind
+  of story or world ("Genre shift", "Mirror world"), `{topic}` what it's
+  about or taken from ("Museum diorama", "Palette stolen from"). There's no
+  `{subject}`: prompts call the image's subject that. `{action}` is an -ing
+  phrase read after "the subject" ("juggling flaming torches"); the **In
+  action** styles use it ("Action shot", "Gone wrong", with `{action2}`
+  "Multitasking").
+- **Effortful Modify Style — Text**: a slot for the words, quoted in the
+  prompt, named by the part they play, so a sweep's title isn't also its
+  sound effect: `{title}` (covers, title screens, headlines), `{slogan}`
+  (propaganda, signs, banners, mottos), `{name}` (labels, cards, a shop, a
+  wanted man), `{dialogue}` (speech and thought balloons), `{sound}` (a
+  sound effect), `{caption}` (narration, a cartoon's caption), or `{text}`
+  (any, for the user's own). The **Text in a scene** ones put the words in
+  a place from `{place}` (Propaganda city: `{era}`): billboard, hologram,
+  screens, rally banners, drones, a projection. The **Comics & manga** ones
+  draw them as dialogue, a sound effect, a caption or a title (manga page,
+  comic cover, four-panel strip, noir narration, editorial cartoon…), with
+  `{place}`, `{action}`, `{element}` or `{genre}` beside.
+
+The editor's **Save** and **Save as preset…** refuse a preset breaking its
+style task's rule. Presets folders, favourites, deletions and sweep ticks
+from before the split (the one task **Modify style**) are moved on load: a
+preset by its slots (a words slot such as `{text}` to Text, another slot to Effortful, none to
+Lazy), Double exposure to Effortful, and saved so.
+
+Lazy styles that turn a flat image into 3D (**Voxel**, **Animatronic**)
 keep only "the subject, pose and identity", so the camera may change, and
 carry a negative prompt (Voxel's "pixel art, 2D, flat, sprite, pixelated";
 Animatronic's also rules out drawings and a generic sci-fi android): kept to
@@ -1169,7 +1408,10 @@ pixel art.
 - **Presets…** (next to **History…** above the prompt, or the prompt's
   right-click menu) opens a window over the images pane (resizable both
   ways; the lists take its height): ★ Favourites and the
-  tasks on the left (task descriptions in their tooltips), the presets on the
+  tasks on the left (task descriptions in their tooltips), each task with
+  groups a collapsible folder of them (the task shown starts open; click
+  the task for all its presets, a group for just that group, and Save
+  prompt as preset… then goes into that group), the presets on the
   right (name, description underneath, the full prompt in the tooltip), and a
   search over names, descriptions, groups and prompts in every task.
 - Click a preset to **replace** the prompt (and the negative, when the preset
@@ -1190,7 +1432,7 @@ pixel art.
   defaults** puts the built-in set in the working copy (saved, it removes
   every user preset file). **Save** checks that
   tasks and presets have names, unique (ignoring case; presets within their
-  task), and prompts; **Cancel** drops everything.
+  task), and prompts, and the style tasks' slot rules; **Cancel** drops everything.
 - **Save as preset…** (above the prompt, the prompt's right-click menu, or
   the window's **Save prompt as preset…**): the prompt and negative as a new
   preset: task (the one shown in the window), name (unique in the task),
@@ -1202,36 +1444,180 @@ Trying one prompt in many styles, or at many values of a setting, at once. A
 sweep is a group of ordinary runs, one per prompt preset or per value, made
 by one **Queue**; nothing about generating or storing them is special.
 
+The **Queue** button ("Queue sweep: K runs × N seed(s)", or "Queue N
+seed(s)"), **Clear**, the unsaved-changes note, the time estimate, why Queue
+refuses, and the no-servers note are a strip pinned under the Generate form,
+so they stay in view however long the form (a sweep's tables) gets.
+
 - Generate's **Mode**: **Single prompt** | **Sweep**, and the sweep box's
   **Vary**: **Style** (a prompt preset per run, below) or a setting (see
   *Setting sweeps*). In a style sweep the prompt is a **template**: `{preset}` marks where each preset's prompt goes
   ("cute robot mascot sticker, {preset}"); a template without it is replaced
   by the preset's prompt (a note says so).
-- **Styles from**: the presets ticked in the Presets window (in sweep mode a
-  click there ticks or unticks instead of using the preset; **Tick all** and
-  **Untick all** act on the presets listed, the task, favourites or search
-  results, Tick all leaving out those needing more reference images than the
-  form has; **Clear all ticks (N)** unticks every one). In a style sweep the
-  window's task list has **☑ Ticked (N)** under ★ Favourites: every ticked
-  preset, under its task's heading, in the list's order (no Tick all / Untick
-  all there). One unticked there stays listed, to tick again, until another
-  view is chosen; ticks whose preset was renamed or deleted (skipped by the
-  sweep) come last under **No longer there**, struck through, to untick. The
-  window opens on Ticked when something is ticked. Tasks with ticks show
-  "(ticked / presets)", and a task's group headings "· N ticked". Or ★
-  Favourites, a whole task, or a group within a task, each with its count. **Use** all of
-  them or a random K; the pick is repeatable (its seed is kept in the draft)
-  and **Reroll** picks again.
+- **Styles**: the presets ticked for the sweep, shown as "N ticked ·
+  Choose…"; the button opens **Choose styles**, a modal browser (the Presets
+  window only picks a prompt). Its left side is a tree: **☑ Ticked (N)**,
+  **★ Favourites**, **All**, then each task as a folder of its
+  groups (folded at first unless it has ticks or is the one shown; a task
+  without groups is a plain row), each with "(ticked / presets)". Above the lists: a search (names,
+  descriptions, prompts, every task; Esc clears it), **Filter** (favourites
+  only, usable with Generate's reference images, never used in this project,
+  has a Good image; the button shows how many are on) and **Sort** (as
+  listed, A–Z, most Good, recently used, never used first; kept in the
+  config). Each style is a row: a tick, ☆, its newest Good image (else its
+  newest image), name, task → group, description, and what it has made in
+  every project (Good / Neutral / Bad / unrated, when last used, runs in this
+  project; or "never used"). A click on the row ticks or unticks it. Ticks
+  whose preset was renamed or deleted (skipped by the sweep) come last in the
+  Ticked view under **No longer there**, to untick. The footer gives the
+  count and estimate, **Tick all shown** (leaving out those needing more
+  reference images), **Untick all shown**, **Clear all ticks**, and **OK** /
+  **Cancel** (Esc; the sweep's ticks as they were; clicking outside does
+  nothing). It opens on Ticked when something is ticked, else Favourites,
+  else All. A draft from before, whose source was ★ Favourites, a task or a
+  group, has those presets ticked on opening. **Use** all of them or a
+  random K; the pick is repeatable (its seed is kept in the draft) and
+  **Reroll** picks again.
 - Presets needing more reference images than the form has are left out, and
   the panel says how many. `{slot}`s of the template and the chosen presets
-  are asked once, under the source, and filled in every run; Queue refuses
-  while one is empty. Under each slot a note says what needs it (the template,
-  and/or the chosen presets by name), each preset with **Replace** (a random
-  pick takes the next style in its order instead; only when one is left) and
-  **Omit** (one style fewer). Either leaves the rest of the pick as it was;
+  are asked once and filled in every run; Queue refuses while one is empty.
+  They are a table (egui_extras): **Blank** | **Value, in every run** (an
+  empty one outlined) | **Needed by** (the template, the style, or "N
+  styles" with their names on hover; a blank only one of several styles
+  has reads "only <style>" in amber, its tooltip saying the rest don't use
+  it and a scene or era for every style goes in the template). Under it, **Each style's prompt (N
+  styles)**: see *Style prompts* below.
+- **Suggest** (✨, prompt enhance; see *Prompt rewriting*): each blank's
+  shared value has a ✨ button (a spinner while
+  asked: its tooltip says where the ask is, and a click stops it) and, once
+  answered, the values offered as rounded chips to click (filled when it's
+  the value), wrapping onto more lines with the row growing to fit; a chip
+  shows at most 6 words and 36 characters ("…", the whole value in its
+  tooltip); a row's height is what its chips took when last drawn
+  (estimated the first time). An "N ▾" menu lists all of them too. The
+  two tables are separate boxes, each titled with what it's for: **Shared
+  values (N blanks)** and **Each style's prompt (N styles)**, and each folds
+  with the caret before its title (for the session). While PE is suggesting values for blanks, its chips appear as
+  each answer comes and can be picked (and the "N ▾" menus, and a blank's
+  spinner stops its ask), but the rest is locked: the value fields, ✨,
+  Replace / Omit, the clear buttons, Random picks, Suggest, and the Styles and
+  Use rows. The PE line reads "Suggesting 5 of 13 · … · until it's done,
+  only suggestions can be picked" with **Stop**. The values offered are
+  the project's: saved in its Generate draft (the sweep's `suggestions`:
+  each blank's chips shown, and every value ever offered for it), so they
+  come back with the project and don't show in another; clearing the form,
+  opening a run in it or restoring a draft keeps them, and switching
+  project stops asks still out for the blanks. Each ask names every value
+  offered as
+  "Already suggested (offer different ones, not these or close variations
+  of them)", the latest 60 at most. Small models repeat themselves anyway,
+  so an answer's values that are one offered before, ignoring case, or one
+  with words added or taken away ("obsidian" / "black obsidian"), are
+  dropped. An answer with nothing new (nothing, nothing readable, or only
+  repeats) is asked again, at most twice, each 0.2 hotter (to 2.0) and told
+  the last answer had nothing new, in the same batch ("· retry 1 of 2" in
+  the PE line and the spinner's tip); still nothing, and a message says so
+  and the blank shows ⚠ with why ("only repeated values offered before,
+  asked 3 times") until it's asked again. A failed request (the server's
+  error) isn't asked again. Clicking ✨ again asks for
+  more, added to the chips; 🎲 (**reroll**, once some are offered) asks for
+  new ones in place of them; 🧹 (once some are offered) clears that blank's
+  chips (asks still avoid them) and ✕ at the end of the value field
+  empties the value, each leaving the other. The sliders button opens **Suggest…**, a
+  modal for that blank: instructions sent with the ask ("only stones",
+  "stranger"), how many (1–30), temperature and `min_p` for this ask,
+  **Look at the images** (with a vision server and images), **Not the N
+  values offered before** with **Forget them**, add to or replace the
+  values offered, **Suggest** (a spinner and Stop while asked), the values
+  offered as chips to pick (whole, not cut) with **Clear**, the blank's
+  value, and **The message sent**, the ask as it would go now. Above the tables: **Clear values** empties every value
+  (the shared ones and the styles' own); **Clear suggestions** clears every
+  blank's chips;
+  **Random picks** gives every blank with suggestions one
+  of them at random (again for others); **Basic suggest (N)**
+  asks, with the default settings, for every shared one with fewer than 6
+  suggestions (whether it has a value or not), and the
+  sliders button after it opens **Suggest for blanks…**: a checkbox for
+  each shared blank, one a row with how many suggestions it shows
+  (highlighted when fewer than How many; ⚠ when its last ask failed) and
+  its value (the same ones ticked at first, until settings are kept), and
+  **Tick only** buttons that tick exactly those they name and untick the
+  rest, each with how many: **All**, **None**, **Fewer than N suggestions**
+  (N: How many), **No value**, **Failed ⚠**, the same settings as **Suggest…** (avoiding each blank's
+  values offered before), **Suggest (N)**, one ask for each blank ticked
+  as one batch, closing it, and the first one's message. Both dialogs
+  remember their settings in the sweep, so per project (`draft.rsn`): each
+  blank's **Suggest…** its own (with its values offered), **Suggest for
+  blanks…** one set and its ticks; temperature and `min_p` only once set
+  away from the server's in Settings, which they follow until then. These sit next to the PE state ("starts when
+  asked", "starting… 23 s (loading the model; 58 s last time)", "ready",
+  "failed: …", and while asking how many and where the first is) with
+  **Stop**. A value's request
+  names every chosen style using the blank, gives the template, the blanks already filled, and attach the reference
+  images (then the start image) when the server has vision, so the values
+  suit what the images show. Either leaves the rest of the pick as it was;
   the removed ones are listed with **Put back**, and **Reroll** or another
   source puts them back. A preset's negative, when it has one, replaces the
   form's.
+- **Style prompts**: **Each style's prompt (N styles)** has a row per style
+  that will run (the references fit it), part of the form (it scrolls with
+  the rest, no scroll of its own). A row is a line with its name (group and
+  prompt on hover), its group, where it is, ✨ (improve it; a spinner while
+  asked, a click stops it), ↺ (back to as built, when it has its own),
+  **Replace** (a random pick takes another style; only when one is left)
+  and **Omit**, and under it the prompt its run is sent, the form's full
+  width, in a text field that grows with it. A row is **as built** (the template with `{preset}` replaced by the
+  style's prompt and the values filled in, following them live),
+  **enhanced** (prompt enhance's; edited after, still enhanced) or
+  **edited** (by hand). One enhanced or edited is the sweep's
+  `style_prompts` in the project's Generate draft (the prompt, the prompt
+  built when it was made, whether enhanced) and its run is sent that, any
+  blank still in it filled from the values; Queue needs no blank left. When
+  the template or a value changes after, the built prompt differs from the
+  one it was made from and the row says **older values** (hover: the prompt
+  as built now; ✨ makes it again); it's kept, not replaced. Editing a row
+  back to the built prompt drops its own. A run with an enhanced prompt has
+  `enhanced` in its sweep tag. Saved styles' own blank values (before style
+  prompts) become their prompts when the sweep is next shown: an edit made
+  from the shared values, or dropped if the same.
+- Between the two tables: **All back to as built**, then **Basic enhance
+  (N)**, which asks, with the default settings, for each style as built or
+  enhanced from older values (edits by hand are left alone), a ⚙ button
+  for **Enhance…**, and while asking "Enhancing 4 of 6 · …" with
+  **Stop**. A row's ✨ asks for that style with the defaults too. Each
+  style is one request with the `style_prompt` job's system prompt (built
+  in: improve the prompt for the style, keep the subject, the template's
+  asks and the style's look, fill every blank, keep `<imageN>` tags, reply
+  with only the prompt): the images (512 px, as for blanks, so they're read
+  once for all the styles), the template, the style's name and prompt,
+  "Improve this prompt:" and the prompt, "Blanks to fill: {…}" when any are
+  left, and the instructions when given. **Enhance…** is a modal: a table
+  of the styles that will run (a checkbox each, where its prompt is: as
+  built / enhanced / edited, "older values" when made from values changed
+  since, ⚠ when its last ask failed, and the prompt, whole on hover);
+  **Tick only** All / None / Not enhanced yet / Failed ⚠ (each with its
+  count, unticking the rest); instructions; **Improve** the prompt as built
+  / as shown (an edit or enhancement improved further); **Images**;
+  temperature and `min_p` (the server's for `style_prompt` until moved,
+  **Default** puts them back); **Longest** (tokens, 400 by default); the
+  server's system prompt for it (edited there, **Default**); **The message
+  sent** for the first ticked; **Enhance (N)**, which asks and closes, and
+  **Close**. Its settings and ticks are kept with the project's sweep
+  (`enhance_ask`) and come back as left.
+- An answer that's empty or gives back the prompt as sent is asked once
+  more, 0.2 hotter, with "The last answer was empty or unchanged: write an
+  improved prompt." after the instructions; failing again (or an error)
+  leaves the prompt as it was, posts a message and marks the row ⚠ with
+  why ("gave the prompt back unchanged, asked 2 times") until it's next
+  asked. On one R9700: 1.5–2.4 s a style (about 110 tokens written).
+- Blanks an enhanced prompt brings that the prompt it was made from didn't
+  have (`{metal}`, `{pole}`) go in **Shared values** like any other (a
+  style's own prompt's blanks are listed, needed by and suggested for as
+  its preset's are, as Queue asks for them filled). When the batch ends
+  (answered or stopped) with any, a modal lists them by style: **Keep as
+  blanks**, or **Make them words** (braces dropped, `_` and `-` to spaces:
+  `{scrap_metal}` → "scrap metal"); closing it keeps them, as does leaving
+  the project before it's answered.
 - The summary reads "K styles × N seeds = X images ≈ time"; above 100 images
   Queue asks first. Every style gets the same seeds, so a column of the
   contact sheet compares styles on one seed.
@@ -1281,18 +1667,44 @@ an image still to come, `–` for one cancelled or failed. Cells fill in as
 images arrive.
 
 - Click selects a cell, double-click opens the image; 1/G, 2/N, 3/B rate the
-  selected image and move right; arrows move; Ctrl+Z undoes.
+  selected image and move on (right, then the next row's first seed);
+  arrows move as the sheet is shown; Ctrl+Z undoes.
 - Each row: the style, its counts, **G N B** (rate the row's *unreviewed*
   images only), and **Use this style** (its run in Generate as a single
   prompt, with the next label and seed; the old prompt goes to the history).
 - **N more seeds for K kept styles** adds a revision of N seeds to every
   style with a Good image (of the styles shown).
+- **New sweep from their K styles…** (the picks bar and a picked image's
+  right-click menu, in a sweep's scope: the contact sheet, Grid or Single): the styles of the images picked (one
+  image of a style is enough; no separate style selection) as a new sweep
+  of the same project in Generate, to change and queue. The form is the one
+  the sweep was queued with (its checkpoint in the prompt history:
+  template, blank values, settings, and the styles' own prompts), ticked to
+  just those styles (Use all of them); a setting sweep's picks give its
+  values ("cfg 3, cfg 5") or models. The next label and seeds; the form
+  there before goes to the history. Without the checkpoint (an older sweep,
+  a trimmed history), the first run's settings, the template `{preset}`,
+  and each style its run's very prompt as its own (edited) prompt; a style
+  no longer in the presets can't be ticked and is named as left out.
 - **Filter by name**: only the rows whose style (or run label) has every
   word typed, any case; the seed columns stay. Esc or ✕ clears it; leaving
   the sweep clears it too.
 - **Zoom** (− / slider / +, or Ctrl+scroll over the sheet): cells from 64 to
   320 points, the thumbnails' own size, so they stay sharp. Kept in
   `config.rsn` (`sheet_cell`).
+- **Rows side by side**: when a row is narrow (one seed, or a few), as many
+  rows as fit the window sit side by side in bands, read left to right
+  then down (a setting sweep's values stay in order). ↓ / ↑ move a line
+  (that many rows), ← / → cross from one band into the next; the large
+  preview's ↑ / ↓ still go a style up or down. With one seed its number
+  is in the toolbar, not over every band. Ctrl+scroll changes how many fit.
+- **Row headers** (the toolbar's Full / Compact / Auto button cycles them,
+  kept in `config.rsn` as `sheet_rows`): **Full** (the default) is the
+  style, counts, **G N B** and **Use** beside the row (rows fold only if
+  those fit too); **Compact** is the style as a caption above the row (⚠
+  for "no negative prompt"), with **G N B** and **Use** in its right-click
+  menu; a compact caption takes no width, so many more rows fit. **Auto**
+  is Full while rows sit one per line and Compact once they would fold.
 - Leaving the sweep scope leaves the sheet for Single.
 - Looking at a sweep's image anywhere in Review (Single, Grid, A/B compare),
   the top bar shows **Sweep r05 contact sheet**: it opens that sweep's sheet
@@ -1315,7 +1727,7 @@ out as one image.
   is a separate Ctrl+Z). Rated images leave Review's queue, so the picks go
   with them there; the contact sheet keeps them.
 - **Tile…** (T) opens the Tile window. Picks from the contact sheet keep
-  their rows and columns (holes included); others start about square
+  their rows and columns as shown (bands side by side; holes included); others start about square
   (⌈√n⌉ columns). Drag a tile onto another to swap them, or onto any empty
   cell (an extra row below takes drops); click one to give it a caption or
   a span (2 × 1, 2 × 2, …: the tiles in its way move to free cells).
@@ -1388,6 +1800,8 @@ real directories under `projects/`, so it looks the same in a file manager.
   - **New project**: asks the name first (the same modal, titled New
     project, prefilled with a free "new project" name); the project is made
     on **Create**, and Cancel / Escape makes nothing.
+  - **Generate** (on a project, first in its menu, above Show outputs):
+    selects it and opens Projects → Generate.
   - **Rename**: a modal over a dimmed window (also from `F2` and the
     folder views, and for collections). Enter or **Rename** commits;
     Escape, **Cancel** or a click outside cancels. An invalid name disables
@@ -1466,7 +1880,14 @@ shows the rewrite queue. The statuses take the room left of the top bar's button
 (`ROCm1 ◐ warming up`), then name and dot, then dots only; with no room for
 those the Servers… button shows the worst dot (and, in a narrow window, only
 its icon; the library name is cut to 10 characters). Tooltips give the full
-status. The window is at least 1000 × 640.
+status. In full, a status takes a fixed width (180 px, cut with "…"; the PE's
+without the chat server's name, `PE ● ready`), and which form fits is worked
+out from those widths, so the bar doesn't move as states change many times a
+second. The same goes for the servers list (Jobs, its popover, the server
+status window: the state column a fixed 240 px, cut), the jobs popover (a
+fixed 520 px) and the server status window's PE line (Start now / Stop
+before the state, which is cut to the room left). The window is at least
+1000 × 640.
 
 Each tab label is an icon, a Title Case name and a count: 📥 **Idea Inbox
 (7)**, 📚 **Input Library**, 🚀 **Projects** (✨ while runs generate),
@@ -1549,11 +1970,15 @@ the keys and mouse buttons go through that view's own history instead.
   level; a folder's right-click menu makes them inside it) at the top, then a search field that narrows the tree to
   the projects and folders whose names contain the text (a matching folder
   shows all it holds; `Esc` or × clears it), **runs** (list the selected
-  project's runs under it), the project order (**Newest first** or
-  **A–Z**, any case; saved in the config as `projects_by_name`; the grid uses
-  it too) and **narrow to siblings** (below; ticked by default, unticked
-  saved as `project_click_keeps_scope`), then the tree: in each folder, its subfolders by name, then its
-  projects in that order. A **Keys** section is pinned to the bottom (open
+  project's runs under it), the project and folder orders (**Created**:
+  newest made first; **Last run**: most recently queued first, a project
+  that has never run by when it was made; or **A–Z**, any case; a folder
+  goes by the newest project anywhere in it, empty folders last; saved in
+  the config as `project_order`, default Created, and `folder_order`,
+  default A–Z; the grid uses the project order too) and **narrow to
+  siblings** (below; ticked by default, unticked saved as
+  `project_click_keeps_scope`), then the tree: in each folder, its
+  subfolders in their order, then its projects in theirs. A **Keys** section is pinned to the bottom (open
   by default, foldable): on the Folder tab the folder view's keys, else an
   opened image's (← → previous / next, rate, undo, E / D / R / I, zoom, Esc),
   and Alt+← → / Ctrl+N from anywhere.
@@ -1632,14 +2057,14 @@ the keys and mouse buttons go through that view's own history instead.
   start image with strength (see Output → input).
 - **Status bar jobs indicator** (bottom right): an overall progress bar and
   "N run(s) · done / total seeds" (or "no jobs · N server(s) ready"). Click
-  it for a popover: each run in the engine (project · label, prompt, a bar
-  over its seeds that counts partly sampled seeds by their steps, one thin
-  bar per seed being sampled, **Cancel**), the server states, and **Open
+  it for a popover (a fixed 520 px): **Finish & stop all** / **Stop all
+  now** (always there, above the runs, greyed out with none), the runs in
+  the engine as in Projects → Jobs (below), the server states, and **Open
   Projects → Jobs** / **Change servers…**. Cancelled and failed seeds don't count
   towards the total.
-- **Interface zoom** (status bar, left of the bell): "+ 100% −" scales the
+- **Interface zoom** (status bar, left of the bell): "− 100% +" scales the
   whole interface from 70% to 300%. The buttons and Ctrl + / Ctrl − step to
-  the next 10%, Ctrl 0 is 100%; the percentage can also be typed (it
+  the next 5%, Ctrl 0 is 100%; the percentage can also be typed (it
   applies on Enter) or dragged. It's kept in the config (`ui_zoom`), not
   per library. egui's own keyboard zoom is off, so the config always has it.
   A divider separates it from the bell.
@@ -1647,7 +2072,22 @@ the keys and mouse buttons go through that view's own history instead.
   "(+N more)" when there are others and ✕ to dismiss it. Clicking it opens
   a popover with every message, newest first, each with ✕, and **Clear all**.
 - **Jobs**: per-run progress and per-server state (loading / draining /
-  generating), with a live preview frame from `jobs/{id}`. Preview is `"proj"`
+  generating), with a live preview frame from `jobs/{id}`. Under **Runs**,
+  the order toggle and **Finish & stop all** / **Stop all now** stay put
+  (always shown, greyed out with nothing generating); the runs scroll
+  under them, by project: a project is a box in the order its first run is
+  in the queue, folded until opened (▸, for the session), its header the
+  name, "3 runs · 46 / 120 seeds · ~12 min left" (its runs' images left at
+  their time per image, as many at once as there are servers), and
+  **Finish & stop** / **Stop now** for all its runs (Stop now asks), then a
+  bar over its seeds. Open, its runs in queue order: a run on its own as a
+  block (label, prompt, a bar over its seeds that counts partly sampled
+  seeds by their steps, one thin bar per seed being sampled, its timing,
+  Finish & stop / Stop now); a sweep's runs together in one more folded box
+  ("r05 · sweep", its seeds, time left and stops, "now: Ink s3 14/20, …"
+  and a bar), open a line per run: its row (the style, "cfg 3"), a bar,
+  what it's sampling and its stops. A click on a run's block or line opens
+  its details. Preview is `"proj"`
   by default; `"tae"` once TAEQI2.1 is in the `tae` slot.
 - **Job details**: clicking a run in Jobs or in the jobs popover opens a
   modal: its progress, the prompt and negative, the input images as
@@ -1665,7 +2105,12 @@ the keys and mouse buttons go through that view's own history instead.
   opening an unreviewed image in a folder view) set it. Single view + grid view + A/B compare (`C` or
   the A/B button pins the current image as A and shows the next as B; both can
   be rated, and A/B can be swapped), over a
-  checkerboard for alpha images. Double-clicking Single's image opens it
+  checkerboard for alpha images. Single and Grid have an info panel on the
+  right: "3 / 18", the image, and its recipe (project, run, **queued** (its
+  revision's time), **generated** (when it was stored, from the run's
+  timing; older runs without one give the image ID's minute, "(from its
+  ID)"), seed, recipe, size, …), times as "2026-10-19 13:00 UTC · 8 days
+  ago". Double-clicking Single's image opens it
   full size in a modal (click or Esc closes; Review's keys wait meanwhile). The
   modal (the same one every large preview uses) is a fixed box nearly the
   window's size, and the image zooms inside it: wheel or pinch at the
@@ -1731,7 +2176,8 @@ the keys and mouse buttons go through that view's own history instead.
     (Review scoped to the source). Double-clicking an image opens it full
     size over the window (the image preview: click, Esc or a click outside
     closes it; right-click copies it). Selecting an image shows the
-    lineage view (source idea → parent ← image → children) with its recipe;
+    lineage view (source idea → parent ← image → children) with its recipe
+    (as in Review's info panel);
     double-click any of its images for the full-size preview. Right-click: change rating, back to Review, edit run, → input ref, → new
     idea, add to collection, **Use as project cover** (the Projects Grid then
     shows it instead of the best-rated image), **Export…**, show project, copy
@@ -1818,6 +2264,9 @@ is reset, and the next time it holds it counts again from the start.
   GPUs** (every server idle that long). It counts only while servers are
   running; with none started there is nothing to wait for. The engine reports
   `idle` with each server state; the GUI notes when each one became idle.
+  **Prompt enhance asks count as work** (on by default): while any ask is
+  going no GPU counts as idle, and idle time counts again from the last
+  one.
 - **Review backlog**: more than *N* images waiting in Review (the count the
   Review tab shows, over every project).
 
@@ -1853,7 +2302,7 @@ so the taskbar entry doesn't stay lit.
 The **bell** in the status bar shows the state: crossed out when every alert
 is off (a click opens the settings), ringing while an alert holds, `zz` when
 snoozed, a warning when the last sound failed. Its menu says what holds, and
-snoozes for 30 min, 1 h or until IncreArt restarts. Snoozing isn't saved;
+snoozes for 5 min, 30 min, 1 h or until IncreArt restarts. Snoozing isn't saved;
 the settings are, in `config.rsn` (`notifications`, left out while default).
 
 The checks run once a second from the app's `logic` step, which eframe also

@@ -15,7 +15,8 @@ use increart_core::config::Resolution;
 use increart_core::history::{HistoryEntry, HistoryKind};
 use increart_core::model::{Recipe, SourceInfo};
 use increart_core::model::{SweepParam, SweepTag};
-use increart_core::prompts::{PromptPreset, PromptPresets};
+use increart_core::pe::PeRun;
+use increart_core::prompts::{BatchAsk, EnhanceAsk, PromptPreset, PromptPresets, SUGGEST_COUNT, SuggestAsk};
 
 use crate::state::*;
 use crate::tile::{Tile, TileContent};
@@ -86,7 +87,8 @@ pub enum Msg {
     ServerOpened(u32, usize, Result<(), String>),
     /// Every server of the draft has answered or failed.
     ServersSettled(u32),
-    /// The servers [`Effect::StopServers`] stopped are gone (the names of
+    /// The servers [`Effect::StopServers`] (or [`Effect::OpenServers`])
+    /// stopped are gone (the names of
     /// those the app had started; connected ones are only let go).
     ServersStopped(Vec<String>),
     /// A starting server's latest log line (attempt, server).
@@ -96,9 +98,14 @@ pub enum Msg {
     /// Stop opening (and the servers already started).
     CancelOpening,
     ContinueWithServers,
+    /// Without sd-servers, using the **Continue without servers** dialog's
+    /// chat server (without the dialog, the one in use stays).
     ContinueWithoutServers,
-    /// **Continue without servers**: asks first, then `ContinueWithoutServers`.
+    /// **Continue without servers**: its dialog (the chat server to use
+    /// meanwhile), then `ContinueWithoutServers`.
     AskContinueWithoutServers,
+    /// The dialog's choice; None closes it.
+    WithoutDialog(Option<Without>),
     /// Leaves a server dialog opened from the main window, keeping the
     /// servers in use.
     CloseServerDialog,
@@ -177,6 +184,9 @@ pub enum Msg {
     // ---- projects
     SelectProject(Id),
     SelectProjectFolder(Option<PathBuf>),
+    /// Stops prompt enhance's asks for the Generate form, then sends the
+    /// message (one leaving the project, once asked about it).
+    LeaveGenerate(Box<Msg>),
     Generate(GenerateForm),
     SelectRecipe(usize),
     /// Adds images to the Generate form's list as references.
@@ -211,12 +221,14 @@ pub enum Msg {
     /// Jobs: how the queue shares the servers (saved in the config).
     JobOrder(Order),
     /// The sweep's "one at a time" question: `Some(true)` switches to
-    /// spread evenly and queues, `Some(false)` queues as is, `None` doesn't.
+    /// sweep by sweep and queues, `Some(false)` queues as is, `None` doesn't.
     SweepOrderAnswer(Option<bool>),
     /// Stop a run: Finish & stop or Stop now.
     CancelRun(Id, Stop),
     /// Stop every active run.
     StopAll(Stop),
+    /// Several runs: a project's or a sweep's (Jobs).
+    CancelRuns(Vec<Id>, Stop),
     // ---- review
     ReviewScope(Option<Id>),
     /// Review one sweep of a project (its contact sheet).
@@ -225,12 +237,19 @@ pub enum Msg {
     ReviewRun(Id, Id),
     /// Review's scope panel: every project's runs, or only the selected one's.
     ReviewAllRuns(bool),
+    /// How Review's scope tree orders folders and projects (kept in config).
+    ReviewOrder(increart_core::config::ReviewOrder),
+    /// Review's scope tree hides what has nothing to review (**hide
+    /// reviewed**, kept in config).
+    ReviewHideReviewed(bool),
     /// Review's scope panel: the tree's search text.
     ReviewSearch(String),
     /// The project tree lists the selected project's runs (kept in config).
     ProjectRuns(bool),
-    /// Projects by name (A–Z) instead of newest first.
-    ProjectsByName(bool),
+    /// The order of projects in the tree and grid (kept in config).
+    ProjectOrder(increart_core::config::TreeOrder),
+    /// The order of the project tree's folders (kept in config).
+    FolderOrder(increart_core::config::TreeOrder),
     /// Selecting a project narrows the grid to its folder, when that holds
     /// others (**narrow to siblings**).
     NarrowToSiblings(bool),
@@ -244,6 +263,13 @@ pub enum Msg {
         size: u32,
         save: bool,
     },
+    /// An image grid's tile size; `save`: into the config (not while
+    /// dragging).
+    GridZoom {
+        grid: ZoomGrid,
+        size: u32,
+        save: bool,
+    },
     /// The interface zoom in percent; `save`: into the config (not while
     /// dragging).
     UiZoom {
@@ -252,8 +278,14 @@ pub enum Msg {
     },
     /// Ctrl + / Ctrl −: the interface zoom to the next step up or down.
     UiZoomStep(bool),
+    /// The contact sheet's row headers (kept in config).
+    SheetRows(increart_core::config::SheetRows),
+    /// How many rows the contact sheet shows side by side.
+    SheetBands(usize),
     SheetCell(usize, usize),
-    /// Move the contact sheet's selection by (rows, columns).
+    /// Move the contact sheet's selection by (lines, columns) as shown: with
+    /// rows in bands, a line down is `bands` rows on, and a column past a
+    /// band's last seed is the next band's first.
     SheetMove(isize, isize),
     /// Rate the selected cell's image (whatever its verdict).
     SheetRate(Verdict),
@@ -261,8 +293,14 @@ pub enum Msg {
     SheetRow(usize, Verdict),
     /// This many more seeds for every style with a Good image.
     SheetMoreSeeds(u64),
+    /// The styles (or values) of the sweep's images picked, as a new sweep
+    /// in Generate.
+    SheetNewSweep,
     /// A run's prompt and settings into its project's Generate form.
     RunInGenerate(Id),
+    /// An output's run settings and its seed into Generate as one image,
+    /// e.g. to try it again larger.
+    RecipeInGenerate(ImageRef),
     /// Review every project under a folder (relative to `projects/`).
     ReviewScopeFolder(PathBuf),
     ReviewCursor(usize),
@@ -403,7 +441,7 @@ pub enum Msg {
     // ---- prompt presets
     /// Show / hide the Presets window.
     PresetsPanel(bool),
-    /// What the window lists (Ticked: those ticked now, filled in here).
+    /// What the window lists.
     PresetsShow(PresetsView),
     PresetsSearch(String),
     /// Use a preset: replace the prompt, or insert at this character of it.
@@ -422,6 +460,97 @@ pub enum Msg {
     SweepTicks(Vec<(usize, usize)>, bool),
     /// Unticks every preset.
     SweepClearTicks,
+    /// The style sweep's **Choose styles** window (its source becomes the
+    /// presets it had, ticked).
+    StylesOpen,
+    StylesShow(StyleView),
+    StylesSearch(String),
+    StylesFilter(StyleFilter),
+    StylesSort(increart_core::config::StyleSort),
+    /// Close Choose styles: OK (`true`) keeps the ticks, Cancel puts back
+    /// the sweep as it was.
+    StylesClose(bool),
+    // ---- prompt enhance
+    /// Ask the PE server for values for these blanks.
+    PeSuggest(Vec<BlankKey>),
+    /// New values for a blank in place of those offered (and none offered
+    /// before).
+    PeReroll(BlankKey),
+    /// **Suggest…** on a blank: the dialog, set as last time (else as the
+    /// quick ask would be).
+    PeSuggestOpen(BlankKey),
+    /// The dialog changed (its settings remembered with the blank), or
+    /// closed (`None`).
+    PeSuggestDialog(Option<SuggestDialog>),
+    /// Ask with the dialog's settings.
+    PeSuggestAsk,
+    /// **Suggest for blanks…**: the dialog, set as last time, else with
+    /// these (the shared blanks short of suggestions) ticked.
+    PeBatchSuggestOpen(Vec<String>),
+    /// The dialog changed (remembered with the sweep), or closed (`None`).
+    PeBatchSuggestDialog(Option<BatchSuggest>),
+    /// Ask for every blank ticked with the dialog's settings, and close it.
+    PeBatchSuggestAsk,
+    /// Forget the values offered for a blank (asks no longer avoid them).
+    PeForgetOffered(BlankKey),
+    /// Clear the values offered for a blank (asks still avoid them).
+    PeClearSuggestions(BlankKey),
+    PeStatus(PeStatus),
+    /// How an ask (by number) is getting on.
+    PeProgress(u64, PeStep),
+    /// The server's answer to an ask (or what went wrong).
+    PeAnswer(u64, Result<String, String>),
+    /// Stop these asks (queued or being answered).
+    PeStop(Vec<u64>),
+    /// Open the rewrite / describe window and ask.
+    PeRewrite(PeTarget),
+    /// The window's instructions and answer, as edited.
+    PeTextEdit {
+        how: String,
+        text: String,
+    },
+    /// Ask again (with the instructions).
+    PeTextRetry,
+    /// Close the window, using the answer or not.
+    PeTextClose(PeUse),
+    /// Improve these styles' prompts with the default settings (empty:
+    /// those of the styles that will run not enhanced yet).
+    PeStyleEnhance(Vec<increart_core::prompts::PresetKey>),
+    /// **Enhance style prompts…**: the dialog, set as last time, else with
+    /// the styles not enhanced yet ticked.
+    PeStyleOpen,
+    /// The dialog changed (remembered with the sweep), or closed (`None`).
+    PeStyleDialog(Option<increart_core::prompts::EnhanceAsk>),
+    /// Improve every style ticked with the dialog's settings, and close it.
+    PeStyleAsk,
+    /// The blanks prompt enhance added to styles' prompts: kept (true), or
+    /// made plain words.
+    PeAddedBlanks(bool),
+    /// The chat server in use changed: start it if it's to start then.
+    PeLaunch,
+    /// Start the chat server in use now (or connect to it).
+    PeStart,
+    /// Stop the PE server the app started (asks waiting are dropped).
+    PeShutdown,
+    /// **Prompt enhance settings** on the server dialog draft's chat server
+    /// (its place in the draft; None: a new one).
+    PeEditorOpen(Option<usize>),
+    PeEditorEdit(increart_core::pe::PeServer),
+    PeEditorSave,
+    PeEditorClose,
+    /// List the GPUs (`vulkaninfo`) for the settings.
+    PeListGpus,
+    PeGpus(Result<Vec<(u32, String)>, String>),
+    /// Prompt enhance's system prompt for a job (empty: the default).
+    PeSystemPrompt {
+        job: String,
+        text: String,
+    },
+    /// Prompt enhance's sampling for a job; `None`: the default.
+    PeSampling {
+        job: String,
+        sampling: Option<increart_core::pe::Sampling>,
+    },
     /// The Generate form has selected `prompt_select`.
     PromptSelected,
     /// **Edit presets…**, on this task and preset.
@@ -504,6 +633,8 @@ pub enum Msg {
     Checkerboard(bool),
     /// Jump to the newest unreviewed image.
     ReviewNewest,
+    /// Stay on the newest unreviewed image as they come, or not.
+    ReviewFollow(bool),
     OutputFilter(OutputFilter),
     /// The Output library's search box: project names (`true`) or the
     /// images' titles and prompts; what's typed goes along.
@@ -594,6 +725,9 @@ pub enum Effect {
         create: bool,
     },
     ListDevices(String),
+    /// Open these sd-servers, stopping the engine and the servers in use
+    /// that aren't among them (the ones that are, opened with the same
+    /// settings, are kept as they are).
     OpenServers {
         servers: Vec<ServerConfig>,
         shared: SdServerConfig,
@@ -612,6 +746,18 @@ pub enum Effect {
     /// Stop the engine only, keeping the servers (switching libraries).
     StopEngine,
     SavePresets(PromptPresets, PathBuf),
+    /// Ask the PE server (starting it first if needed), one job at a time;
+    /// each reports [`Msg::PeProgress`] and answers [`Msg::PeAnswer`].
+    PeAsk {
+        server: increart_core::pe::PeServer,
+        jobs: Vec<PeJob>,
+    },
+    /// Drop these asks if still queued, and stop the one being answered.
+    PeStop(Vec<u64>),
+    /// Stop the PE server the app started; [`Msg::PeStatus`] Off once it's
+    /// down.
+    PeShutdown,
+    PeListGpus,
     Lib(LibOp),
     QueueRun(Id),
     CancelRun(Id, Stop),
@@ -734,9 +880,10 @@ pub enum LibOp {
         queue: bool,
         queued: Box<Queued>,
     },
-    ReviewOutput {
-        link: PathBuf,
-        verdict: Option<Verdict>,
+    /// Rates output links (each to its own verdict; `None`: unrated), all
+    /// in one op, so one rescan however many.
+    ReviewOutputs {
+        links: Vec<(PathBuf, Option<Verdict>)>,
         undo: bool,
     },
     /// Output links to the trash (the images stay until Clean up).
@@ -764,6 +911,8 @@ pub enum LibOp {
     /// named.
     CopyProject(PathBuf, String),
     AddSeeds(Id, u64),
+    /// Add a variant to an idea's text.
+    AddVariant(Id, increart_core::model::PromptVariant),
     /// Save an idea's title, text, tags and images (Edit idea).
     SaveIdea {
         id: Id,
@@ -829,10 +978,12 @@ pub enum OpOk {
         path: PathBuf,
         form: Box<GenerateForm>,
     },
+    /// (link path now, verdict before) of each rated link; `error`: why
+    /// the rest weren't.
     Reviewed {
-        link: PathBuf,
-        previous: Option<Verdict>,
+        done: Vec<(PathBuf, Option<Verdict>)>,
         undo: bool,
+        error: Option<String>,
     },
 }
 
@@ -897,7 +1048,8 @@ fn save_presets(state: &AppState) -> Vec<Effect> {
     state.presets_path.iter().map(|p| Effect::SavePresets(state.prompt_presets.clone(), p.clone())).collect()
 }
 
-/// Names given and unique (tasks; presets within a task), prompts given.
+/// Names given and unique (tasks; presets within a task), prompts given
+/// and keeping to their style task's slot rule.
 fn check_presets(list: &PromptPresets) -> Result<(), String> {
     let mut tasks = std::collections::HashSet::new();
     for t in &list.tasks {
@@ -920,6 +1072,9 @@ fn check_presets(list: &PromptPresets) -> Result<(), String> {
             if p.prompt.trim().is_empty() {
                 return Err(format!("{name} → {n} has no prompt"));
             }
+            if let Some(why) = increart_core::prompts::slot_rule(name, &p.prompt) {
+                return Err(format!("{name} → {n} {why}"));
+            }
         }
     }
     Ok(())
@@ -941,6 +1096,7 @@ fn server_dialog() -> ServerDialog {
         from_main: false,
         settings: false,
         notice: None,
+        without: None,
     }
 }
 
@@ -967,19 +1123,74 @@ fn skip_servers(state: &mut AppState, choice: StartupServers) -> Vec<Effect> {
     fx
 }
 
-/// Opening servers stops the ones in use: ask first when there are any.
-fn ask_before_replacing(state: &mut AppState, what: &str, then: Msg) -> Vec<Effect> {
-    if state.servers.is_empty() && !state.engine_running {
+/// Opening a preset stops the sd-servers in use it doesn't have, and
+/// restarts the engine (dropping the images being made) unless its
+/// sd-servers are those in use: ask first when either happens.
+fn ask_before_replacing(state: &mut AppState, draft: &ServerPreset, then: Msg) -> Vec<Effect> {
+    let sd = draft.sd_servers();
+    if sd_unchanged(state, &sd) || (state.servers.is_empty() && !state.engine_running) {
         return update(state, then);
     }
-    let jobs = match state.active_runs.len() {
-        0 => String::new(),
-        n => format!(
-            "\n\n{n} run(s) are generating: the images being made now are dropped and made again; \
-             the rest of the queue goes on once the new servers are up."
-        ),
+    let stops = stopping_for(state, &sd);
+    let runs = state.active_runs.len();
+    if stops.is_empty() && runs == 0 {
+        return update(state, then);
+    }
+    let what = if draft.name.trim().is_empty() { "these servers".into() } else { draft.name.clone() };
+    let mut text = match stops.len() {
+        0 => format!("Open {what}?"),
+        n if n == state.servers.len() => format!("Stop the servers in use and open {what}?"),
+        _ => format!("Stop {} and open {what}?", stops.join(", ")),
     };
-    update(state, Msg::Ask(format!("Stop the servers in use and open {what}?{jobs}"), Box::new(then)))
+    let kept: Vec<String> = state.servers.iter().map(server_label).filter(|n| !stops.contains(n)).collect();
+    if !kept.is_empty() && !sd.is_empty() {
+        text.push_str(&format!(" {} stay as they are.", kept.join(", ")));
+    }
+    if runs > 0 && !sd.is_empty() {
+        text.push_str(&format!(
+            "\n\n{runs} run(s) are generating: the images being made now are dropped and made again; \
+             the rest of the queue goes on once the new servers are up."
+        ));
+    } else if runs > 0 {
+        text.push_str(&format!("\n\n{runs} run(s) are generating: they wait until a server is connected again."));
+    }
+    update(state, Msg::Ask(text, Box::new(then)))
+}
+
+/// Whether these sd-servers are the ones in use, all up and generating.
+fn sd_unchanged(state: &AppState, sd: &[ServerConfig]) -> bool {
+    !sd.is_empty()
+        && state.engine_running
+        && state.background.is_none()
+        && state.servers_opened_with.as_ref() == Some(&state.config.sdserver)
+        && state.servers.len() == sd.len()
+        && state.servers.iter().zip(sd).all(|(s, c)| s.config.as_ref() == Some(c))
+}
+
+/// The servers in use that opening `sd` stops: those it doesn't have, and
+/// started ones when the sd-server settings changed since.
+fn stopping_for(state: &AppState, sd: &[ServerConfig]) -> Vec<String> {
+    let same_settings = state.servers_opened_with.as_ref() == Some(&state.config.sdserver);
+    let kept = |c: &ServerConfig| sd.contains(c) && (same_settings || !matches!(c, ServerConfig::Start { .. }));
+    state.servers.iter().filter(|s| !s.config.as_ref().is_some_and(kept)).map(server_label).collect()
+}
+
+/// A server as "stopping …" names it: its device, else its name.
+fn server_label(s: &ServerStatus) -> String {
+    if s.device.is_empty() { s.name.clone() } else { s.device.clone() }
+}
+
+/// The chat server in use from now: the one before stops unless it runs as
+/// the same process, and one to start with its preset starts.
+fn use_chat(state: &mut AppState, chat: Option<increart_core::pe::PeServer>) -> Vec<Effect> {
+    let same = match (&state.pe.server, &chat) {
+        (Some(a), Some(b)) => a.same_process(b),
+        (a, b) => a.is_none() && b.is_none(),
+    };
+    let mut fx = if same { vec![] } else { update(state, Msg::PeShutdown) };
+    state.pe.server = chat;
+    fx.extend(update(state, Msg::PeLaunch));
+    fx
 }
 
 /// The editor's preset into `config.server_presets`: in place when editing
@@ -1025,7 +1236,7 @@ fn list_devices_once(state: &AppState) -> Vec<Effect> {
 /// A `Start` server on `device`, on the next free port.
 fn add_start_server(draft: &mut ServerPreset, device: &str) {
     let server = ServerConfig::Start {
-        name: format!("gpu{}", draft.servers.len()),
+        name: format!("gpu{}", draft.sd_servers().len()),
         host: "127.0.0.1".into(),
         port: next_port(draft),
         device: device.into(),
@@ -1042,10 +1253,11 @@ fn wizard_name(draft: &ServerPreset) -> String {
         .iter()
         .filter_map(|s| match s {
             ServerConfig::Start { device, .. } => Some(device.as_str()),
-            ServerConfig::Connect { .. } => None,
+            ServerConfig::Connect { .. } | ServerConfig::Chat(_) => None,
         })
         .collect();
-    match (devices.len(), draft.servers.len()) {
+    match (devices.len(), draft.sd_servers().len()) {
+        (0, 0) => "Prompt enhance".into(),
         (0, 1) => "Running server".into(),
         (0, _) => "Running servers".into(),
         _ => devices.join(" + "),
@@ -1069,6 +1281,9 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     state.nav.depth += 1;
     let fx = apply(state, msg);
     state.nav.depth -= 1;
+    if state.nav.depth == 0 && state.review_follow {
+        state.review_cursor = state.review_queue().len().saturating_sub(1);
+    }
     if state.nav.depth == 0 && !state.nav.restoring && state.phase == Phase::Main {
         let now = state.place();
         if state.nav.current.as_ref() != Some(&now) {
@@ -1109,6 +1324,10 @@ fn go_to(state: &mut AppState, p: Place) -> Vec<Effect> {
             fx.extend(update(state, Msg::ReviewScope(p.review_scope)));
         }
         _ => {}
+    }
+    // after the scope: a sweep's contact sheet needs its sweep in view
+    if p.review_view != state.review_view {
+        fx.extend(update(state, Msg::ReviewView(p.review_view)));
     }
     if p.output_source != state.output_source {
         fx.extend(update(state, Msg::OutputSource(p.output_source)));
@@ -1273,8 +1492,8 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         // ------------------------------------------------ server dialog
         Msg::OpenPreset(i) => match state.config.server_presets.get(i) {
             Some(p) => {
-                let what = p.name.clone();
-                ask_before_replacing(state, &what, Msg::OpenPresetNow(i))
+                let p = p.clone();
+                ask_before_replacing(state, &p, Msg::OpenPresetNow(i))
             }
             None => vec![],
         },
@@ -1319,7 +1538,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::AddStartServer | Msg::AddConnectServer => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
-            let n = d.draft.servers.len();
+            let n = d.draft.sd_servers().len();
             if msg == Msg::AddStartServer {
                 add_start_server(&mut d.draft, &format!("ROCm{n}"));
             } else {
@@ -1438,8 +1657,8 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::OpenDraft => {
             let Phase::Servers(d) = &state.phase else { return vec![] };
-            let what = if d.draft.name.trim().is_empty() { "these servers".into() } else { d.draft.name.clone() };
-            ask_before_replacing(state, &what, Msg::OpenDraftNow)
+            let draft = d.draft.clone();
+            ask_before_replacing(state, &draft, Msg::OpenDraftNow)
         }
         Msg::OpenDraftNow => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
@@ -1447,24 +1666,41 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 return vec![];
             }
             d.editing = None;
-            d.opening = true;
-            d.started = state.now;
-            d.progress = vec![ServerProgress::Opening; d.draft.servers.len()];
-            state.start_log = vec![String::new(); d.draft.servers.len()];
-            state.open_attempt += 1;
-            state.background = None;
-            let mut fx = vec![stop_servers(state)];
-            let Phase::Servers(d) = &state.phase else { unreachable!() };
-            if !d.draft.name.is_empty() && state.config.preset(&d.draft.name).is_some() {
-                state.config.last_preset = Some(d.draft.name.clone());
+            let draft = d.draft.clone();
+            let mut fx = vec![];
+            if !draft.name.is_empty() && state.config.preset(&draft.name).is_some() {
+                state.config.last_preset = Some(draft.name.clone());
                 fx.extend(save_config(state));
             }
-            let Phase::Servers(d) = &state.phase else { unreachable!() };
-            state.servers = d
-                .draft
-                .servers
+            fx.extend(use_chat(state, draft.chat().cloned()));
+            let sd = draft.sd_servers();
+            // the sd-servers in use already: nothing to open
+            if sd_unchanged(state, &sd) {
+                state.phase = Phase::Main;
+                return fx;
+            }
+            // a chat server only: the sd-servers in use stop
+            if sd.is_empty() {
+                state.phase = Phase::Main;
+                state.open_attempt += 1;
+                state.background = None;
+                fx.push(stop_servers(state));
+                state.servers.clear();
+                return fx;
+            }
+            let stopping = stopping_for(state, &sd);
+            let Phase::Servers(d) = &mut state.phase else { unreachable!() };
+            d.opening = true;
+            d.started = state.now;
+            d.progress = vec![ServerProgress::Opening; sd.len()];
+            state.start_log = vec![String::new(); sd.len()];
+            state.open_attempt += 1;
+            state.background = None;
+            state.stopping = stopping;
+            state.servers = sd
                 .iter()
                 .map(|s| ServerStatus {
+                    config: Some(s.clone()),
                     name: s.name().into(),
                     device: s.device().into(),
                     state: "opening".into(),
@@ -1473,8 +1709,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     worked: false,
                 })
                 .collect();
+            state.servers_opened_with = Some(state.config.sdserver.clone());
             fx.push(Effect::OpenServers {
-                servers: d.draft.servers.clone(),
+                servers: sd,
                 shared: state.config.sdserver.clone(),
                 attempt: state.open_attempt,
             });
@@ -1591,9 +1828,14 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             vec![Effect::StartEngine { shared: state.config.sdserver.clone(), order: state.config.job_order }]
         }
         Msg::ContinueWithoutServers => {
+            let chat = match &mut state.phase {
+                Phase::Servers(d) if d.without.is_some() => d.without.take().and_then(|w| w.chat),
+                _ => state.pe.server.clone(),
+            };
             state.phase = Phase::Main;
-            let fx = vec![stop_servers(state)];
+            let mut fx = vec![stop_servers(state)];
             state.servers.clear();
+            fx.extend(use_chat(state, chat));
             fx
         }
         Msg::OpenServerDialog => {
@@ -1604,21 +1846,17 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             vec![]
         }
         Msg::AskContinueWithoutServers => {
-            let n = state.active_runs.len();
-            let text = if state.servers.is_empty() {
-                "Continue without servers? Browsing, review and the libraries work, but nothing generates \
-                 until a server is connected (Servers… in the top bar)."
-            } else {
-                "Stop the servers in use and continue without? Nothing generates until a server is connected \
-                 again; queued runs wait."
-            };
-            let text = match n {
-                0 => text.to_string(),
-                n => format!(
-                    "{text}\n\n{n} run(s) are generating: the images being made now are dropped and made again later."
-                ),
-            };
-            update(state, Msg::Ask(text, Box::new(Msg::ContinueWithoutServers)))
+            // the chat server in use stays, unless another is picked
+            let chat = state.pe.server.clone();
+            update(state, Msg::WithoutDialog(Some(Without { chat })))
+        }
+        Msg::WithoutDialog(w) => {
+            if let Phase::Servers(d) = &mut state.phase
+                && !d.opening
+            {
+                d.without = w.map(Box::new);
+            }
+            vec![]
         }
         Msg::CloseServerDialog => {
             if matches!(&state.phase, Phase::Servers(d) if d.from_main && !d.opening) {
@@ -1901,6 +2139,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
 
         // ------------------------------------------------ projects
         Msg::SelectProject(id) => {
+            if state.project.as_ref() != Some(&id) && ask_leaving_generate(state, &Msg::SelectProject(id.clone())) {
+                return vec![];
+            }
             // narrowed to its folder when that holds others (and asked);
             // else the grid keeps showing what it did, if the project is in it
             let shown = state.project_scope();
@@ -1910,7 +2151,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             });
             let mut fx = vec![];
             if state.project.as_ref() != Some(&id) {
-                fx = flush_generate(state);
+                fx = leave_generate(state);
                 state.project = Some(id);
                 load_generate(state);
             }
@@ -1919,7 +2160,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             fx
         }
         Msg::SelectProjectFolder(Some(f)) if state.projects_tab == ProjectsTab::Folder => {
-            let mut fx = flush_generate(state);
+            if ask_leaving_generate(state, &Msg::SelectProjectFolder(Some(f.clone()))) {
+                return vec![];
+            }
+            let mut fx = leave_generate(state);
             state.proj_folder = Some(f.clone());
             state.proj_scope_kept = None;
             state.project = None;
@@ -1927,13 +2171,27 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             fx
         }
         Msg::SelectProjectFolder(f) => {
-            let fx = flush_generate(state);
+            if ask_leaving_generate(state, &Msg::SelectProjectFolder(f.clone())) {
+                return vec![];
+            }
+            let fx = leave_generate(state);
             state.proj_folder = f;
             state.proj_scope_kept = None;
             state.project = None;
             fx
         }
-        Msg::Generate(f) => {
+        Msg::LeaveGenerate(then) => {
+            let ids = generate_asks(state);
+            let mut fx = if ids.is_empty() { vec![] } else { update(state, Msg::PeStop(ids)) };
+            fx.extend(update(state, *then));
+            fx
+        }
+        Msg::Generate(mut f) => {
+            // changed only by prompt enhance's answers (a form drawn before
+            // one came would undo it)
+            f.sweep.suggestions = state.generate.sweep.suggestions.clone();
+            f.sweep.batch_ask = state.generate.sweep.batch_ask.clone();
+            f.sweep.enhance_ask = state.generate.sweep.enhance_ask.clone();
             if f != state.generate {
                 state.generate = f;
                 mark_generate(state);
@@ -2060,6 +2318,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             let mut f = GenerateForm::new(&state.config);
             f.label = next_label(state);
             f.first_seed = state.next_seed();
+            // the values offered for the sweep's blanks stay
+            f.sweep.suggestions = std::mem::take(&mut state.generate.sweep.suggestions);
+            f.sweep.batch_ask = state.generate.sweep.batch_ask.take();
+            f.sweep.enhance_ask = state.generate.sweep.enhance_ask.take();
             state.generate = f;
             mark_generate(state);
             fx
@@ -2120,22 +2382,11 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         // ------------------------------------------------ prompt presets
         Msg::PresetsPanel(open) => {
             let favourites = state.prompt_presets.tasks.iter().flat_map(|t| &t.presets).any(|p| p.favourite);
-            let sw = &state.generate.sweep;
-            let view = if sw.on && sw.vary == increart_core::prompts::SweepVary::Style && !sw.selected.is_empty() {
-                PresetsView::Ticked(sw.selected.clone())
-            } else if favourites {
-                PresetsView::Favourites
-            } else {
-                PresetsView::Task(0)
-            };
+            let view = if favourites { PresetsView::Favourites } else { PresetsView::Task(0) };
             state.presets_panel = open.then(|| PresetsPanel { view, search: String::new() });
             vec![]
         }
         Msg::PresetsShow(view) => {
-            let view = match view {
-                PresetsView::Ticked(_) => PresetsView::Ticked(state.generate.sweep.selected.clone()),
-                v => v,
-            };
             if let Some(p) = &mut state.presets_panel {
                 p.view = view;
             }
@@ -2188,6 +2439,597 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.prompt_select = Some(chars(sel.start)..chars(sel.end));
             mark_generate(state);
             fx
+        }
+        Msg::StylesOpen => {
+            use increart_core::prompts::{PresetKey, SweepSource, sweep_presets};
+            let sw = &state.generate.sweep;
+            let before = sw.clone();
+            if sw.source != SweepSource::Selected {
+                let whole = increart_core::prompts::Sweep { random: 0, removed: vec![], ..sw.clone() };
+                let keys = sweep_presets(&state.prompt_presets, &whole)
+                    .into_iter()
+                    .map(|(t, p)| PresetKey { task: t.name.clone(), name: p.name.clone() })
+                    .collect();
+                let sw = &mut state.generate.sweep;
+                sw.selected = keys;
+                sw.source = SweepSource::Selected;
+                sw.removed.clear();
+                mark_generate(state);
+            }
+            let favourites = state.prompt_presets.tasks.iter().flat_map(|t| &t.presets).any(|p| p.favourite);
+            let view = if !state.generate.sweep.selected.is_empty() {
+                StyleView::Ticked
+            } else if favourites {
+                StyleView::Favourites
+            } else {
+                StyleView::All
+            };
+            let stats = state.style_stats();
+            state.styles = Some(StylePicker { view, before, stats, ..Default::default() });
+            vec![]
+        }
+        Msg::StylesShow(view) => {
+            if let Some(p) = &mut state.styles {
+                p.view = view;
+            }
+            vec![]
+        }
+        Msg::StylesSearch(q) => {
+            if let Some(p) = &mut state.styles {
+                p.search = q;
+            }
+            vec![]
+        }
+        Msg::StylesFilter(f) => {
+            if let Some(p) = &mut state.styles {
+                p.filter = f;
+            }
+            vec![]
+        }
+        Msg::StylesSort(sort) => {
+            state.config.style_sort = sort;
+            save_config(state)
+        }
+        Msg::StylesClose(keep) => {
+            let Some(p) = state.styles.take() else { return vec![] };
+            let sw = &mut state.generate.sweep;
+            if !keep && *sw != p.before {
+                *sw = p.before;
+                mark_generate(state);
+            } else if keep {
+                // a random pick's replacements were of the old pick
+                sw.removed.retain(|r| sw.selected.contains(&r.preset));
+            }
+            vec![]
+        }
+        Msg::PeRewrite(target) => {
+            let original = match &target {
+                PeTarget::Prompt => state.generate.prompt.clone(),
+                PeTarget::NewIdea => state.draft.text.clone(),
+                PeTarget::Idea(id) => match &state.idea_edit {
+                    Some(ed) if ed.id == *id => ed.text.clone(),
+                    _ => state.idea(id).map(|e| e.idea.text.clone()).unwrap_or_default(),
+                },
+                PeTarget::Describe(_) => String::new(),
+            };
+            if original.trim().is_empty() && !matches!(target, PeTarget::Describe(_)) {
+                state.messages_error("Nothing to rewrite: write some text first");
+                return vec![];
+            }
+            // the same text again keeps the instructions given
+            let how = state.pe.text.as_ref().filter(|t| t.target == target).map(|t| t.how.clone()).unwrap_or_default();
+            let mut fx = stop_text_ask(state);
+            state.pe.text = Some(PeText {
+                target,
+                original,
+                how,
+                text: String::new(),
+                answer: String::new(),
+                waiting: None,
+                error: None,
+                images: 0,
+            });
+            fx.extend(ask_text(state));
+            fx
+        }
+        Msg::PeTextEdit { how, text } => {
+            if let Some(t) = &mut state.pe.text {
+                (t.how, t.text) = (how, text);
+            }
+            vec![]
+        }
+        Msg::PeTextRetry => ask_text(state),
+        Msg::PeTextClose(how) => {
+            let mut fx = stop_text_ask(state);
+            let Some(t) = state.pe.text.take() else { return fx };
+            if how != PeUse::Discard && !t.text.trim().is_empty() {
+                fx.extend(use_text(state, t, how));
+            }
+            fx
+        }
+        Msg::PeStyleEnhance(keys) => {
+            let keys = if keys.is_empty() { styles_to_enhance(state) } else { keys };
+            ask_styles(state, &keys, &EnhanceAsk::default(), 0)
+        }
+        Msg::PeStyleOpen => {
+            if state.pe.server.is_none() {
+                return vec![];
+            }
+            let ask = match &state.generate.sweep.enhance_ask {
+                Some(a) => a.clone(),
+                None => EnhanceAsk { styles: styles_to_enhance(state), ..Default::default() },
+            };
+            state.pe.style_dialog = Some(ask);
+            vec![]
+        }
+        Msg::PeStyleDialog(a) => {
+            if let Some(a) = &a
+                && state.generate.sweep.enhance_ask.as_ref() != Some(a)
+            {
+                state.generate.sweep.enhance_ask = Some(a.clone());
+                mark_generate(state);
+            }
+            state.pe.style_dialog = a;
+            vec![]
+        }
+        Msg::PeStyleAsk => {
+            let Some(a) = state.pe.style_dialog.take() else { return vec![] };
+            ask_styles(state, &a.styles, &a, 0)
+        }
+        Msg::PeAddedBlanks(keep) => {
+            state.pe.added_blanks_ask = false;
+            for (key, names) in std::mem::take(&mut state.pe.added_blanks) {
+                let Some(own) = state.generate.sweep.style_prompt(&key).filter(|_| !keep) else { continue };
+                let prompt = increart_core::prompts::unblank(own.prompt.clone(), &names);
+                let own = increart_core::prompts::StylePrompt { prompt, ..own.clone() };
+                state.generate.sweep.set_style_prompt(&key, Some(own));
+                mark_generate(state);
+            }
+            vec![]
+        }
+        Msg::PeSuggest(keys) => {
+            let Some(server) = state.pe.server.as_ref().cloned() else {
+                state.messages_error(NO_CHAT);
+                return vec![];
+            };
+            let keys: Vec<_> = keys.into_iter().filter(|k| state.pe.blank_job(k).is_none()).collect();
+            let jobs: Vec<_> = keys.iter().filter_map(|k| blank_job(state, &server, k, None)).collect();
+            if jobs.is_empty() {
+                return vec![];
+            }
+            if state.pe.blanks_waiting() == 0 {
+                state.pe.blank_batch = 0;
+            }
+            state.pe.blank_batch += jobs.len();
+            for j in &jobs {
+                if let PeKey::Blank(k) = &j.key {
+                    state.pe.avoiding.insert(k.clone());
+                }
+            }
+            let jobs = jobs.into_iter().map(|j| queue_blank(state, j, None, 0)).collect();
+            vec![Effect::PeAsk { server, jobs }]
+        }
+        Msg::PeSuggestOpen(key) => {
+            if state.pe.server.is_none() {
+                return vec![];
+            }
+            let sweep = &state.generate.sweep;
+            let ask = sweep.blank_values(key.style.as_ref(), &key.slot).and_then(|v| v.ask.clone()).unwrap_or_default();
+            let form = SuggestForm::from_ask(&ask, state.config.pe.sampling(increart_core::pe::FILL_BLANKS));
+            state.pe.suggest = Some(SuggestDialog { key, form });
+            vec![]
+        }
+        Msg::PeSuggestDialog(d) => {
+            if let Some(d) = &d {
+                let ask = d.form.to_ask(state.config.pe.sampling(increart_core::pe::FILL_BLANKS));
+                let ask = Some(ask).filter(|a| *a != SuggestAsk::default());
+                let sweep = &mut state.generate.sweep;
+                if sweep.blank_values(d.key.style.as_ref(), &d.key.slot).and_then(|v| v.ask.as_ref()) != ask.as_ref() {
+                    sweep.edit_blank_values(d.key.style.as_ref(), &d.key.slot, |v| v.ask = ask);
+                    mark_generate(state);
+                }
+            }
+            state.pe.suggest = d;
+            vec![]
+        }
+        Msg::PeBatchSuggestOpen(ticked) => {
+            if state.pe.server.is_none() {
+                return vec![];
+            }
+            let b = state.generate.sweep.batch_ask.clone().unwrap_or(BatchAsk { blanks: ticked, ..Default::default() });
+            let form = SuggestForm::from_ask(&b.ask, state.config.pe.sampling(increart_core::pe::FILL_BLANKS));
+            state.pe.batch_suggest = Some(BatchSuggest { blanks: b.blanks, form });
+            vec![]
+        }
+        Msg::PeBatchSuggestDialog(b) => {
+            if let Some(b) = &b {
+                let ask = b.form.to_ask(state.config.pe.sampling(increart_core::pe::FILL_BLANKS));
+                let ask = Some(BatchAsk { ask, blanks: b.blanks.clone() });
+                if state.generate.sweep.batch_ask != ask {
+                    state.generate.sweep.batch_ask = ask;
+                    mark_generate(state);
+                }
+            }
+            state.pe.batch_suggest = b;
+            vec![]
+        }
+        Msg::PeBatchSuggestAsk => {
+            let (Some(server), Some(b)) = (state.pe.server.as_ref().cloned(), state.pe.batch_suggest.take()) else {
+                return vec![];
+            };
+            let keys = b.blanks.iter().map(|slot| BlankKey { style: None, slot: slot.clone() });
+            let keys: Vec<_> = keys.filter(|k| state.pe.blank_job(k).is_none()).collect();
+            let jobs: Vec<_> = keys.iter().filter_map(|k| blank_job(state, &server, k, Some(&b.form))).collect();
+            if jobs.is_empty() {
+                return vec![];
+            }
+            if state.pe.blanks_waiting() == 0 {
+                state.pe.blank_batch = 0;
+            }
+            state.pe.blank_batch += jobs.len();
+            for j in &jobs {
+                if let PeKey::Blank(k) = &j.key {
+                    if b.form.replace {
+                        state.pe.rerolls.insert(k.clone());
+                    }
+                    if b.form.avoid {
+                        state.pe.avoiding.insert(k.clone());
+                    }
+                }
+            }
+            let jobs = jobs.into_iter().map(|j| queue_blank(state, j, Some(&b.form), 0)).collect();
+            vec![Effect::PeAsk { server, jobs }]
+        }
+        Msg::PeSuggestAsk => {
+            let (Some(server), Some(d)) = (state.pe.server.as_ref().cloned(), state.pe.suggest.clone()) else {
+                return vec![];
+            };
+            if state.pe.blank_job(&d.key).is_some() {
+                return vec![];
+            }
+            let Some(job) = blank_job(state, &server, &d.key, Some(&d.form)) else { return vec![] };
+            if d.form.replace {
+                state.pe.rerolls.insert(d.key.clone());
+            }
+            if d.form.avoid {
+                state.pe.avoiding.insert(d.key.clone());
+            }
+            if state.pe.blanks_waiting() == 0 {
+                state.pe.blank_batch = 0;
+            }
+            state.pe.blank_batch += 1;
+            let job = queue_blank(state, job, Some(&d.form), 0);
+            vec![Effect::PeAsk { server, jobs: vec![job] }]
+        }
+        Msg::PeForgetOffered(key) => {
+            state.generate.sweep.edit_blank_values(key.style.as_ref(), &key.slot, |v| v.offered.clear());
+            mark_generate(state);
+            vec![]
+        }
+        Msg::PeClearSuggestions(key) => {
+            state.generate.sweep.edit_blank_values(key.style.as_ref(), &key.slot, |v| v.shown.clear());
+            mark_generate(state);
+            vec![]
+        }
+        Msg::PeReroll(key) => {
+            if state.pe.blank_job(&key).is_some() {
+                return vec![];
+            }
+            state.pe.rerolls.insert(key.clone());
+            let fx = update(state, Msg::PeSuggest(vec![key.clone()]));
+            if state.pe.blank_job(&key).is_none() {
+                state.pe.rerolls.remove(&key);
+            }
+            fx
+        }
+        Msg::PeStatus(s) => {
+            match &s {
+                PeStatus::Starting => state.pe.starting_since = state.now,
+                PeStatus::Ready if state.pe.status == PeStatus::Starting => {
+                    state.pe.last_load = Some(state.now - state.pe.starting_since)
+                }
+                _ => {}
+            }
+            if let PeStatus::Failed(e) = &s {
+                state.messages_error(e.clone());
+                state.pe.jobs.clear();
+                state.pe.blank_tries.clear();
+                state.pe.style_tries.clear();
+                if let Some(t) = &mut state.pe.text
+                    && t.waiting.take().is_some()
+                {
+                    t.error = Some(e.clone());
+                }
+            }
+            state.pe.status = s;
+            vec![]
+        }
+        Msg::PeProgress(id, step) => {
+            let now = state.now;
+            let Some(j) = state.pe.jobs.iter_mut().find(|j| j.id == id) else { return vec![] };
+            if std::mem::discriminant(&j.step) != std::mem::discriminant(&step) {
+                if let (PeStep::Reading { images }, PeStep::Writing { .. }) = (&j.step, &step) {
+                    state.pe.read_times.insert(*images, now - j.since);
+                }
+                j.since = now;
+                j.rate = None;
+            }
+            if let PeStep::Writing { pieces, .. } = &step
+                && now - j.since >= 1.0
+                && j.rate.is_none_or(|(at, _)| now - at >= RATE_EVERY)
+            {
+                j.rate = Some((now, *pieces as f64 / (now - j.since)));
+            }
+            j.step = step;
+            vec![]
+        }
+        Msg::PeStop(ids) => {
+            for j in state.pe.jobs.iter().filter(|j| ids.contains(&j.id)) {
+                match &j.key {
+                    PeKey::Blank(k) => {
+                        state.pe.rerolls.remove(k);
+                        state.pe.avoiding.remove(k);
+                        state.pe.blank_tries.remove(k);
+                    }
+                    PeKey::Style(k) => {
+                        state.pe.style_from.remove(k);
+                        state.pe.style_tries.remove(k);
+                    }
+                    PeKey::Text(_) => {}
+                }
+            }
+            state.pe.jobs.retain(|j| !ids.contains(&j.id));
+            ask_added_blanks(state);
+            if let Some(t) = &mut state.pe.text
+                && t.waiting.is_some_and(|a| ids.contains(&a))
+            {
+                t.waiting = None;
+                t.error = Some("Stopped".into());
+            }
+            vec![Effect::PeStop(ids)]
+        }
+        Msg::PeAnswer(id, r) => {
+            // an ask stopped (or replaced) has no answer
+            let Some(i) = state.pe.jobs.iter().position(|j| j.id == id) else { return vec![] };
+            let job = state.pe.jobs.remove(i);
+            match job.key {
+                PeKey::Blank(key) => {
+                    let reroll = state.pe.rerolls.remove(&key);
+                    let avoid = state.pe.avoiding.remove(&key);
+                    let tried = state.pe.blank_tries.remove(&key).unwrap_or_default();
+                    // nothing new: asked again (hotter), else why
+                    let failed = match r.map(|a| increart_core::pe::parse_suggestions(&a)) {
+                        Ok(v) if !v.is_empty() => {
+                            use increart_core::pe::same_suggestion;
+                            // small models repeat themselves despite being told
+                            // (unless the dialog said they may)
+                            let offered = state.blank_offered(&key);
+                            let fresh: Vec<String> = if avoid {
+                                v.into_iter().filter(|x| !offered.iter().any(|o| same_suggestion(o, x))).collect()
+                            } else {
+                                v
+                            };
+                            if fresh.is_empty() {
+                                Some((true, "only repeated values offered before".to_string()))
+                            } else {
+                                let add = |list: &mut Vec<String>, x: &String| {
+                                    if !list.iter().any(|o| o.eq_ignore_ascii_case(x)) {
+                                        list.push(x.clone());
+                                    }
+                                };
+                                state.generate.sweep.edit_blank_values(key.style.as_ref(), &key.slot, |v| {
+                                    // a reroll replaces them; else they're added to
+                                    if reroll {
+                                        v.shown.clear();
+                                    }
+                                    for x in &fresh {
+                                        add(&mut v.offered, x);
+                                        add(&mut v.shown, x);
+                                    }
+                                });
+                                mark_generate(state);
+                                None
+                            }
+                        }
+                        Ok(_) => Some((true, "offered nothing (or nothing readable)".to_string())),
+                        Err(e) => Some((false, e)),
+                    };
+                    let Some((retry, why)) = failed else { return vec![] };
+                    if retry
+                        && tried.retry < BLANK_RETRIES
+                        && let Some(server) = state.pe.server.clone()
+                    {
+                        let fill = state.config.pe.sampling(increart_core::pe::FILL_BLANKS);
+                        let mut form =
+                            tried.form.unwrap_or_else(|| SuggestForm::from_ask(&SuggestAsk::default(), fill));
+                        form.sampling.temperature = (form.sampling.temperature + RETRY_HOTTER).min(2.0);
+                        if !form.how.contains(RETRY_NOTE) {
+                            form.how = [form.how.trim(), RETRY_NOTE].join(" ").trim().to_string();
+                        }
+                        if let Some(job) = blank_job(state, &server, &key, Some(&form)) {
+                            if reroll {
+                                state.pe.rerolls.insert(key.clone());
+                            }
+                            if avoid {
+                                state.pe.avoiding.insert(key.clone());
+                            }
+                            state.pe.blank_batch += 1;
+                            let job = queue_blank(state, job, Some(&form), tried.retry + 1);
+                            return vec![Effect::PeAsk { server, jobs: vec![job] }];
+                        }
+                    }
+                    let asked = if retry { format!(", asked {} times", tried.retry + 1) } else { String::new() };
+                    state.messages_error(format!(
+                        "PE {why} for {{{}}}{asked}: try Suggest… hotter, or with instructions",
+                        key.slot
+                    ));
+                    state.pe.blank_failed.insert(key, format!("{why}{asked}"));
+                }
+                PeKey::Style(key) => {
+                    let from = state.pe.style_from.remove(&key).unwrap_or_default();
+                    let tried = state.pe.style_tries.remove(&key);
+                    let why = match r.map(|a| increart_core::pe::clean_text(&a)) {
+                        Ok(prompt) if prompt.is_empty() => Some("answered nothing".to_string()),
+                        Ok(prompt) if tried.as_ref().is_some_and(|t| t.sent.trim() == prompt.trim()) => {
+                            Some("gave the prompt back unchanged".to_string())
+                        }
+                        Ok(prompt) => {
+                            let added = increart_core::prompts::added_slots(&from, &prompt);
+                            if !added.is_empty() {
+                                state.pe.added_blanks.push((key.clone(), added));
+                            }
+                            let p = increart_core::prompts::StylePrompt {
+                                preset: key.clone(),
+                                prompt,
+                                from,
+                                enhanced: true,
+                            };
+                            state.generate.sweep.set_style_prompt(&key, Some(p));
+                            mark_generate(state);
+                            None
+                        }
+                        Err(e) => {
+                            state.messages_error(format!("PE, {}: {e}", key.name));
+                            state.pe.style_failed.insert(key.clone(), e);
+                            None
+                        }
+                    };
+                    if let Some(why) = why {
+                        let tried = tried.unwrap_or_else(|| StyleTry {
+                            ask: EnhanceAsk::default(),
+                            sent: String::new(),
+                            retry: 0,
+                        });
+                        if tried.retry < STYLE_RETRIES {
+                            let mut a = tried.ask.clone();
+                            let usual = state.config.pe.sampling(increart_core::pe::STYLE_PROMPT);
+                            let mut x = a.sampling.unwrap_or(usual);
+                            x.temperature = (x.temperature + RETRY_HOTTER).min(2.0);
+                            a.sampling = Some(x);
+                            if !a.how.contains(STYLE_RETRY_NOTE) {
+                                a.how = [a.how.trim(), STYLE_RETRY_NOTE].join(" ").trim().to_string();
+                            }
+                            let fx = ask_styles(state, std::slice::from_ref(&key), &a, tried.retry + 1);
+                            if !fx.is_empty() {
+                                ask_added_blanks(state);
+                                return fx;
+                            }
+                        }
+                        let asked = format!(", asked {} times", tried.retry + 1);
+                        state.messages_error(format!(
+                            "PE {why} for {}{asked}: try Enhance… with instructions",
+                            key.name
+                        ));
+                        state.pe.style_failed.insert(key, format!("{why}{asked}"));
+                    }
+                }
+                PeKey::Text(ask) => {
+                    let Some(t) = state.pe.text.as_mut().filter(|t| t.waiting == Some(ask)) else { return vec![] };
+                    t.waiting = None;
+                    match r.map(|a| increart_core::pe::clean_text(&a)) {
+                        Ok(a) if !a.is_empty() => (t.text, t.answer) = (a.clone(), a),
+                        Ok(_) => t.error = Some("The server answered with nothing".into()),
+                        Err(e) => t.error = Some(e),
+                    }
+                }
+            }
+            ask_added_blanks(state);
+            vec![]
+        }
+        // (one running as asked is kept)
+        Msg::PeLaunch => match state.pe.server.as_ref() {
+            Some(s) if s.start == increart_core::pe::PeStart::AtLaunch => update(state, Msg::PeStart),
+            _ => vec![],
+        },
+        Msg::PeStart => {
+            let Some(server) = state.pe.server.as_ref().cloned() else { return vec![] };
+            // an ask with nothing to ask: the server is started (after a
+            // stop asked before it; one running as asked is kept)
+            vec![Effect::PeAsk { server, jobs: vec![] }]
+        }
+        Msg::PeShutdown => {
+            let ids: Vec<u64> = state.pe.jobs.iter().map(|j| j.id).collect();
+            let mut fx = if ids.is_empty() { vec![] } else { update(state, Msg::PeStop(ids)) };
+            if state.pe.status != PeStatus::Off {
+                fx.push(Effect::PeShutdown);
+            }
+            fx
+        }
+        Msg::PeEditorOpen(index) => {
+            let Phase::Servers(d) = &state.phase else { return vec![] };
+            let draft = match index.and_then(|i| d.draft.servers.get(i)) {
+                Some(ServerConfig::Chat(s)) => s.clone(),
+                Some(_) => return vec![],
+                // a new one: the presets' first, else KoboldCpp on the GPUs
+                None => state.config.chat_servers().first().map(|s| (*s).clone()).unwrap_or_else(new_pe_server),
+            };
+            state.pe.editor = Some(PeEditor { index, draft, error: None });
+            // the GPUs to tick
+            if state.pe.gpus.is_none() { vec![Effect::PeListGpus] } else { vec![] }
+        }
+        Msg::PeEditorEdit(draft) => {
+            if let Some(e) = &mut state.pe.editor {
+                e.draft = draft;
+                e.error = None;
+            }
+            vec![]
+        }
+        Msg::PeEditorClose => {
+            state.pe.editor = None;
+            vec![]
+        }
+        Msg::PeEditorSave => {
+            let Some(e) = state.pe.editor.clone() else { return vec![] };
+            let name = e.draft.name.trim().to_string();
+            let problem = if name.is_empty() {
+                Some("It needs a name.".to_string())
+            } else {
+                match &e.draft.run {
+                    PeRun::KoboldCpp { binary, model, .. } if binary.trim().is_empty() || model.trim().is_empty() => {
+                        Some("KoboldCpp needs its binary and a model.".into())
+                    }
+                    PeRun::Connect { url } if url.trim().is_empty() => Some("It needs the server's address.".into()),
+                    _ => None,
+                }
+            };
+            if let Some(p) = problem {
+                state.pe.editor.as_mut().unwrap().error = Some(p);
+                return vec![];
+            }
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            let server = ServerConfig::Chat(increart_core::pe::PeServer { name, ..e.draft });
+            // a preset has one chat server: a new one replaces it
+            let at = e.index.filter(|i| d.draft.servers.get(*i).is_some_and(ServerConfig::is_chat));
+            match at.or_else(|| d.draft.servers.iter().position(ServerConfig::is_chat)) {
+                Some(i) => d.draft.servers[i] = server,
+                None => d.draft.servers.push(server),
+            }
+            d.progress.clear();
+            state.pe.editor = None;
+            vec![]
+        }
+        Msg::PeListGpus => {
+            state.pe.gpus = None;
+            vec![Effect::PeListGpus]
+        }
+        Msg::PeGpus(r) => {
+            state.pe.gpus = Some(r);
+            vec![]
+        }
+        Msg::PeSampling { job, sampling } => {
+            match sampling {
+                Some(x) => _ = state.config.pe.sampling.insert(job, x),
+                None => _ = state.config.pe.sampling.remove(&job),
+            }
+            save_config(state)
+        }
+        Msg::PeSystemPrompt { job, text } => {
+            if text.trim().is_empty() {
+                state.config.pe.system_prompts.remove(&job);
+            } else {
+                state.config.pe.system_prompts.insert(job, text);
+            }
+            save_config(state)
         }
         Msg::PromptSelected => {
             state.prompt_select = None;
@@ -2279,6 +3121,13 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             {
                 p.view = if n > 0 { PresetsView::Task(0) } else { PresetsView::Favourites };
             }
+            // a group edited away: its task
+            if let Some(p) = &mut state.presets_panel
+                && let PresetsView::Group(t, g) = &p.view
+                && !state.prompt_presets.tasks[*t].presets.iter().any(|x| &x.group == g)
+            {
+                p.view = PresetsView::Task(*t);
+            }
             save_presets(state)
         }
         Msg::ClosePresetEditor => {
@@ -2291,8 +3140,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 state.messages_error("The prompt is empty");
                 return vec![];
             }
-            let task = state.presets_panel.as_ref().and_then(|p| p.view.task()).unwrap_or(0);
-            let preset = PromptPreset { prompt: f.prompt.clone(), negative: f.negative.clone(), ..Default::default() };
+            let view = state.presets_panel.as_ref().map(|p| &p.view);
+            let task = view.and_then(|v| v.task()).unwrap_or(0);
+            // into the group shown, if one is
+            let group = view.and_then(|v| v.group()).unwrap_or_default().to_string();
+            let preset =
+                PromptPreset { prompt: f.prompt.clone(), negative: f.negative.clone(), group, ..Default::default() };
             state.save_preset = Some(SavePresetDialog { task, preset, error: None });
             vec![]
         }
@@ -2315,6 +3168,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             if task.presets.iter().any(|p| p.name.eq_ignore_ascii_case(&name)) {
                 d.error = Some(format!("{} already has a preset called {name}", task.name));
+                return vec![];
+            }
+            if let Some(why) = increart_core::prompts::slot_rule(&task.name, &d.preset.prompt) {
+                d.error = Some(format!("A preset in {} {why}", task.name));
                 return vec![];
             }
             let mut d = state.save_preset.take().unwrap();
@@ -2342,7 +3199,11 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             vec![Effect::LoadHistory(key)]
         }
         Msg::HistoryLoaded(key, mut entries) => {
-            let Some(mut v) = state.history_view.take() else { return vec![] };
+            let mut fx = vec![];
+            if let Some(ask) = state.new_sweep.take_if(|a| key == HistoryKey::Project(a.project.clone())) {
+                fx = new_sweep(state, ask, &entries);
+            }
+            let Some(mut v) = state.history_view.take() else { return fx };
             if v.key == key {
                 entries.reverse();
                 v.entries = entries;
@@ -2357,7 +3218,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 }
             }
             state.history_view = Some(v);
-            vec![]
+            fx
         }
         Msg::HistorySettingsOnly(on) => {
             if let Some(v) = &mut state.history_view {
@@ -2624,6 +3485,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 vec![]
             } else if state.tab == Tab::Review {
                 state.review_cursor = j;
+                unfollow(state);
                 vec![]
             } else {
                 update(state, Msg::OutputSelect(img))
@@ -2665,7 +3527,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             // the queue's next image once this one has left it
             let next = if i + 1 < n { Some(i + 1) } else { i.checked_sub(1) };
             let next = next.map(|j| list[j].image.clone());
-            let fx = lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false });
+            let fx = lib(state, LibOp::ReviewOutputs { links: vec![(link, Some(v))], undo: false });
             if queued {
                 state.review_cursor = if i + 1 < n { i } else { i.saturating_sub(1) };
                 state.preview = next;
@@ -2716,6 +3578,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::ReviewNewest => {
             state.review_cursor = state.review_queue().len().saturating_sub(1);
+            vec![]
+        }
+        Msg::ReviewFollow(on) => {
+            state.review_follow = on;
             vec![]
         }
         Msg::OutputFilter(f) => {
@@ -2820,10 +3686,11 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if state.tab == Tab::Review && state.review_view != ReviewView::Sheet {
                 state.picked.clear();
             }
-            links
-                .into_iter()
-                .flat_map(|link| lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false }))
-                .collect()
+            if links.is_empty() {
+                return vec![];
+            }
+            let links = links.into_iter().map(|l| (l, Some(v))).collect();
+            lib(state, LibOp::ReviewOutputs { links, undo: false })
         }
         Msg::OpenTile => {
             if state.picked.is_empty() {
@@ -3075,7 +3942,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::SweepOrderAnswer(answer) => {
             let Some(big) = state.sweep_order_ask.take() else { return vec![] };
             let Some(spread) = answer else { return vec![] };
-            let mut fx = if spread { update(state, Msg::JobOrder(Order::Spread)) } else { vec![] };
+            let mut fx = if spread { update(state, Msg::JobOrder(Order::BySweep)) } else { vec![] };
             state.sweep_order_asked = true;
             fx.extend(queue_sweep(state, big));
             state.sweep_order_asked = false;
@@ -3135,8 +4002,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::StopAll(how) => {
             let runs: Vec<Id> = state.active_runs.iter().cloned().collect();
-            runs.into_iter().flat_map(|id| update(state, Msg::CancelRun(id, how))).collect()
+            update(state, Msg::CancelRuns(runs, how))
         }
+        Msg::CancelRuns(runs, how) => runs.into_iter().flat_map(|id| update(state, Msg::CancelRun(id, how))).collect(),
 
         // ------------------------------------------------ review
         Msg::ReviewScopeFolder(f) => {
@@ -3191,6 +4059,14 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.review_cursor = 0;
             vec![]
         }
+        Msg::ReviewOrder(o) => {
+            state.config.review_order = o;
+            save_config(state)
+        }
+        Msg::ReviewHideReviewed(on) => {
+            state.config.review_show_reviewed = !on;
+            save_config(state)
+        }
         Msg::ReviewAllRuns(on) => {
             state.review_all_runs = on;
             vec![]
@@ -3203,8 +4079,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.config.hide_project_runs = !on;
             save_config(state)
         }
-        Msg::ProjectsByName(on) => {
-            state.config.projects_by_name = on;
+        Msg::ProjectOrder(o) => {
+            state.config.project_order = o;
+            save_config(state)
+        }
+        Msg::FolderOrder(o) => {
+            state.config.folder_order = increart_core::config::FolderOrder(o);
             save_config(state)
         }
         Msg::NarrowToSiblings(on) => {
@@ -3248,6 +4128,15 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.config.sheet_cell = size.clamp(SHEET_CELL_MIN, SHEET_CELL_MAX);
             if save { save_config(state) } else { vec![] }
         }
+        Msg::GridZoom { grid, size, save } => {
+            let size = size.clamp(GRID_CELL_MIN, GRID_CELL_MAX);
+            match grid {
+                ZoomGrid::Review => state.config.review_grid_cell = size,
+                ZoomGrid::Output => state.config.output_grid_cell = size,
+                ZoomGrid::Library => state.config.library_grid_cell = size,
+            }
+            if save { save_config(state) } else { vec![] }
+        }
         Msg::SheetFilter(f) => {
             state.sheet_filter = f;
             state.sheet_cell.0 = 0;
@@ -3257,14 +4146,27 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.sheet_cell = (r, c);
             vec![]
         }
-        Msg::SheetMove(dr, dc) => {
+        Msg::SheetRows(rows) => {
+            state.config.sheet_rows = rows;
+            save_config(state)
+        }
+        Msg::SheetBands(k) => {
+            state.sheet_bands = k.max(1);
+            vec![]
+        }
+        Msg::SheetMove(dl, dc) => {
             if let Some(sh) = state.sheet() {
                 let (rows, cols) = (sh.rows.len() as isize, sh.seeds.len() as isize);
-                let (r, c) = state.sheet_cell;
-                state.sheet_cell = (
-                    (r as isize + dr).clamp(0, (rows - 1).max(0)) as usize,
-                    (c as isize + dc).clamp(0, (cols - 1).max(0)) as usize,
-                );
+                if rows == 0 || cols == 0 {
+                    return vec![];
+                }
+                let k = state.sheet_bands.max(1) as isize;
+                let (r, c) = (state.sheet_cell.0 as isize, state.sheet_cell.1 as isize);
+                let line = (r / k + dl).clamp(0, (rows - 1) / k);
+                // the last line may have fewer bands
+                let bands = (rows - line * k).min(k);
+                let x = ((r % k).min(bands - 1) * cols + c + dc).clamp(0, bands * cols - 1);
+                state.sheet_cell = ((line * k + x / cols) as usize, (x % cols) as usize);
             }
             vec![]
         }
@@ -3275,9 +4177,18 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 _ => None,
             });
             let Some(link) = link else { return vec![] };
-            // on to the next image in the row, as single review goes on
-            let fx = lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false });
-            update(state, Msg::SheetMove(0, 1));
+            // on to the next cell, as single review goes on: along the row,
+            // then the next row's first
+            let fx = lib(state, LibOp::ReviewOutputs { links: vec![(link, Some(v))], undo: false });
+            if let Some(sh) = state.sheet() {
+                state.sheet_cell = if c + 1 < sh.seeds.len() {
+                    (r, c + 1)
+                } else if r + 1 < sh.rows.len() {
+                    (r + 1, 0)
+                } else {
+                    (r, c)
+                };
+            }
             fx
         }
         Msg::SheetRow(r, v) => {
@@ -3296,10 +4207,36 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     )
                 })
                 .unwrap_or_default();
-            links
-                .into_iter()
-                .flat_map(|link| lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false }))
-                .collect()
+            if links.is_empty() {
+                return vec![];
+            }
+            let links = links.into_iter().map(|l| (l, Some(v))).collect();
+            lib(state, LibOp::ReviewOutputs { links, undo: false })
+        }
+        Msg::SheetNewSweep => {
+            let (Some(project), Some(sweep)) = (state.review_scope.clone(), state.review_sweep.clone()) else {
+                return vec![];
+            };
+            // the picked images' runs, in the sheet's order
+            let picked: Vec<&Id> =
+                state.picked.iter().filter_map(|i| state.output_link(i)).map(|o| &o.name.run).collect();
+            let mut runs: Vec<Id> = state
+                .index
+                .project(&project)
+                .map(|p| {
+                    p.runs
+                        .iter()
+                        .filter(|r| r.sweep.as_ref().is_some_and(|s| s.name == sweep) && picked.contains(&&r.id))
+                        .map(|r| r.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            runs.sort();
+            if runs.is_empty() {
+                return vec![];
+            }
+            state.new_sweep = Some(NewSweepAsk { project: project.clone(), sweep, runs });
+            vec![Effect::LoadHistory(HistoryKey::Project(project))]
         }
         Msg::SheetMoreSeeds(n) => {
             let runs: Vec<Id> = state
@@ -3322,6 +4259,17 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             runs.into_iter().flat_map(|r| update(state, Msg::MoreSeeds(r, n))).collect()
         }
+        Msg::RecipeInGenerate(image) => {
+            let Some(name) = state.output_link(&image).map(|o| o.name.clone()) else {
+                return vec![];
+            };
+            let fx = update(state, Msg::RunInGenerate(name.run));
+            let f = &mut state.generate;
+            f.seeds = 1;
+            f.first_seed = name.seed;
+            f.sweep.on = false;
+            fx
+        }
         Msg::RunInGenerate(id) => {
             let Some((p, run)) = state.index.run(&id).map(|(p, r)| (p.project.id.clone(), r.clone())) else {
                 return vec![];
@@ -3335,12 +4283,16 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             let mut f = GenerateForm::from_run(&run, &state.config);
             f.label = next_label(state);
             f.first_seed = state.next_seed();
+            f.sweep.suggestions = std::mem::take(&mut state.generate.sweep.suggestions);
+            f.sweep.batch_ask = state.generate.sweep.batch_ask.take();
+            f.sweep.enhance_ask = state.generate.sweep.enhance_ask.take();
             state.generate = f;
             mark_generate(state);
             fx
         }
         Msg::ReviewCursor(i) => {
             state.review_cursor = i.min(state.review_queue().len().saturating_sub(1));
+            unfollow(state);
             vec![]
         }
         Msg::ReviewNext(d) => {
@@ -3348,13 +4300,14 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if n > 0 {
                 state.review_cursor = (state.review_cursor as isize + d).clamp(0, n as isize - 1) as usize;
             }
+            unfollow(state);
             vec![]
         }
         Msg::ReviewCurrent(v) => {
             let Some(link) = state.review_queue().get(state.review_cursor).map(|o| o.path.clone()) else {
                 return vec![];
             };
-            lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false })
+            lib(state, LibOp::ReviewOutputs { links: vec![(link, Some(v))], undo: false })
         }
         Msg::ReviewView(v) => {
             if v == ReviewView::Compare {
@@ -3394,13 +4347,14 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if let Some(pos) = a_pos {
                 state.review_cursor = pos;
                 state.review_pinned = Some(b);
+                unfollow(state);
             }
             vec![]
         }
         Msg::ReviewPinned(v) => {
             let link = state.review_pinned.as_ref().and_then(|a| state.output_link(a)).map(|o| o.path.clone());
             match link {
-                Some(link) => lib(state, LibOp::ReviewOutput { link, verdict: Some(v), undo: false }),
+                Some(link) => lib(state, LibOp::ReviewOutputs { links: vec![(link, Some(v))], undo: false }),
                 None => vec![],
             }
         }
@@ -3447,12 +4401,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.confirm = None;
             vec![]
         }
-        Msg::ReviewLink(link, verdict) => lib(state, LibOp::ReviewOutput { link, verdict, undo: false }),
+        Msg::ReviewLink(link, verdict) => {
+            lib(state, LibOp::ReviewOutputs { links: vec![(link, verdict)], undo: false })
+        }
+        // the last rating, of one image or of all the picked at once
         Msg::UndoReview => match state.review_undo.pop() {
-            Some((link, previous)) => {
-                state.busy += 1;
-                vec![Effect::Lib(LibOp::ReviewOutput { link, verdict: previous, undo: true })]
-            }
+            Some(links) => lib(state, LibOp::ReviewOutputs { links, undo: true }),
             None => vec![],
         },
 
@@ -3494,6 +4448,18 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 PickKind::ModelDir => state.config.sdserver.model_dirs.first().map(PathBuf::from),
                 PickKind::SdServerBinary => PathBuf::from(&state.config.sdserver.binary).parent().map(PathBuf::from),
                 PickKind::ExportDir => state.export.as_ref().map(|e| PathBuf::from(&e.dest)),
+                PickKind::Pe(f) => match state.pe.editor.as_ref().map(|e| &e.draft.run) {
+                    Some(PeRun::KoboldCpp { binary, model, mmproj, .. }) => {
+                        let p = match f {
+                            PeFile::Binary => binary,
+                            PeFile::Model => model,
+                            PeFile::Mmproj if mmproj.is_empty() => model,
+                            PeFile::Mmproj => mmproj,
+                        };
+                        PathBuf::from(p).parent().map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+                    }
+                    _ => None,
+                },
                 PickKind::ImportFiles | PickKind::IdeaImages | PickKind::GenerateRefs | PickKind::TileFile => None,
             };
             vec![Effect::Pick { kind, start }]
@@ -3527,6 +4493,19 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 let mut c = state.config.sdserver.clone();
                 c.binary = paths.remove(0).to_string_lossy().into_owned();
                 update(state, Msg::SetSdServer(c))
+            }
+            PickKind::Pe(f) => {
+                let Some(e) = &state.pe.editor else { return vec![] };
+                let mut draft = e.draft.clone();
+                if let PeRun::KoboldCpp { binary, model, mmproj, .. } = &mut draft.run {
+                    let path = paths.remove(0).to_string_lossy().into_owned();
+                    *match f {
+                        PeFile::Binary => binary,
+                        PeFile::Model => model,
+                        PeFile::Mmproj => mmproj,
+                    } = path;
+                }
+                update(state, Msg::PeEditorEdit(draft))
             }
             PickKind::ModelDir => {
                 let mut c = state.config.sdserver.clone();
@@ -4077,6 +5056,111 @@ fn pick_image(state: &mut AppState, image: ImageRef, how: SelectHow) {
     }
 }
 
+/// **New sweep from these**, with the project's prompt history: the form
+/// the sweep was queued with (its template, values, settings and styles'
+/// own prompts), only the rows chosen ticked (a setting sweep: their
+/// values), the next label and seeds, in Generate. Without that checkpoint
+/// (older sweeps, a trimmed history) the first run's settings, and each
+/// style its run's very prompt.
+fn new_sweep(state: &mut AppState, ask: NewSweepAsk, entries: &[HistoryEntry]) -> Vec<Effect> {
+    use increart_core::prompts::{PRESET_SLOT, PresetKey, StylePrompt, SweepSource, SweepVary, sweep_prompt};
+    let Some(p) = state.index.project(&ask.project) else { return vec![] };
+    let runs: Vec<increart_core::model::Run> =
+        ask.runs.iter().filter_map(|id| p.runs.iter().find(|r| &r.id == id)).cloned().collect();
+    let Some(first) = runs.first() else { return vec![] };
+    let sweep_runs: Vec<&Id> =
+        p.runs.iter().filter(|r| r.sweep.as_ref().is_some_and(|s| s.name == ask.sweep)).map(|r| &r.id).collect();
+    let queued = entries.iter().rev().find(|e| match &e.kind {
+        HistoryKind::Queued(_) if !e.runs.is_empty() => e.runs.iter().any(|r| sweep_runs.contains(&r)),
+        HistoryKind::Queued(label) => *label == ask.sweep,
+        _ => false,
+    });
+    let form = queued.and_then(|e| e.form.as_deref());
+    let mut f = match form {
+        Some(d) => GenerateForm::from_draft(d, &state.config),
+        None => GenerateForm::from_run(first, &state.config),
+    };
+    let tags: Vec<&SweepTag> = runs.iter().filter_map(|r| r.sweep.as_ref()).collect();
+    let param = tags.first().and_then(|t| t.param.as_ref());
+    let s = &mut f.sweep;
+    s.on = true;
+    s.removed.clear();
+    s.random = 0;
+    let mut gone = vec![];
+    match param {
+        Some(param) => {
+            s.vary = SweepVary::EVERY.into_iter().find(|v| v.key() == param.name).unwrap_or_default();
+            let values: Vec<String> = tags.iter().filter_map(|t| t.param.as_ref()).map(|p| p.value.clone()).collect();
+            if s.vary == SweepVary::Model {
+                s.models = values;
+            } else {
+                s.values = values.join(", ");
+            }
+        }
+        None => {
+            s.vary = SweepVary::Style;
+            s.source = SweepSource::Selected;
+            let list = &state.prompt_presets;
+            let keys: Vec<PresetKey> = tags
+                .iter()
+                .map(|t| {
+                    increart_core::prompts::current_key(
+                        &PresetKey { task: t.task.clone(), name: t.preset.clone() },
+                        list,
+                    )
+                })
+                .collect();
+            let find = |k: &PresetKey| {
+                list.tasks.iter().find(|t| t.name == k.task).and_then(|t| t.presets.iter().find(|p| p.name == k.name))
+            };
+            for k in &keys {
+                if find(k).is_none() {
+                    gone.push(k.name.clone());
+                }
+            }
+            s.selected = keys.clone();
+            s.style_prompts.retain(|sp| keys.contains(&sp.preset));
+            if form.is_none() {
+                // no template: each style its run's own prompt
+                f.prompt = PRESET_SLOT.into();
+                let slots = f.sweep.slots.clone();
+                let mut own = vec![];
+                for (run, key) in runs.iter().zip(&keys) {
+                    let Some(preset) = find(key) else { continue };
+                    let enhanced = run.sweep.as_ref().is_some_and(|t| t.enhanced);
+                    let from = sweep_prompt(PRESET_SLOT, &preset.prompt, &slots);
+                    own.push(StylePrompt { preset: key.clone(), prompt: run.prompt.clone(), from, enhanced });
+                }
+                f.sweep.style_prompts = own;
+            }
+        }
+    }
+    let n = runs.len();
+    let mut fx = update(state, Msg::OpenInGenerate(ask.project.clone()));
+    let g = &state.generate;
+    if !g.prompt.trim().is_empty() {
+        let (t, x) = (g.prompt.clone(), g.negative.clone());
+        fx.extend(record(state, HistoryKey::Project(ask.project), HistoryKind::BeforeRestore, t, x));
+    }
+    f.label = next_label(state);
+    f.first_seed = state.next_seed();
+    f.sweep.suggestions = std::mem::take(&mut state.generate.sweep.suggestions);
+    f.sweep.batch_ask = state.generate.sweep.batch_ask.take();
+    f.sweep.enhance_ask = state.generate.sweep.enhance_ask.take();
+    state.generate = f;
+    mark_generate(state);
+    let what = if param.is_some() { "values" } else { "styles" };
+    let mut note = format!("Sweep {} again: {n} {what} in Generate, to queue", ask.sweep);
+    if form.is_none() {
+        note.push_str("; its template wasn't in the prompt history, so each style keeps its run's prompt");
+    }
+    if !gone.is_empty() {
+        note.push_str(&format!("; no longer in the presets, left out: {}", gone.join(", ")));
+    }
+    state.messages_info(note);
+    fx
+}
+
 /// Leaving a sweep (or run) scope: the sheet goes with it.
 fn leave_sweep(state: &mut AppState) {
     state.review_sweep = None;
@@ -4111,7 +5195,7 @@ pub const BIG_SWEEP: u64 = 100;
 /// The Sweep mode's runs, checked: (form, tag) per chosen preset that the
 /// references fit, and how many chosen presets need more references.
 pub fn sweep_runs(state: &AppState) -> Result<(Vec<(GenerateForm, SweepTag)>, usize), String> {
-    use increart_core::prompts::{slot_names, sweep_presets, sweep_prompt};
+    use increart_core::prompts::{slot_names, sweep_presets};
     let f = &state.generate;
     if f.sweep.vary != increart_core::prompts::SweepVary::Style {
         return param_runs(f, &state.config.recipes).map(|r| (r, 0));
@@ -4127,12 +5211,20 @@ pub fn sweep_runs(state: &AppState) -> Result<(Vec<(GenerateForm, SweepTag)>, us
             format!("None of the chosen presets fit {refs} reference image(s)")
         });
     }
-    let texts = std::iter::once(f.prompt.as_str()).chain(fit.iter().map(|(_, p)| p.prompt.as_str()));
-    let unfilled: Vec<String> = slot_names(texts)
-        .into_iter()
-        .filter(|n| f.sweep.slots.get(n).is_none_or(|v| v.trim().is_empty()))
-        .map(|n| format!("{{{n}}}"))
-        .collect();
+    // a blank is filled for a style by its own value or the shared one
+    let key = |t: &increart_core::prompts::PromptTask, p: &increart_core::prompts::PromptPreset| {
+        increart_core::prompts::PresetKey { task: t.name.clone(), name: p.name.clone() }
+    };
+    // (a style's own prompt is used as it is, any blank left filled too)
+    let mut unfilled: Vec<String> = vec![];
+    for (t, p) in &fit {
+        for n in slot_names([f.sweep.prompt_for(&f.prompt, &key(t, p), &p.prompt).as_str()]) {
+            let n = format!("{{{n}}}");
+            if !unfilled.contains(&n) {
+                unfilled.push(n);
+            }
+        }
+    }
     if !unfilled.is_empty() {
         return Err(format!("Fill in {} for the sweep first", unfilled.join(", ")));
     }
@@ -4142,12 +5234,15 @@ pub fn sweep_runs(state: &AppState) -> Result<(Vec<(GenerateForm, SweepTag)>, us
         .map(|(t, p)| {
             let mut run = f.clone();
             run.sweep = Default::default();
-            run.prompt = sweep_prompt(&f.prompt, &p.prompt, &f.sweep.slots);
+            run.prompt = f.sweep.prompt_for(&f.prompt, &key(t, p), &p.prompt);
             if !p.negative.is_empty() {
                 run.negative = p.negative.clone();
             }
             run.label = format!("{name} · {}", p.name);
-            (run, SweepTag { name: name.clone(), task: t.name.clone(), preset: p.name.clone(), param: None })
+            let enhanced = f.sweep.style_prompt(&key(t, p)).is_some_and(|s| s.enhanced);
+            let tag =
+                SweepTag { name: name.clone(), task: t.name.clone(), preset: p.name.clone(), param: None, enhanced };
+            (run, tag)
         })
         .collect();
     Ok((runs, unfit.len()))
@@ -4190,7 +5285,14 @@ pub fn param_runs(f: &GenerateForm, recipes: &[RecipePreset]) -> Result<Vec<(Gen
                 SweepVary::Style => {}
             }
             run.label = format!("{name} · {}", param.label());
-            (run, SweepTag { name: name.clone(), task: String::new(), preset: String::new(), param: Some(param) })
+            let tag = SweepTag {
+                name: name.clone(),
+                task: String::new(),
+                preset: String::new(),
+                param: Some(param),
+                enhanced: false,
+            };
+            (run, tag)
         })
         .collect();
     Ok(runs)
@@ -4349,6 +5451,13 @@ fn queue_sweep(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
     lib(state, op)
 }
 
+/// Following stops once Review is moved off the newest image.
+fn unfollow(state: &mut AppState) {
+    if state.review_cursor + 1 < state.review_queue().len() {
+        state.review_follow = false;
+    }
+}
+
 fn set_index(state: &mut AppState, ix: Index) {
     state.index = ix;
     state.rebuild_usage();
@@ -4389,13 +5498,27 @@ fn use_image(state: &mut AppState, image: ImageRef, target: UseTarget) -> Vec<Ef
         }
         UseTarget::Edit => {
             let Some(p) = source else { return vec![] };
+            if state.project.as_ref() != Some(&p.project.id)
+                && ask_leaving_generate(state, &Msg::UseImage(image.clone(), UseTarget::Edit))
+            {
+                return vec![];
+            }
             let mut fx = vec![];
+            // the project's values offered for its sweep's blanks stay
+            let sw = &state.generate.sweep;
+            let mut kept = (sw.suggestions.clone(), sw.batch_ask.clone(), sw.enhance_ask.clone());
             if state.project.as_ref() != Some(&p.project.id) {
-                fx = flush_generate(state);
+                fx = leave_generate(state);
                 state.project = Some(p.project.id.clone());
                 state.proj_folder = None;
+                kept = p
+                    .draft
+                    .as_ref()
+                    .map(|d| (d.sweep.suggestions.clone(), d.sweep.batch_ask.clone(), d.sweep.enhance_ask.clone()))
+                    .unwrap_or_default();
             }
             let mut f = GenerateForm::new(&state.config);
+            (f.sweep.suggestions, f.sweep.batch_ask, f.sweep.enhance_ask) = kept;
             f.label = next_label(state);
             f.first_seed = state.next_seed();
             if let Some(r) = &run {
@@ -4445,13 +5568,463 @@ fn prepare_project(state: &mut AppState, image: ImageRef, target: UseTarget, nam
     lib(state, LibOp::PrepareProject { parent, name, copy_of, form })
 }
 
+/// One chat request to the PE server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeJob {
+    pub id: u64,
+    pub key: PeKey,
+    pub system: String,
+    pub sampling: increart_core::pe::Sampling,
+    pub text: String,
+    /// Attached in this order (absolute).
+    pub images: Vec<PathBuf>,
+    /// Their longest side, as sent.
+    pub image_size: u32,
+    pub max_tokens: u32,
+}
+
+/// What the rewrite / describe window does with its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeUse {
+    Discard,
+    /// Replace the text (the Generate prompt for a description), the old
+    /// one kept in its history.
+    Use,
+    /// Keep it as one of the idea's variants.
+    Variant,
+}
+
+/// Asks for the rewrite / describe window's text (again).
+fn ask_text(state: &mut AppState) -> Vec<Effect> {
+    use increart_core::pe::{DESCRIBE, REWRITE, TextAsk, text_message};
+    let Some(server) = state.pe.server.as_ref().cloned() else {
+        state.pe.text = None;
+        state.messages_error(NO_CHAT);
+        return vec![];
+    };
+    let Some(t) = state.pe.text.as_ref() else { return vec![] };
+    let Some(root) = state.library.clone() else { return vec![] };
+    let f = &state.generate;
+    let idea = "idea (a prompt draft, notes, or both)";
+    let inputs = |ids: &[Id]| ids.iter().cloned().map(ImageRef::input).collect::<Vec<_>>();
+    let (mut refs, mut start, what) = match &t.target {
+        PeTarget::Prompt => {
+            let template = f.sweep.on && f.prompt.contains(increart_core::prompts::PRESET_SLOT);
+            let what = if template { "prompt template ({preset} is where each style's prompt goes)" } else { "prompt" };
+            (f.refs().to_vec(), f.init().filter(|i| !f.refs().contains(i)), what)
+        }
+        PeTarget::NewIdea => (inputs(&state.draft.images), None, idea),
+        PeTarget::Idea(id) => {
+            let ids = match &state.idea_edit {
+                Some(ed) if ed.id == *id => ed.images.clone(),
+                _ => state.idea(id).map(|e| e.idea.images.clone()).unwrap_or_default(),
+            };
+            (inputs(&ids), None, idea)
+        }
+        PeTarget::Describe(img) => (vec![img.clone()], None, ""),
+    };
+    let describe = matches!(t.target, PeTarget::Describe(_));
+    if !server.vision() {
+        if describe {
+            state.pe.text = None;
+            state.messages_error(format!("{}: describing an image needs a model with vision (mmproj)", server.name));
+            return vec![];
+        }
+        (refs, start) = (vec![], None);
+    }
+    let ask = TextAsk {
+        original: t.original.clone(),
+        what: what.into(),
+        how: t.how.clone(),
+        images: refs.len(),
+        start: start.is_some(),
+    };
+    let images: Vec<PathBuf> = refs.iter().chain(&start).map(|r| root.join(r.rel_path())).collect();
+    let job = PeJob {
+        id: 0,
+        key: PeKey::Text(0),
+        system: state.config.pe.system_prompt(if describe { DESCRIBE } else { REWRITE }).to_string(),
+        sampling: state.config.pe.sampling(if describe { DESCRIBE } else { REWRITE }),
+        text: text_message(&ask),
+        max_tokens: 700,
+        images,
+        image_size: increart_core::pe::TEXT_IMAGE_SIZE,
+    };
+    // a new ask replaces the window's last one
+    let mut fx = stop_text_ask(state);
+    let job = queue_job(state, job);
+    let t = state.pe.text.as_mut().unwrap();
+    (t.waiting, t.error, t.images) = (Some(job.id), None, job.images.len());
+    fx.push(Effect::PeAsk { server, jobs: vec![job] });
+    fx
+}
+
+/// Stops the rewrite / describe window's ask, if it's waiting.
+fn stop_text_ask(state: &mut AppState) -> Vec<Effect> {
+    match state.pe.text.as_ref().and_then(|t| t.waiting) {
+        Some(id) => update(state, Msg::PeStop(vec![id])),
+        None => vec![],
+    }
+}
+
+/// Numbers an ask and queues it (a text ask's key is its number).
+fn queue_job(state: &mut AppState, mut job: PeJob) -> PeJob {
+    state.pe.asks += 1;
+    job.id = state.pe.asks;
+    if let PeKey::Text(n) = &mut job.key {
+        *n = job.id;
+    }
+    let now = state.now;
+    state.pe.jobs.push(PeJobState {
+        id: job.id,
+        key: job.key.clone(),
+        step: PeStep::Queued,
+        asked: now,
+        since: now,
+        rate: None,
+    });
+    job
+}
+
+/// Times a blank is asked again after an answer with nothing new.
+pub const BLANK_RETRIES: u8 = 2;
+/// How much hotter each time.
+const RETRY_HOTTER: f32 = 0.2;
+/// Times a style is asked again after an empty or unchanged answer.
+pub const STYLE_RETRIES: u8 = 1;
+/// Added to a style's instructions when asked again.
+/// How often a writing ask's tokens a second is worked out again.
+const RATE_EVERY: f64 = 0.5;
+const STYLE_RETRY_NOTE: &str = "The last answer was empty or unchanged: write an improved prompt.";
+/// Added to the instructions when asked again.
+const RETRY_NOTE: &str = "The last answer had nothing new: give different values.";
+
+/// Queues an ask for a blank's values, noting how it was asked (an
+/// answer with nothing new asks again) and dropping a failure shown.
+fn queue_blank(state: &mut AppState, job: PeJob, form: Option<&SuggestForm>, retry: u8) -> PeJob {
+    if let PeKey::Blank(k) = &job.key {
+        state.pe.blank_failed.remove(k);
+        state.pe.blank_tries.insert(k.clone(), BlankTry { form: form.cloned(), retry });
+    }
+    queue_job(state, job)
+}
+
+/// Uses the rewrite / describe window's answer.
+fn use_text(state: &mut AppState, t: PeText, how: PeUse) -> Vec<Effect> {
+    let variant = |state: &AppState, id: &Id| {
+        let server = state.pe.server.as_ref().cloned().unwrap_or_default();
+        let v = increart_core::model::PromptVariant {
+            text: t.text.clone(),
+            origin: PeText::origin(&server, &state.config.pe, false),
+        };
+        LibOp::AddVariant(id.clone(), v)
+    };
+    match &t.target {
+        PeTarget::Prompt | PeTarget::Describe(_) => {
+            let mut fx = vec![];
+            let f = &state.generate;
+            if let Some(project) = state.project.clone()
+                && !f.prompt.trim().is_empty()
+            {
+                let (p, n) = (f.prompt.clone(), f.negative.clone());
+                fx = record(state, HistoryKey::Project(project), HistoryKind::BeforeRewrite, p, n);
+            }
+            state.generate.prompt = t.text;
+            mark_generate(state);
+            if matches!(t.target, PeTarget::Describe(_)) {
+                state.messages_info("The description is the Generate prompt now");
+            }
+            fx
+        }
+        PeTarget::NewIdea => {
+            let (x, title) = (state.draft.text.clone(), state.draft.title.clone());
+            let mut fx = record(state, HistoryKey::NewIdea, HistoryKind::BeforeRewrite, x, title);
+            let mut d = state.draft.clone();
+            d.text = t.text;
+            fx.extend(update(state, Msg::Draft(d)));
+            fx
+        }
+        PeTarget::Idea(id) => {
+            let open = state.idea_edit.as_ref().is_some_and(|ed| ed.id == *id);
+            if how == PeUse::Variant || !open {
+                if !open && how == PeUse::Use {
+                    state.messages_info("The idea was closed: the rewrite is one of its variants");
+                }
+                let op = variant(state, id);
+                return lib(state, op);
+            }
+            let ed = state.idea_edit.clone().unwrap();
+            let mut fx = record(
+                state,
+                HistoryKey::Idea(id.clone()),
+                HistoryKind::BeforeRewrite,
+                ed.text.clone(),
+                ed.title.clone(),
+            );
+            fx.extend(update(state, Msg::EditIdea(IdeaEdit { text: t.text, ..ed })));
+            fx
+        }
+    }
+}
+
+/// At most this many values offered before are named in an ask, not to
+/// offer again.
+const MAX_AVOID: usize = 60;
+
+/// What asking prompt enhance with no chat server in use says.
+const NO_CHAT: &str =
+    "No chat server in use: add one to a server preset (Servers…), or pick one to continue without sd-servers";
+
+/// A new PE server when there's none to copy: KoboldCpp on every GPU.
+fn new_pe_server() -> increart_core::pe::PeServer {
+    increart_core::pe::PeServer {
+        name: "Prompt enhance".into(),
+        run: PeRun::KoboldCpp {
+            binary: String::new(),
+            model: String::new(),
+            mmproj: String::new(),
+            host: "127.0.0.1".into(),
+            port: 5001,
+            device: increart_core::pe::PeDevice::Gpu { devices: vec![] },
+            context: 8192,
+            args: vec![],
+        },
+        ..Default::default()
+    }
+}
+
+/// The sweep's styles that will run (the references fit them), as keys
+/// with their preset.
+pub fn running_styles(
+    state: &AppState,
+) -> Vec<(increart_core::prompts::PresetKey, &increart_core::prompts::PromptPreset)> {
+    use increart_core::prompts::{PresetKey, sweep_presets};
+    let f = &state.generate;
+    let refs = f.refs().len();
+    sweep_presets(&state.prompt_presets, &f.sweep)
+        .into_iter()
+        .filter(|(_, p)| crate::state::needs_refs(&p.prompt) <= refs)
+        .map(|(t, p)| (PresetKey { task: t.name.clone(), name: p.name.clone() }, p))
+        .collect()
+}
+
+/// A style's prompt as built from the template, the style and the values.
+pub fn built_style_prompt(state: &AppState, key: &increart_core::prompts::PresetKey, style: &str) -> String {
+    let f = &state.generate;
+    increart_core::prompts::sweep_prompt(&f.prompt, style, &f.sweep.slots_for(key))
+}
+
+/// Where a style's row is: as built, or its own prompt and whether that
+/// was made from older values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleRow {
+    Built,
+    Enhanced { stale: bool },
+    Edited { stale: bool },
+}
+
+pub fn style_row(state: &AppState, key: &increart_core::prompts::PresetKey, style: &str) -> StyleRow {
+    match state.generate.sweep.style_prompt(key) {
+        None => StyleRow::Built,
+        Some(own) => {
+            let stale = own.from != built_style_prompt(state, key, style);
+            if own.enhanced { StyleRow::Enhanced { stale } } else { StyleRow::Edited { stale } }
+        }
+    }
+}
+
+/// The styles **Enhance style prompts** asks for: of those that will run,
+/// those not enhanced yet (as built, or enhanced from older values; not
+/// the user's edits).
+pub fn styles_to_enhance(state: &AppState) -> Vec<increart_core::prompts::PresetKey> {
+    running_styles(state)
+        .into_iter()
+        .filter(|(k, p)| matches!(style_row(state, k, &p.prompt), StyleRow::Built | StyleRow::Enhanced { stale: true }))
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// **Enhance style prompts…**'s **Tick only** sets, of the styles that
+/// will run: (not enhanced yet, failed).
+pub fn enhance_picks(state: &AppState) -> [Vec<increart_core::prompts::PresetKey>; 2] {
+    let failed = running_styles(state).into_iter().map(|(k, _)| k).filter(|k| state.pe.style_failed.contains_key(k));
+    [styles_to_enhance(state), failed.collect()]
+}
+
+/// The message an ask for a style's prompt would send (the Enhance…
+/// dialog's preview).
+pub fn style_message_for(
+    state: &AppState,
+    key: &increart_core::prompts::PresetKey,
+    ask: &EnhanceAsk,
+) -> Option<String> {
+    let server = state.pe.server.as_ref()?;
+    style_job(state, server, key, ask).map(|(j, _, _)| j.text)
+}
+
+/// Asks to improve these styles' prompts (those not waiting already),
+/// noting how (an empty or unchanged answer asks again) and dropping a
+/// failure shown.
+fn ask_styles(
+    state: &mut AppState,
+    keys: &[increart_core::prompts::PresetKey],
+    ask: &EnhanceAsk,
+    retry: u8,
+) -> Vec<Effect> {
+    let Some(server) = state.pe.server.as_ref().cloned() else {
+        state.messages_error(NO_CHAT);
+        return vec![];
+    };
+    let jobs: Vec<_> = keys
+        .iter()
+        .filter(|k| state.pe.style_job(k).is_none())
+        .filter_map(|k| style_job(state, &server, k, ask))
+        .collect();
+    if jobs.is_empty() {
+        return vec![];
+    }
+    if state.pe.styles_waiting() == 0 {
+        state.pe.style_batch = 0;
+    }
+    state.pe.style_batch += jobs.len();
+    let jobs = jobs
+        .into_iter()
+        .map(|(j, built, sent)| {
+            if let PeKey::Style(k) = &j.key {
+                state.pe.style_from.insert(k.clone(), built);
+                state.pe.style_failed.remove(k);
+                state.pe.style_tries.insert(k.clone(), StyleTry { ask: ask.clone(), sent, retry });
+            }
+            queue_job(state, j)
+        })
+        .collect();
+    vec![Effect::PeAsk { server, jobs }]
+}
+
+/// The request improving a style's prompt, with the prompt built for it
+/// now; None if the style won't run.
+fn style_job(
+    state: &AppState,
+    server: &increart_core::pe::PeServer,
+    key: &increart_core::prompts::PresetKey,
+    settings: &EnhanceAsk,
+) -> Option<(PeJob, String, String)> {
+    use increart_core::pe::{STYLE_PROMPT, StyleAsk, style_message};
+    let f = &state.generate;
+    let (_, p) = running_styles(state).into_iter().find(|(k, _)| k == key)?;
+    let built = built_style_prompt(state, key, &p.prompt);
+    let prompt = if settings.from_shown { f.sweep.prompt_for(&f.prompt, key, &p.prompt) } else { built.clone() };
+    let root = state.library.as_ref()?;
+    let (mut images, mut start) = (vec![], false);
+    if server.vision() && settings.images {
+        images = f.refs().iter().map(|r| root.join(r.rel_path())).collect();
+        if let Some(init) = f.init().filter(|i| !f.refs().contains(i)) {
+            images.push(root.join(init.rel_path()));
+            start = true;
+        }
+    }
+    let ask = StyleAsk {
+        template: f.prompt.clone(),
+        style: p.name.clone(),
+        style_prompt: p.prompt.clone(),
+        prompt: prompt.clone(),
+        how: settings.how.clone(),
+        images: images.len() - start as usize,
+        start,
+    };
+    let job = PeJob {
+        id: 0,
+        key: PeKey::Style(key.clone()),
+        system: state.config.pe.system_prompt(STYLE_PROMPT).to_string(),
+        sampling: settings.sampling.unwrap_or_else(|| state.config.pe.sampling(STYLE_PROMPT)),
+        text: style_message(&ask),
+        images,
+        // as for blanks: small enough to read quickly, the same for every
+        // style so they're read once
+        image_size: increart_core::pe::BLANK_IMAGE_SIZE,
+        max_tokens: settings.max_tokens,
+    };
+    Some((job, built, prompt))
+}
+
+/// The message a Suggest dialog's ask for a blank would send.
+pub fn suggest_message(state: &AppState, key: &BlankKey, form: &SuggestForm) -> Option<String> {
+    blank_job(state, state.pe.server.as_ref()?, key, Some(form)).map(|j| j.text)
+}
+
+/// The request for values for a blank, if the sweep still has it: as the
+/// Suggest… dialog says, else the usual way.
+fn blank_job(
+    state: &AppState,
+    server: &increart_core::pe::PeServer,
+    key: &BlankKey,
+    d: Option<&SuggestForm>,
+) -> Option<PeJob> {
+    use increart_core::pe::{BlankAsk, FILL_BLANKS, blank_message};
+    use increart_core::prompts::{PresetKey, slot_names, sweep_presets};
+    let f = &state.generate;
+    let refs = f.refs().len();
+    let fit: Vec<_> = sweep_presets(&state.prompt_presets, &f.sweep)
+        .into_iter()
+        .filter(|(_, p)| crate::state::needs_refs(&p.prompt) <= refs)
+        .collect();
+    let has = |p: &str| slot_names([p]).contains(&key.slot);
+    let (styles, filled) = match &key.style {
+        None => {
+            let styles: Vec<_> =
+                fit.iter().filter(|c| f.sweep.blank_texts(&[**c]).into_iter().any(has)).map(|(_, p)| *p).collect();
+            if styles.is_empty() && !has(&f.prompt) {
+                return None;
+            }
+            (styles, f.sweep.slots.clone())
+        }
+        Some(k) => {
+            let (_, p) = fit.iter().find(|(t, p)| PresetKey { task: t.name.clone(), name: p.name.clone() } == *k)?;
+            (vec![*p], f.sweep.slots_for(k))
+        }
+    };
+    let root = state.library.as_ref()?;
+    let (mut images, mut start) = (vec![], false);
+    if server.vision() && d.is_none_or(|d| d.images) {
+        images = f.refs().iter().map(|r| root.join(r.rel_path())).collect();
+        if let Some(init) = f.init().filter(|i| !f.refs().contains(i)) {
+            images.push(root.join(init.rel_path()));
+            start = true;
+        }
+    }
+    let offered = if d.is_none_or(|d| d.avoid) { state.blank_offered(key) } else { &[] };
+    let ask = BlankAsk {
+        slot: key.slot.clone(),
+        template: f.prompt.clone(),
+        styles: styles.iter().map(|p| (p.name.clone(), p.prompt.clone())).collect(),
+        filled,
+        images: images.len() - start as usize,
+        start,
+        count: d.map_or(SUGGEST_COUNT, |d| d.count),
+        // the latest, should there be very many
+        avoid: offered[offered.len().saturating_sub(MAX_AVOID)..].to_vec(),
+        how: d.map_or(String::new(), |d| d.how.clone()),
+    };
+    Some(PeJob {
+        id: 0,
+        key: PeKey::Blank(key.clone()),
+        system: state.config.pe.system_prompt(FILL_BLANKS).to_string(),
+        sampling: d.map_or_else(|| state.config.pe.sampling(FILL_BLANKS), |d| d.sampling),
+        text: blank_message(&ask),
+        images,
+        image_size: increart_core::pe::BLANK_IMAGE_SIZE,
+        // room for longer lists
+        max_tokens: 300.max(50 * ask.count as u32),
+    })
+}
+
 /// After servers opened in the background settle: start the engine with the
 /// ones that came up (the others were reported as they failed).
 /// Stops the servers in use, showing them as stopping until they're gone
 /// ([`Msg::ServersStopped`]).
 fn stop_servers(state: &mut AppState) -> Effect {
-    state.stopping =
-        state.servers.iter().map(|s| if s.device.is_empty() { s.name.clone() } else { s.device.clone() }).collect();
+    state.stopping = state.servers.iter().map(server_label).collect();
+    state.servers_opened_with = None;
     Effect::StopServers
 }
 
@@ -4527,6 +6100,10 @@ fn restore_form(state: &mut AppState, d: &increart_core::model::GenerateDraft) {
             notes.push(format!("{gone} image(s) no longer in the library were left out"));
         }
     }
+    // the values offered since are kept
+    f.sweep.suggestions = std::mem::take(&mut state.generate.sweep.suggestions);
+    f.sweep.batch_ask = state.generate.sweep.batch_ask.take();
+    f.sweep.enhance_ask = state.generate.sweep.enhance_ask.take();
     state.generate = f;
     if notes.is_empty() {
         state.messages_info("Restored the prompt and settings");
@@ -4785,6 +6362,7 @@ fn go_to_output(state: &mut AppState, link: increart_core::scan::OutputLink) -> 
             state.review_scope = project;
             state.review_view = ReviewView::Single;
             state.review_cursor = state.review_queue().iter().position(|o| o.path == link.path).unwrap_or(0);
+            unfollow(state);
             state.tab = Tab::Review;
             vec![]
         }
@@ -4965,6 +6543,14 @@ fn transfer(state: &mut AppState, paths: &[PathBuf], cut: bool, dest: &std::path
     fx
 }
 
+/// Once no style is waiting, any blanks prompt enhance added are asked
+/// about.
+fn ask_added_blanks(state: &mut AppState) {
+    if state.pe.styles_waiting() == 0 && !state.pe.added_blanks.is_empty() {
+        state.pe.added_blanks_ask = true;
+    }
+}
+
 fn mark_generate(state: &mut AppState) {
     if state.project.is_some() {
         state.generate_dirty = Some(state.now);
@@ -4987,6 +6573,50 @@ fn flush_generate(state: &mut AppState) -> Vec<Effect> {
         }
         _ => vec![],
     }
+}
+
+/// Prompt enhance's asks for the Generate form (its sweep's blanks and
+/// styles' prompts), queued or answering.
+fn generate_asks(state: &AppState) -> Vec<u64> {
+    state.pe.jobs.iter().filter(|j| matches!(j.key, PeKey::Blank(_) | PeKey::Style(_))).map(|j| j.id).collect()
+}
+
+/// Asks before `then` leaves the project's Generate form while prompt
+/// enhance is still answering for it (leaving stops those asks): false when
+/// there's nothing to ask.
+fn ask_leaving_generate(state: &mut AppState, then: &Msg) -> bool {
+    let n = generate_asks(state).len();
+    if n == 0 {
+        return false;
+    }
+    let form = state.project_entry().map_or("the Generate form".into(), |p| format!("{}'s Generate form", p.name()));
+    state.confirm = Some(Confirm {
+        text: format!(
+            "Prompt enhance is still working on {form}: {n} ask(s) for blank values or style prompts \
+             are waiting. Leaving the project stops them (what it already answered is kept)."
+        ),
+        then: Box::new(Msg::LeaveGenerate(Box::new(then.clone()))),
+    });
+    true
+}
+
+/// Leaving the project's Generate form: saved, and the asks
+/// for its sweep's blanks stopped (their values are its own).
+fn leave_generate(state: &mut AppState) -> Vec<Effect> {
+    let mut fx = flush_generate(state);
+    let ids = generate_asks(state);
+    if !ids.is_empty() {
+        fx.extend(update(state, Msg::PeStop(ids)));
+    }
+    state.pe.suggest = None;
+    state.pe.batch_suggest = None;
+    state.pe.blank_failed.clear();
+    state.pe.style_failed.clear();
+    state.pe.style_dialog = None;
+    // blanks added and not asked about yet stay (the table shows them)
+    state.pe.added_blanks.clear();
+    state.pe.added_blanks_ask = false;
+    fx
 }
 
 /// Saves the New idea draft now, if it was edited (an empty one is removed).
@@ -5046,7 +6676,7 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
             state.idea_dirty = Some(state.now);
         }
         OpOk::Promoted { project, prompt, refs, idea } => {
-            let fx = flush_generate(state);
+            let fx = leave_generate(state);
             state.project = Some(project);
             state.proj_folder = None;
             state.tab = Tab::Projects;
@@ -5065,7 +6695,7 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
             if tree == Tree::Projects {
                 let dir = std::path::Path::new("projects").join(&path);
                 if let Some(id) = state.index.projects.iter().find(|p| p.dir == dir).map(|p| p.project.id.clone()) {
-                    fx = flush_generate(state);
+                    fx = leave_generate(state);
                     state.project = Some(id);
                     state.proj_folder = None;
                     load_generate(state);
@@ -5082,7 +6712,7 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
             let Some(id) = state.index.projects.iter().find(|p| p.dir == dir).map(|p| p.project.id.clone()) else {
                 return vec![];
             };
-            let fx = flush_generate(state);
+            let fx = leave_generate(state);
             state.project = Some(id);
             state.proj_folder = None;
             load_generate(state);
@@ -5093,7 +6723,7 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
             let Some(id) = state.index.projects.iter().find(|p| p.dir == dir).map(|p| p.project.id.clone()) else {
                 return vec![];
             };
-            let fx = flush_generate(state);
+            let fx = leave_generate(state);
             state.project = Some(id);
             state.proj_folder = None;
             let mut f = form;
@@ -5139,9 +6769,12 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
             state.messages_info("Run queued");
             return fx;
         }
-        OpOk::Reviewed { link, previous, undo } => {
-            if !undo {
-                state.review_undo.push((link, previous));
+        OpOk::Reviewed { done, undo, error } => {
+            if !undo && !done.is_empty() {
+                state.review_undo.push(done);
+            }
+            if let Some(e) = error {
+                state.messages_error(e);
             }
         }
     }
@@ -5211,13 +6844,17 @@ fn check_alerts(state: &mut AppState) -> Vec<Effect> {
     let now = state.now;
     let mut fx = vec![];
 
-    // a GPU (server) ready with no job
+    // a GPU (server) ready with no job; prompt enhance asking counts as work
+    if !state.pe.jobs.is_empty() {
+        state.alerts.pe_busy_at = Some(now);
+    }
+    let pe_busy = state.alerts.pe_busy_at.filter(|_| n.pe_counts_as_work);
     let limit = n.gpu_idle.threshold as f64 * 60.0;
     let idle: Vec<(usize, f64)> = state
         .servers
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| s.idle_since.map(|t| (i, now - t)))
+        .filter_map(|(i, s)| s.idle_since.map(|t| (i, now - pe_busy.map_or(t, |p| t.max(p)))))
         .filter(|(_, d)| *d >= limit)
         .collect();
     let holds = state.engine_running

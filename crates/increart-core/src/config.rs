@@ -1,5 +1,6 @@
 //! The user's `config.rsn` (DESIGN.md, Config file).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,8 +36,8 @@ pub struct Config {
     pub last_preset: Option<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub sdserver: SdServerConfig,
-    /// How the job queue shares the servers (Jobs: spread evenly / one at
-    /// a time).
+    /// How the job queue shares the servers (Jobs: spread all / sweep by
+    /// sweep / one at a time).
     #[serde(skip_serializing_if = "is_default")]
     pub job_order: crate::scheduler::Order,
     /// Sounds when a GPU is idle or the review queue is long.
@@ -45,6 +46,18 @@ pub struct Config {
     /// The contact sheet's cell size in points (0: the default).
     #[serde(skip_serializing_if = "is_default")]
     pub sheet_cell: u32,
+    /// The contact sheet's row headers: beside the row, or a caption above.
+    #[serde(skip_serializing_if = "is_default")]
+    pub sheet_rows: SheetRows,
+    /// Review's Grid tile size in points (0: the default).
+    #[serde(skip_serializing_if = "is_default")]
+    pub review_grid_cell: u32,
+    /// The Output library Grid's tile size in points (0: the default).
+    #[serde(skip_serializing_if = "is_default")]
+    pub output_grid_cell: u32,
+    /// The Input library Grid's card width in points (0: the default).
+    #[serde(skip_serializing_if = "is_default")]
+    pub library_grid_cell: u32,
     /// The interface zoom in percent (0: 100%).
     #[serde(skip_serializing_if = "is_default")]
     pub ui_zoom: u32,
@@ -54,10 +67,38 @@ pub struct Config {
     /// The project tree doesn't list the selected project's runs.
     #[serde(skip_serializing_if = "is_default")]
     pub hide_project_runs: bool,
-    /// The project tree and grid list projects by name (A–Z), instead of
-    /// newest first.
+    /// How the project tree and grid order projects.
     #[serde(skip_serializing_if = "is_default")]
+    pub project_order: TreeOrder,
+    /// How the project tree orders folders (by the projects anywhere in
+    /// them; empty folders last).
+    #[serde(skip_serializing_if = "is_default")]
+    pub folder_order: FolderOrder,
+    /// Older configs' project order (A–Z): read, folded into
+    /// `project_order` by [`normalize`](Self::normalize), never written.
+    #[serde(skip_serializing)]
     pub projects_by_name: bool,
+    /// Older configs' folder order (newest first): read, folded into
+    /// `folder_order` by [`normalize`](Self::normalize), never written.
+    #[serde(skip_serializing)]
+    pub folders_by_newest: bool,
+    /// How Review's scope tree orders folders and projects.
+    #[serde(skip_serializing_if = "is_default")]
+    pub review_order: ReviewOrder,
+    /// Older configs' Review order (oldest to review): read, folded into
+    /// `review_order` by [`normalize`](Self::normalize), never written.
+    #[serde(skip_serializing)]
+    pub review_oldest_first: bool,
+    /// Review's scope tree also lists folders, projects, runs and sweeps
+    /// with nothing to review (**hide reviewed** unticked).
+    #[serde(skip_serializing_if = "is_default")]
+    pub review_show_reviewed: bool,
+    /// Prompt enhance: the chat servers that suggest prompt text.
+    #[serde(skip_serializing_if = "is_default")]
+    pub pe: crate::pe::PeConfig,
+    /// How the sweep's **Choose styles** window orders the presets.
+    #[serde(skip_serializing_if = "is_default")]
+    pub style_sort: StyleSort,
     /// Selecting a project never narrows the project grid (**narrow to
     /// siblings** unticked).
     #[serde(skip_serializing_if = "is_default")]
@@ -104,7 +145,8 @@ pub fn builtin_recipes() -> Vec<RecipePreset> {
     }]
 }
 
-/// A named set of servers (e.g. "Both GPUs", "Remote box").
+/// A named set of servers (e.g. "Both GPUs", "Remote box"): sd-servers,
+/// and at most one chat server for prompt enhance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename = "ServerPreset")]
 pub struct ServerPreset {
@@ -112,8 +154,8 @@ pub struct ServerPreset {
     pub servers: Vec<ServerConfig>,
 }
 
-/// One sd-server of a preset: started by the app, or a running one to
-/// connect to.
+/// One server of a preset: an sd-server started by the app or a running one
+/// to connect to, or the chat server prompt enhance uses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerConfig {
     Start {
@@ -135,18 +177,22 @@ pub enum ServerConfig {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         device: String,
     },
+    /// The chat server for prompt enhance (not an sd-server).
+    Chat(crate::pe::PeServer),
 }
 
 impl ServerConfig {
     pub fn name(&self) -> &str {
         match self {
             ServerConfig::Start { name, .. } | ServerConfig::Connect { name, .. } => name,
+            ServerConfig::Chat(s) => &s.name,
         }
     }
 
     pub fn device(&self) -> &str {
         match self {
             ServerConfig::Start { device, .. } | ServerConfig::Connect { device, .. } => device,
+            ServerConfig::Chat(_) => "",
         }
     }
 
@@ -154,13 +200,83 @@ impl ServerConfig {
         match self {
             ServerConfig::Start { host, port, .. } => format!("http://{host}:{port}"),
             ServerConfig::Connect { url, .. } => url.trim_end_matches('/').to_string(),
+            ServerConfig::Chat(s) => s.base_url(),
         }
+    }
+
+    pub fn is_chat(&self) -> bool {
+        matches!(self, ServerConfig::Chat(_))
+    }
+}
+
+impl ServerPreset {
+    /// Its sd-servers, in order.
+    pub fn sd_servers(&self) -> Vec<ServerConfig> {
+        self.servers.iter().filter(|s| !s.is_chat()).cloned().collect()
+    }
+
+    /// Its chat server.
+    pub fn chat(&self) -> Option<&crate::pe::PeServer> {
+        self.servers.iter().find_map(|s| match s {
+            ServerConfig::Chat(c) => Some(c),
+            _ => None,
+        })
     }
 }
 
 impl Config {
     pub fn preset(&self, name: &str) -> Option<&ServerPreset> {
         self.server_presets.iter().find(|p| p.name == name)
+    }
+
+    /// The presets' chat servers, one per process (the first preset's name
+    /// for it).
+    pub fn chat_servers(&self) -> Vec<&crate::pe::PeServer> {
+        let mut list: Vec<&crate::pe::PeServer> = vec![];
+        for c in self.server_presets.iter().filter_map(ServerPreset::chat) {
+            if !list.iter().any(|x| x.same_process(c)) {
+                list.push(c);
+            }
+        }
+        list
+    }
+
+    /// PE servers from before they were preset entries: the one used goes
+    /// into every preset (its system prompts and sampling are now
+    /// everyone's), each other one into a preset of its own.
+    fn move_pe_servers(&mut self) -> Option<String> {
+        use crate::pe::PeServer;
+        let old = std::mem::take(&mut self.pe.servers);
+        let chosen = std::mem::take(&mut self.pe.server);
+        let used = old.iter().position(|s| s.name == chosen).unwrap_or(0);
+        let first = old.get(used)?;
+        if self.pe.system_prompts.is_empty() && self.pe.sampling.is_empty() {
+            self.pe.system_prompts = first.system_prompts.clone();
+            self.pe.sampling = first.sampling.clone();
+        }
+        let server = |o: &crate::pe::OldPeServer| PeServer { name: o.name.clone(), run: o.run.clone(), start: o.start };
+        let had_presets = !self.server_presets.is_empty();
+        for p in self.server_presets.iter_mut().filter(|p| p.chat().is_none()) {
+            p.servers.push(ServerConfig::Chat(server(first)));
+        }
+        let mut alone = vec![];
+        for (_, o) in old.iter().enumerate().filter(|(i, _)| *i != used || !had_presets) {
+            let name = (1..)
+                .map(|n| if n == 1 { o.name.clone() } else { format!("{} {n}", o.name) })
+                .find(|n| self.preset(n).is_none())
+                .unwrap();
+            alone.push(name.clone());
+            self.server_presets.push(ServerPreset { name, servers: vec![ServerConfig::Chat(server(o))] });
+        }
+        let mut said = vec![];
+        if had_presets {
+            said.push(format!("{} is now in every server preset", first.name));
+        }
+        if !alone.is_empty() {
+            said.push(format!("new presets with only a chat server: {}", alone.join(", ")));
+        }
+        let text = format!("Prompt enhance servers moved into the server presets: {}", said.join("; "));
+        Some(text)
     }
 }
 
@@ -311,10 +427,24 @@ impl Config {
     }
 
     /// Reads and [normalizes](Self::normalize) a config; a missing file is
-    /// the default config. Returns the warnings to log.
+    /// the default config. Returns the warnings to log. Old PE servers moved
+    /// into the presets are saved so at once, the file as it was kept
+    /// beside it (`config.rsn.before-chat-presets`).
     pub fn load(path: &Path) -> Result<(Config, Vec<String>)> {
-        let mut config = if path.exists() { rsnfmt::read(path)? } else { Config::default() };
-        let warnings = config.normalize();
+        let mut config: Config = if path.exists() { rsnfmt::read(path)? } else { Config::default() };
+        let moving = !config.pe.servers.is_empty();
+        let mut warnings = config.normalize();
+        if moving {
+            let mut backup = path.as_os_str().to_owned();
+            backup.push(".before-chat-presets");
+            let saved = fs::copy(path, &backup)
+                .map_err(|e| e.to_string())
+                .and_then(|_| config.save(path).map_err(|e| e.to_string()));
+            match saved {
+                Ok(()) => warnings.push(format!("the config as it was is kept in {}", Path::new(&backup).display())),
+                Err(e) => warnings.push(format!("the moved PE servers weren't saved: {e}")),
+            }
+        }
         Ok((config, warnings))
     }
 
@@ -322,13 +452,24 @@ impl Config {
         rsnfmt::write(path, self)
     }
 
-    /// Applies the load rules: `library` folded into the recent libraries,
+    /// Applies the load rules: old PE servers moved into the server presets,
+    /// `library` folded into the recent libraries,
     /// built-in list if empty, sizes snapped to multiples of 32, exactly one
     /// default (the first marked, else the first).
     pub fn normalize(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        warnings.extend(self.move_pe_servers());
         if let Some(l) = self.library.take().filter(|l| !l.is_empty()) {
             self.add_recent_library(l);
+        }
+        if std::mem::take(&mut self.projects_by_name) {
+            self.project_order = TreeOrder::Name;
+        }
+        if std::mem::take(&mut self.folders_by_newest) {
+            self.folder_order = FolderOrder(TreeOrder::Created);
+        }
+        if std::mem::take(&mut self.review_oldest_first) {
+            self.review_order = ReviewOrder::OldestToReview;
         }
         if self.recipes.is_empty() {
             self.recipes = builtin_recipes();
@@ -370,6 +511,71 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_tree_orders_fold_in() {
+        let mut c: Config = rsnfmt::from_str("Config { projects_by_name: true, folders_by_newest: true }").unwrap();
+        c.normalize();
+        assert_eq!((c.project_order, c.folder_order.0), (TreeOrder::Name, TreeOrder::Created));
+        let text = rsnfmt::to_string(&c);
+        assert!(!text.contains("_by_"), "{text}");
+        assert_eq!(rsnfmt::from_str::<Config>(&text).unwrap(), c);
+        assert_eq!(Config::default().folder_order.0, TreeOrder::Name, "folders A–Z by default");
+        assert_eq!(Config::default().review_order, ReviewOrder::Name, "Review A–Z by default");
+        let mut c: Config = rsnfmt::from_str("Config { review_oldest_first: true }").unwrap();
+        c.normalize();
+        assert_eq!(c.review_order, ReviewOrder::OldestToReview);
+        assert!(!rsnfmt::to_string(&c).contains("oldest"));
+    }
+
+    #[test]
+    fn old_pe_servers_move_into_the_presets() {
+        let text = r#"Config {
+            server_presets: [
+                ServerPreset { name: "Both", servers: [Start { name: "gpu0", port: 1234, device: "ROCm0" }] },
+                ServerPreset { name: "CPU", servers: [] },
+            ],
+            pe: Pe {
+                server: "B",
+                servers: [
+                    PeServer { name: "A", run: Connect { url: "http://a:1" } },
+                    PeServer {
+                        name: "B",
+                        run: Connect { url: "http://b:1" },
+                        start: AtLaunch,
+                        system_prompts: { "rewrite": "mine" },
+                    },
+                ],
+            },
+        }"#;
+        let mut c: Config = rsnfmt::from_str(text).unwrap();
+        let w = c.normalize();
+        assert!(w[0].contains("B is now in every server preset") && w[0].contains("only a chat server: A"), "{w:?}");
+        let names: Vec<_> =
+            c.server_presets.iter().map(|p| (p.name.as_str(), p.chat().map(|s| s.name.as_str()))).collect();
+        assert_eq!(names, [("Both", Some("B")), ("CPU", Some("B")), ("A", Some("A"))]);
+        assert_eq!(c.server_presets[0].sd_servers().len(), 1);
+        assert_eq!(c.server_presets[0].chat().unwrap().start, crate::pe::PeStart::AtLaunch);
+        assert_eq!(c.pe.system_prompt(crate::pe::REWRITE), "mine", "the used one's prompts are everyone's");
+        assert_eq!(c.chat_servers().len(), 2, "one per process");
+        // written the new way, and read back the same
+        let out = rsnfmt::to_string(&c);
+        assert!(out.contains("Chat(") && !out.contains("servers: []") && !out.contains("server:"), "{out}");
+        assert_eq!(rsnfmt::from_str::<Config>(&out).unwrap(), c);
+        assert!(c.clone().normalize().is_empty(), "moved once");
+    }
+
+    #[test]
+    fn loading_saves_the_moved_pe_servers_with_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.rsn");
+        let old = r#"Config { pe: Pe { servers: [PeServer { name: "A", run: Connect { url: "http://a:1" } }] } }"#;
+        fs::write(&path, old).unwrap();
+        let (c, w) = Config::load(&path).unwrap();
+        assert!(w.iter().any(|w| w.contains("before-chat-presets")), "{w:?}");
+        assert_eq!(fs::read_to_string(dir.path().join("config.rsn.before-chat-presets")).unwrap(), old);
+        assert_eq!(Config::load(&path).unwrap(), (c, vec![]));
+    }
 
     #[test]
     fn snapping() {
@@ -474,5 +680,138 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("Config {\n    resolutions: [\n        Resolution {"), "{text}");
         assert_eq!(Config::load(&path).unwrap().0, c);
+    }
+}
+
+/// The contact sheet's row headers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SheetRows {
+    /// The style, its counts and buttons beside the row.
+    #[default]
+    Full,
+    /// Full while the rows fit one per line; compact once they fold into
+    /// bands side by side.
+    Auto,
+    /// The style as a caption above the row; its buttons in its menu.
+    Compact,
+}
+
+impl SheetRows {
+    pub fn name(self) -> &'static str {
+        match self {
+            SheetRows::Auto => "Auto",
+            SheetRows::Full => "Full",
+            SheetRows::Compact => "Compact",
+        }
+    }
+
+    /// Full → Compact → Auto → Full.
+    pub fn next(self) -> SheetRows {
+        match self {
+            SheetRows::Full => SheetRows::Compact,
+            SheetRows::Compact => SheetRows::Auto,
+            SheetRows::Auto => SheetRows::Full,
+        }
+    }
+}
+
+/// How the project tree orders projects or folders (a folder by the projects
+/// anywhere in it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TreeOrder {
+    /// Newest created first.
+    #[default]
+    Created,
+    /// Last run (seeds queued) first; never run: by when created.
+    LastRun,
+    Name,
+}
+
+impl TreeOrder {
+    pub const EVERY: [TreeOrder; 3] = [TreeOrder::Created, TreeOrder::LastRun, TreeOrder::Name];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TreeOrder::Created => "Created",
+            TreeOrder::LastRun => "Last run",
+            TreeOrder::Name => "A–Z",
+        }
+    }
+}
+
+/// How Review's scope tree orders folders and projects: as the project tree
+/// can (a folder by the projects anywhere in it), or oldest with images to
+/// review first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewOrder {
+    Created,
+    LastRun,
+    #[default]
+    Name,
+    /// The oldest projects with images to review first (a folder by the
+    /// oldest such project in it), then those with none.
+    OldestToReview,
+}
+
+impl ReviewOrder {
+    pub const EVERY: [ReviewOrder; 4] =
+        [ReviewOrder::Created, ReviewOrder::LastRun, ReviewOrder::Name, ReviewOrder::OldestToReview];
+
+    pub fn name(self) -> &'static str {
+        match self.tree() {
+            Some(o) => o.name(),
+            None => "Oldest to review",
+        }
+    }
+
+    /// The project tree's order this is, if any.
+    pub fn tree(self) -> Option<TreeOrder> {
+        match self {
+            ReviewOrder::Created => Some(TreeOrder::Created),
+            ReviewOrder::LastRun => Some(TreeOrder::LastRun),
+            ReviewOrder::Name => Some(TreeOrder::Name),
+            ReviewOrder::OldestToReview => None,
+        }
+    }
+}
+
+/// The folders' [`TreeOrder`], A–Z by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FolderOrder(pub TreeOrder);
+
+impl Default for FolderOrder {
+    fn default() -> Self {
+        FolderOrder(TreeOrder::Name)
+    }
+}
+
+/// How the sweep's **Choose styles** window orders the presets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StyleSort {
+    /// As the presets list them (by task and group).
+    #[default]
+    Listed,
+    Name,
+    /// Most Good images first.
+    MostGood,
+    /// Last used first.
+    Recent,
+    /// Never used first, then least recently used.
+    Untried,
+}
+
+impl StyleSort {
+    pub const EVERY: [StyleSort; 5] =
+        [StyleSort::Listed, StyleSort::Name, StyleSort::MostGood, StyleSort::Recent, StyleSort::Untried];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StyleSort::Listed => "As listed",
+            StyleSort::Name => "A–Z",
+            StyleSort::MostGood => "Most Good",
+            StyleSort::Recent => "Recently used",
+            StyleSort::Untried => "Never used first",
+        }
     }
 }

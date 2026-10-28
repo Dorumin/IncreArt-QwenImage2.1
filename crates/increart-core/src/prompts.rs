@@ -57,7 +57,8 @@ impl PromptPresets {
     /// The presets in `dir`, the built-in ones' copy there made current;
     /// with the preset files that didn't load (left alone), as messages. A
     /// `prompt-presets.rsn` beside it (the presets before the folder) is
-    /// moved into a new folder and renamed `prompt-presets.rsn.old`.
+    /// moved into a new folder and renamed `prompt-presets.rsn.old`. Presets
+    /// of Modify style are moved into the style tasks, and saved there.
     pub fn load_dir(dir: &Path) -> Result<(PromptPresets, Vec<String>)> {
         let old = dir.with_file_name("prompt-presets.rsn");
         let fresh = !dir.exists();
@@ -69,7 +70,7 @@ impl PromptPresets {
             std::fs::rename(&old, old.with_extension("rsn.old")).at(&old)?;
         }
         let state_path = dir.join(STATE_FILE);
-        let state: UserState = if state_path.exists() { rsnfmt::read(&state_path)? } else { UserState::default() };
+        let mut state: UserState = if state_path.exists() { rsnfmt::read(&state_path)? } else { UserState::default() };
         let mut user = vec![];
         let mut bad = vec![];
         for task_dir in fsutil::subdirs(dir)? {
@@ -93,7 +94,12 @@ impl PromptPresets {
                 }
             }
         }
-        Ok((merge(&builtin(), &state, &user), bad))
+        let moved = split_old_style(&mut state, &mut user);
+        let list = merge(&builtin(), &state, &user);
+        if moved {
+            list.save_dir(dir)?;
+        }
+        Ok((list, bad))
     }
 
     /// Writes the presets into `dir` as changes to the built-in ones: a
@@ -207,12 +213,15 @@ pub struct Sweep {
     /// Makes the random pick repeatable (**Reroll** changes it).
     #[serde(skip_serializing_if = "is_zero")]
     pub random_seed: u64,
-    /// Ticked in the Presets window (source Selected).
+    /// Ticked in Choose styles (source Selected).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub selected: Vec<PresetKey>,
     /// Values for the presets' `{slot}`s, by slot (`{scene}` → `scene`).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub slots: std::collections::BTreeMap<String, String>,
+    /// Styles' own values for their slots, over `slots`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub style_slots: Vec<StyleSlots>,
     /// Taken out of the pick, each leaving the rest of it as it was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<Removed>,
@@ -225,6 +234,259 @@ pub struct Sweep {
     /// A model sweep's model presets, by name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// Prompt enhance's values for the blanks.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<BlankValues>,
+    /// **Suggest for blanks…** as last set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_ask: Option<BatchAsk>,
+    /// **Enhance style prompts…** as last set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enhance_ask: Option<EnhanceAsk>,
+    /// Styles' prompts enhanced or edited: used for their runs instead of
+    /// the one built from the template, the style and the values.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub style_prompts: Vec<StylePrompt>,
+}
+
+/// A style's prompt as prompt enhance or the user left it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StylePrompt {
+    pub preset: PresetKey,
+    pub prompt: String,
+    /// The prompt built when it was made: one built differently now was
+    /// made from older values.
+    pub from: String,
+    /// Prompt enhance's (perhaps edited since), else the user's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enhanced: bool,
+}
+
+/// The values prompt enhance offered for a blank: its shared value
+/// (`style` None) or a style's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlankValues {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<PresetKey>,
+    pub slot: String,
+    /// Shown to pick from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shown: Vec<String>,
+    /// Every one offered (rerolled ones too): asks avoid them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub offered: Vec<String>,
+    /// Its **Suggest…** as last set (None: as by default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask: Option<SuggestAsk>,
+}
+
+/// How many values an ask for a blank's suggests, unless told otherwise.
+pub const SUGGEST_COUNT: usize = 6;
+
+/// How prompt enhance is asked for a blank's values: **Suggest…**'s
+/// settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SuggestAsk {
+    /// Instructions sent with the ask ("only stones").
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub how: String,
+    pub count: usize,
+    /// None: the server's, as set in Settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<crate::pe::Sampling>,
+    /// Attach the reference and start images (with a vision server).
+    pub images: bool,
+    /// Name the values offered before, not to offer them again.
+    pub avoid: bool,
+    /// The answer replaces the values offered, rather than adding to them.
+    pub replace: bool,
+}
+
+impl Default for SuggestAsk {
+    fn default() -> Self {
+        SuggestAsk {
+            how: String::new(),
+            count: SUGGEST_COUNT,
+            sampling: None,
+            images: true,
+            avoid: true,
+            replace: false,
+        }
+    }
+}
+
+/// How prompt enhance is asked to improve styles' prompts: **Enhance
+/// style prompts…**'s settings, and the styles ticked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnhanceAsk {
+    /// Instructions sent with each ask ("more cinematic").
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub how: String,
+    /// Improve the prompt as the row shows it (an edit, an enhancement)
+    /// rather than the one built from the template and values.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub from_shown: bool,
+    /// None: the server's, as set in Settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<crate::pe::Sampling>,
+    /// Attach the reference and start images (with a vision server).
+    pub images: bool,
+    /// The longest answer, in tokens.
+    pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<PresetKey>,
+}
+
+impl Default for EnhanceAsk {
+    fn default() -> Self {
+        EnhanceAsk {
+            how: String::new(),
+            from_shown: false,
+            sampling: None,
+            images: true,
+            max_tokens: 400,
+            styles: vec![],
+        }
+    }
+}
+
+/// **Suggest for blanks…**: the settings each ask gets, and the shared
+/// blanks ticked (by slot).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatchAsk {
+    pub ask: SuggestAsk,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blanks: Vec<String>,
+}
+
+/// A style's own slot values in a sweep (an empty one: the shared value).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StyleSlots {
+    pub preset: PresetKey,
+    pub slots: std::collections::BTreeMap<String, String>,
+}
+
+impl Sweep {
+    /// The values offered for a blank, if any.
+    pub fn blank_values(&self, style: Option<&PresetKey>, slot: &str) -> Option<&BlankValues> {
+        self.suggestions.iter().find(|v| v.style.as_ref() == style && v.slot == slot)
+    }
+
+    /// Changes a blank's values offered (or its ask); an entry left empty
+    /// is dropped.
+    pub fn edit_blank_values(&mut self, style: Option<&PresetKey>, slot: &str, f: impl FnOnce(&mut BlankValues)) {
+        let i = match self.suggestions.iter().position(|v| v.style.as_ref() == style && v.slot == slot) {
+            Some(i) => i,
+            None => {
+                let v = BlankValues { style: style.cloned(), slot: slot.into(), ..Default::default() };
+                self.suggestions.push(v);
+                self.suggestions.len() - 1
+            }
+        };
+        f(&mut self.suggestions[i]);
+        let v = &self.suggestions[i];
+        if v.shown.is_empty() && v.offered.is_empty() && v.ask.is_none() {
+            self.suggestions.remove(i);
+        }
+    }
+
+    /// A style's own value for a slot (empty: none).
+    pub fn own_slot(&self, preset: &PresetKey, slot: &str) -> &str {
+        self.style_slots.iter().find(|s| s.preset == *preset).and_then(|s| s.slots.get(slot)).map_or("", String::as_str)
+    }
+
+    /// Sets (or with an empty value, clears) a style's own value for a slot.
+    pub fn set_own_slot(&mut self, preset: &PresetKey, slot: &str, value: String) {
+        let i = match self.style_slots.iter().position(|s| s.preset == *preset) {
+            Some(i) => i,
+            None => {
+                self.style_slots.push(StyleSlots { preset: preset.clone(), slots: Default::default() });
+                self.style_slots.len() - 1
+            }
+        };
+        if value.is_empty() {
+            self.style_slots[i].slots.remove(slot);
+        } else {
+            self.style_slots[i].slots.insert(slot.into(), value);
+        }
+        if self.style_slots[i].slots.is_empty() {
+            self.style_slots.remove(i);
+        }
+    }
+
+    /// A style's prompt enhanced or edited, if it has one.
+    pub fn style_prompt(&self, preset: &PresetKey) -> Option<&StylePrompt> {
+        self.style_prompts.iter().find(|s| s.preset == *preset)
+    }
+
+    /// Sets a style's prompt (None: back to the one built).
+    pub fn set_style_prompt(&mut self, preset: &PresetKey, p: Option<StylePrompt>) {
+        self.style_prompts.retain(|s| s.preset != *preset);
+        self.style_prompts.extend(p);
+    }
+
+    /// The texts the chosen styles' blanks come from: each preset's prompt
+    /// and, if it has one, the style's own (enhanced or edited, which can
+    /// add blanks of its own).
+    pub fn blank_texts<'a>(&'a self, chosen: &[(&'a PromptTask, &'a PromptPreset)]) -> Vec<&'a str> {
+        let mut v = vec![];
+        for (t, p) in chosen {
+            v.push(p.prompt.as_str());
+            if let Some(own) = self.style_prompt(&PresetKey { task: t.name.clone(), name: p.name.clone() }) {
+                v.push(own.prompt.as_str());
+            }
+        }
+        v
+    }
+
+    /// The prompt for a style's run: its own (enhanced or edited, any blank
+    /// left filled from the values), else the one built.
+    pub fn prompt_for(&self, template: &str, preset: &PresetKey, style: &str) -> String {
+        match self.style_prompt(preset) {
+            Some(own) => fill_slots(own.prompt.clone(), &self.slots_for(preset)),
+            None => sweep_prompt(template, style, &self.slots_for(preset)),
+        }
+    }
+
+    /// Styles' own slot values (kept from before style prompts) folded into
+    /// their prompts: each style with any gets its prompt as they built it,
+    /// an edit made from the shared values. The styles are (key, prompt).
+    pub fn fold_style_slots(&mut self, template: &str, styles: &[(PresetKey, &str)]) -> bool {
+        if self.style_slots.is_empty() {
+            return false;
+        }
+        let mut made = vec![];
+        for (key, style) in styles {
+            if self.style_slots.iter().any(|s| s.preset == *key) && self.style_prompt(key).is_none() {
+                made.push((key.clone(), sweep_prompt(template, style, &self.slots_for(key)), *style));
+            }
+        }
+        self.style_slots.clear();
+        for (key, prompt, style) in made {
+            let from = sweep_prompt(template, style, &self.slots);
+            if prompt != from {
+                self.style_prompts.push(StylePrompt { preset: key, prompt, from, enhanced: false });
+            }
+        }
+        true
+    }
+
+    /// The slot values for a style's run: its own, else the shared ones.
+    pub fn slots_for(&self, preset: &PresetKey) -> std::collections::BTreeMap<String, String> {
+        let mut m = self.slots.clone();
+        if let Some(own) = self.style_slots.iter().find(|s| s.preset == *preset) {
+            for (k, v) in &own.slots {
+                if !v.trim().is_empty() {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        m
+    }
 }
 
 /// What a sweep varies, run to run.
@@ -291,7 +553,7 @@ fn is_zero<T: Default + PartialEq>(v: &T) -> bool {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SweepSource {
-    /// The presets ticked in the Presets window.
+    /// The presets ticked in Choose styles (older drafts: the others).
     #[default]
     Selected,
     Favourites,
@@ -367,12 +629,14 @@ pub fn sweep_presets<'a>(list: &'a PromptPresets, sweep: &Sweep) -> Vec<(&'a Pro
     keep.into_iter().map(|i| v[i]).collect()
 }
 
-/// Which of these presets have this `{slot}` (name without braces).
+/// Which of these presets have this `{slot}` (name without braces), in
+/// their prompt or the style's own.
 pub fn needing_slot<'a>(
+    sweep: &Sweep,
     chosen: &[(&'a PromptTask, &'a PromptPreset)],
     slot: &str,
 ) -> Vec<(&'a PromptTask, &'a PromptPreset)> {
-    chosen.iter().filter(|(_, p)| slot_names([p.prompt.as_str()]).iter().any(|n| n == slot)).copied().collect()
+    chosen.iter().filter(|c| slot_names(sweep.blank_texts(&[**c])).iter().any(|n| n == slot)).copied().collect()
 }
 
 /// A sweep run's prompt: the preset's prompt at the template's `{preset}`
@@ -393,6 +657,20 @@ pub fn fill_slots(mut text: String, slots: &std::collections::BTreeMap<String, S
     text
 }
 
+/// The blanks `answer` has that `asked` didn't (names without braces).
+pub fn added_slots(asked: &str, answer: &str) -> Vec<String> {
+    let had = slot_names([asked]);
+    slot_names([answer]).into_iter().filter(|n| !had.contains(n)).collect()
+}
+
+/// These blanks made plain words: `{scrap_metal}` → `scrap metal`.
+pub fn unblank(mut text: String, names: &[String]) -> String {
+    for n in names {
+        text = text.replace(&format!("{{{n}}}"), &n.replace(['_', '-'], " "));
+    }
+    text
+}
+
 /// Where a sweep's template takes each preset's prompt.
 pub const PRESET_SLOT: &str = "{preset}";
 
@@ -409,6 +687,111 @@ pub fn slot_names<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         }
     }
     out
+}
+
+/// The built-in style tasks: Lazy ones have no `{slot}`, Effortful ones at
+/// least one, the Text ones one of [`TEXT_SLOTS`].
+pub const LAZY_STYLE: &str = "Lazy Modify Style";
+pub const EFFORTFUL_STYLE: &str = "Effortful Modify Style";
+pub const TEXT_STYLE: &str = "Effortful Modify Style — Text";
+const STYLE_TASKS: [&str; 3] = [LAZY_STYLE, EFFORTFUL_STYLE, TEXT_STYLE];
+
+/// The slots for words drawn in the image, by the part they play: any
+/// one makes a Text style.
+pub const TEXT_SLOTS: [&str; 7] = ["text", "title", "slogan", "name", "dialogue", "sound", "caption"];
+
+fn has_text_slot(names: &[String]) -> bool {
+    names.iter().any(|n| TEXT_SLOTS.contains(&n.as_str()))
+}
+
+/// The one task the style tasks were split from.
+const OLD_STYLE: &str = "Modify style";
+
+/// Why a preset with this prompt can't be in this task (a style task's
+/// rule for `{slot}`s), if it can't.
+pub fn slot_rule(task: &str, prompt: &str) -> Option<&'static str> {
+    let names = slot_names([prompt]);
+    match task {
+        LAZY_STYLE if !names.is_empty() => Some("can't have a {slot}: put it in Effortful Modify Style"),
+        EFFORTFUL_STYLE if names.is_empty() => Some("needs a {slot} for the user to fill in"),
+        TEXT_STYLE if !has_text_slot(&names) => {
+            Some("needs a slot for its words: {text}, {title}, {slogan}, {name}, {dialogue}, {sound} or {caption}")
+        }
+        _ => None,
+    }
+}
+
+/// The style task an old Modify style preset with this prompt goes to.
+fn style_task_for(prompt: &str) -> &'static str {
+    let names = slot_names([prompt]);
+    if has_text_slot(&names) {
+        TEXT_STYLE
+    } else if names.is_empty() {
+        LAZY_STYLE
+    } else {
+        EFFORTFUL_STYLE
+    }
+}
+
+/// `key` with its task as it is since Modify style was split: the style
+/// task of `list` that has a preset of its name, else Lazy.
+pub fn current_key(key: &PresetKey, list: &PromptPresets) -> PresetKey {
+    if key.task != OLD_STYLE {
+        return key.clone();
+    }
+    let task = STYLE_TASKS
+        .into_iter()
+        .find(|t| list.tasks.iter().any(|x| x.name == *t && x.presets.iter().any(|p| p.name == key.name)))
+        .unwrap_or(LAZY_STYLE);
+    PresetKey { task: task.into(), name: key.name.clone() }
+}
+
+impl Sweep {
+    /// The sweep with Modify style's presets in the style tasks (see
+    /// [`current_key`]); a source of the whole task or a group becomes
+    /// Lazy's.
+    pub fn current(&self, list: &PromptPresets) -> Sweep {
+        let mut s = self.clone();
+        for k in &mut s.selected {
+            *k = current_key(k, list);
+        }
+        for r in &mut s.removed {
+            r.preset = current_key(&r.preset, list);
+        }
+        match &mut s.source {
+            SweepSource::Task(t) | SweepSource::Group(t, _) if t == OLD_STYLE => *t = LAZY_STYLE.into(),
+            _ => {}
+        }
+        s
+    }
+}
+
+/// Moves what the user had in Modify style into the style tasks: each
+/// preset by its slots ([`style_task_for`]), favourites and deletions with
+/// their preset, a changed description to Lazy. Whether anything moved.
+fn split_old_style(state: &mut UserState, user: &mut [(String, PromptPreset)]) -> bool {
+    let mut moved = false;
+    for (task, p) in user.iter_mut() {
+        if task == OLD_STYLE {
+            *task = style_task_for(&p.prompt).into();
+            moved = true;
+        }
+    }
+    let defaults = builtin();
+    for k in state.favourites.iter_mut().chain(&mut state.hidden) {
+        if k.task == OLD_STYLE {
+            let mine = user.iter().find(|(t, p)| STYLE_TASKS.contains(&t.as_str()) && p.name == k.name);
+            k.task = mine.map_or_else(|| current_key(k, &defaults).task, |(t, _)| t.clone());
+            moved = true;
+        }
+    }
+    for t in &mut state.tasks {
+        if t.name == OLD_STYLE {
+            t.name = LAZY_STYLE.into();
+            moved = true;
+        }
+    }
+    moved
 }
 
 const DEFAULTS: &str = include_str!("../default-presets.rsn");
@@ -586,7 +969,7 @@ mod tests {
     #[test]
     fn voxel_asks_for_3d_and_not_pixel_art() {
         let b = builtin();
-        let modify = b.tasks.iter().find(|t| t.name == "Modify style").unwrap();
+        let modify = b.tasks.iter().find(|t| t.name == LAZY_STYLE).unwrap();
         let voxel = modify.presets.iter().find(|p| p.name == "Voxel").unwrap();
         assert!(voxel.prompt.contains("3D voxel render") && !voxel.prompt.contains("isometric"));
         assert!(voxel.prompt.ends_with("Keep the subject, pose and identity unchanged."), "the camera may change");
@@ -602,14 +985,26 @@ mod tests {
     }
 
     #[test]
+    fn added_blanks_made_words() {
+        let added = added_slots("a {material} cat", "a {material} cat on a {scrap_metal} {pole}");
+        assert_eq!(added, ["scrap_metal", "pole"]);
+        assert_eq!(
+            unblank("on a {scrap_metal} {pole}, {material}".into(), &added),
+            "on a scrap metal pole, {material}"
+        );
+    }
+
+    #[test]
     fn builtin_set() {
         let p = builtin();
-        assert_eq!(p.tasks.len(), 9);
-        assert!(p.count() >= 90, "{}", p.count());
-        assert_eq!(p.tasks[0].presets.len(), 69);
+        assert_eq!(p.tasks.len(), 11);
+        assert!(p.count() >= 160, "{}", p.count());
+        let names: Vec<_> = p.tasks.iter().take(3).map(|t| (t.name.as_str(), t.presets.len())).collect();
+        assert_eq!(names, [(LAZY_STYLE, 68), (EFFORTFUL_STYLE, 53), (TEXT_STYLE, 46)]);
         for t in &p.tasks {
             for x in &t.presets {
                 assert!(!x.description.is_empty() && x.prompt.contains("<image1>"), "{}", x.name);
+                assert_eq!(slot_rule(&t.name, &x.prompt), None, "{}", x.name);
             }
         }
     }
@@ -625,8 +1020,7 @@ mod tests {
     #[test]
     fn sweeps_pick_and_fill() {
         let list = builtin();
-        let mut sw =
-            Sweep { source: SweepSource::Group("Modify style".into(), "3D & craft".into()), ..Default::default() };
+        let mut sw = Sweep { source: SweepSource::Group(LAZY_STYLE.into(), "3D & craft".into()), ..Default::default() };
         let names = |sw: &Sweep| sweep_presets(&list, sw).iter().map(|(_, p)| p.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&sw).len(), 18);
         sw.random = 4;
@@ -652,10 +1046,13 @@ mod tests {
 
     #[test]
     fn sweep_removals_keep_the_rest() {
-        let list = builtin();
-        let key = |n: &str| PresetKey { task: "Modify style".into(), name: n.into() };
+        // a user's preset with a slot among Lazy's
+        let mut list = builtin();
+        let de = list.tasks[1].presets.iter().find(|p| p.name == "Double exposure").unwrap().clone();
+        list.tasks[0].presets.push(de);
+        let key = |n: &str| PresetKey { task: LAZY_STYLE.into(), name: n.into() };
         let names = |sw: &Sweep| sweep_presets(&list, sw).iter().map(|(_, p)| p.name.clone()).collect::<Vec<_>>();
-        let mut sw = Sweep { source: SweepSource::Task("Modify style".into()), random: 10, ..Default::default() };
+        let mut sw = Sweep { source: SweepSource::Task(LAZY_STYLE.into()), random: 10, ..Default::default() };
         // a seed whose pick has Double exposure
         while !names(&sw).iter().any(|n| n == "Double exposure") {
             sw.random_seed += 1;
@@ -677,8 +1074,17 @@ mod tests {
         sw.random = 0;
         assert_eq!(names(&sw).len(), 68, "all but the removed one");
         let chosen = sweep_presets(&list, &Sweep { removed: vec![], ..sw.clone() });
-        let need = needing_slot(&chosen, "scene");
+        let need = needing_slot(&sw, &chosen, "backdrop");
         assert_eq!(need.iter().map(|(_, p)| p.name.as_str()).collect::<Vec<_>>(), ["Double exposure"]);
+
+        // a style's own prompt can bring a blank its preset doesn't have
+        let (t, p) = chosen[0];
+        let key = PresetKey { task: t.name.clone(), name: p.name.clone() };
+        let own = StylePrompt { preset: key, prompt: "a {metal} subject".into(), from: String::new(), enhanced: true };
+        sw.set_style_prompt(&own.preset.clone(), Some(own));
+        assert!(slot_names(sw.blank_texts(&chosen)).contains(&"metal".to_string()));
+        let need = needing_slot(&sw, &chosen, "metal");
+        assert_eq!(need.iter().map(|(_, p)| p.name.as_str()).collect::<Vec<_>>(), [p.name.as_str()]);
     }
 
     #[test]
@@ -725,15 +1131,15 @@ mod tests {
         assert_eq!(modify[at("Mine: v1")].group, "3D & craft");
         assert_eq!(modify[at("Mine: v1") - 1].group, "3D & craft", "after its group's others");
         assert_eq!(back.tasks.last().unwrap().name, "Odd / task");
-        assert!(folder.join("Modify style/3D & craft/Mine- v1.rsn").is_file());
-        assert!(folder.join("Modify style/3D & craft/Claymation.rsn").is_file());
+        assert!(folder.join("Lazy Modify Style/3D & craft/Mine- v1.rsn").is_file());
+        assert!(folder.join("Lazy Modify Style/3D & craft/Claymation.rsn").is_file());
 
         // a file dropped in by hand: task and group from its folders; one
         // that doesn't load is reported and kept
-        let drop = folder.join("Modify style/Pasta/Fusilli.rsn");
+        let drop = folder.join("Lazy Modify Style/Pasta/Fusilli.rsn");
         std::fs::create_dir_all(drop.parent().unwrap()).unwrap();
         std::fs::write(&drop, "PromptPreset { name: \"Fusilli\", prompt: \"twirls\" }\n").unwrap();
-        std::fs::write(folder.join("Modify style/broken.rsn"), "nope").unwrap();
+        std::fs::write(folder.join("Lazy Modify Style/broken.rsn"), "nope").unwrap();
         let (back, bad) = PromptPresets::load_dir(&folder).unwrap();
         assert_eq!(bad.len(), 1);
         let f = back.tasks[0].presets.iter().find(|x| x.name == "Fusilli").unwrap();
@@ -742,8 +1148,68 @@ mod tests {
         // back to the defaults: only the copy and the broken file are left
         builtin().save_dir(&folder).unwrap();
         assert_eq!(PromptPresets::load_dir(&folder).unwrap().0, builtin());
-        assert!(folder.join("Modify style/broken.rsn").is_file());
-        assert!(!folder.join(STATE_FILE).exists() && !folder.join("Modify style/Pasta").exists());
+        assert!(folder.join("Lazy Modify Style/broken.rsn").is_file());
+        assert!(!folder.join(STATE_FILE).exists() && !folder.join("Lazy Modify Style/Pasta").exists());
+    }
+
+    #[test]
+    fn modify_style_splits_into_the_style_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = PromptPresets::dir_beside(&dir.path().join("config.rsn"));
+        std::fs::create_dir_all(folder.join("Modify style/Mine")).unwrap();
+        let file = |name: &str, prompt: &str| {
+            let text = format!("PromptPreset {{ name: \"{name}\", prompt: \"{prompt}\" }}\n");
+            std::fs::write(folder.join(format!("Modify style/Mine/{name}.rsn")), text).unwrap();
+        };
+        file("Plain", "Convert <image1> into felt.");
+        file("Slotted", "Transform <image1> into {material}.");
+        file("Lettered", "Transform <image1> into a sign saying {text}.");
+        let old = |n: &str| PresetKey { task: OLD_STYLE.into(), name: n.into() };
+        let state = UserState {
+            favourites: vec![old("Claymation"), old("Double exposure"), old("Slotted")],
+            hidden: vec![old("Voxel")],
+            tasks: vec![],
+        };
+        rsnfmt::write(&folder.join(STATE_FILE), &state).unwrap();
+
+        let (p, bad) = PromptPresets::load_dir(&folder).unwrap();
+        assert!(bad.is_empty(), "{bad:?}");
+        let task_of = |n: &str| p.tasks.iter().find(|t| t.presets.iter().any(|x| x.name == n)).unwrap();
+        assert_eq!(task_of("Plain").name, LAZY_STYLE);
+        assert_eq!(task_of("Slotted").name, EFFORTFUL_STYLE);
+        assert_eq!(task_of("Lettered").name, TEXT_STYLE);
+        assert!(!p.tasks.iter().any(|t| t.name == OLD_STYLE));
+        let fav = |n: &str| task_of(n).presets.iter().find(|x| x.name == n).unwrap().favourite;
+        assert!(fav("Claymation") && fav("Double exposure") && fav("Slotted"));
+        assert_eq!(task_of("Double exposure").name, EFFORTFUL_STYLE);
+        assert!(!p.tasks[0].presets.iter().any(|x| x.name == "Voxel"));
+
+        // saved where they now are, and loaded the same again
+        assert!(!folder.join(OLD_STYLE).exists());
+        assert!(folder.join("Effortful Modify Style/Mine/Slotted.rsn").is_file());
+        assert_eq!(PromptPresets::load_dir(&folder).unwrap().0, p);
+
+        let sw = Sweep {
+            source: SweepSource::Group(OLD_STYLE.into(), "Photo & film".into()),
+            selected: vec![old("Claymation"), old("Double exposure"), old("Lettered")],
+            ..Default::default()
+        };
+        let sw = sw.current(&p);
+        assert_eq!(sw.source, SweepSource::Group(LAZY_STYLE.into(), "Photo & film".into()));
+        let tasks: Vec<_> = sw.selected.iter().map(|k| k.task.as_str()).collect();
+        assert_eq!(tasks, [LAZY_STYLE, EFFORTFUL_STYLE, TEXT_STYLE]);
+    }
+
+    #[test]
+    fn style_tasks_keep_their_slot_rules() {
+        assert_eq!(slot_rule(LAZY_STYLE, "a {preset} b"), None);
+        assert!(slot_rule(LAZY_STYLE, "in {scene}").is_some());
+        assert!(slot_rule(EFFORTFUL_STYLE, "plain").is_some());
+        assert_eq!(slot_rule(EFFORTFUL_STYLE, "in {scene}"), None);
+        assert!(slot_rule(TEXT_STYLE, "in {scene}").is_some());
+        assert_eq!(slot_rule(TEXT_STYLE, "says {text}"), None);
+        assert_eq!(slot_rule(TEXT_STYLE, "says {dialogue} in {place}"), None);
+        assert_eq!(slot_rule("Remove background", "anything {x}"), None);
     }
 
     #[test]

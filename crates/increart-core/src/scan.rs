@@ -106,6 +106,13 @@ impl ProjectEntry {
     pub fn name(&self) -> String {
         self.dir.file_name().unwrap_or_default().to_string_lossy().into_owned()
     }
+
+    /// When it last ran: its newest revision (seeds queued), else when it
+    /// was created.
+    pub fn last_run(&self) -> crate::id::Timestamp {
+        let revs = self.runs.iter().flat_map(|r| &r.revisions).map(|r| r.created);
+        revs.chain([self.project.created]).max().unwrap_or(self.project.created)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

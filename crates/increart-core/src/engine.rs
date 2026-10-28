@@ -433,9 +433,9 @@ impl Coordinator {
     fn queue(&mut self, run_id: &Id) {
         let found = {
             let lib = self.lib();
-            lib.find_run(run_id).and_then(|(_, run)| Ok((run, lib.pending_seeds(run_id)?)))
+            lib.find_run(run_id).and_then(|found| Ok((found, lib.pending_seeds(run_id)?)))
         };
-        let (run, pending) = match found {
+        let ((project, run), pending) = match found {
             Ok(x) => x,
             Err(e) => return self.emit(Event::Problem(format!("can't queue run {run_id}: {e}"))),
         };
@@ -445,8 +445,13 @@ impl Coordinator {
         }
         let fresh: Vec<_> = pending.into_iter().filter(|(_, s)| !queued.contains(s)).collect();
         let model = ModelKey::from(&run.model);
+        // a sweep's runs go together (sweep labels are unique per project)
+        let group = run.sweep.as_ref().map(|t| format!("{}/{}", project.display(), t.name));
         self.runs.insert(run_id.clone(), run);
         self.sched.set_pending(run_id, model, fresh);
+        if let Some(g) = group {
+            self.sched.set_group(run_id, g);
+        }
         self.check_done(run_id);
     }
 

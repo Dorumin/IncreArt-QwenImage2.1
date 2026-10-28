@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, RichText};
 use increart_core::Tree;
-use increart_gui_core::{AppState, Msg, OutputSource, ReviewRun, Tab, counts};
+use increart_gui_core::{AppState, Msg, OutputSource, ProjectsTab, ReviewRun, Tab, counts};
 
 use crate::widgets::{ACCENT, BAD, drag_source, drop_target, focus_until_done, ic, ph};
 
@@ -202,7 +202,7 @@ pub fn projects(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     /// Collapsed folders hide what they hold, except while searching.
     fn rec(ui: &mut egui::Ui, st: &AppState, parent: &Path, q: &str, out: &mut Vec<Msg>) {
         let depth = parent.components().count() as f32 + 1.0;
-        for f in children(&st.index.project_folders, parent) {
+        for f in st.project_folder_children(parent) {
             if !q.is_empty() && !folder_matches(st, f, q) {
                 continue;
             }
@@ -288,6 +288,12 @@ pub fn projects(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                     out.push(Msg::SelectProject(p.project.id.clone()));
                 }
                 r.context_menu(|ui| {
+                    if ui.button(ic(ph::MAGIC_WAND, "Generate")).on_hover_text("its Generate tab").clicked() {
+                        out.push(Msg::SelectProject(p.project.id.clone()));
+                        out.push(Msg::Tab(Tab::Projects));
+                        out.push(Msg::ProjectsTab(ProjectsTab::Generate));
+                        ui.close();
+                    }
                     if crate::review::show_outputs_button(ui, st, OutputSource::Project(p.project.id.clone()), out) {
                         ui.close();
                     }

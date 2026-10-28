@@ -18,6 +18,7 @@ fn kind_label(k: &HistoryKind) -> (String, Color32) {
         HistoryKind::BeforeRetag => ("before tag update".into(), Color32::from_rgb(200, 170, 70)),
         HistoryKind::BeforePreset => ("before preset".into(), Color32::from_rgb(200, 170, 70)),
         HistoryKind::Saved => ("saved".into(), GOOD),
+        HistoryKind::BeforeRewrite => ("before rewrite".into(), Color32::from_rgb(200, 170, 70)),
     }
 }
 

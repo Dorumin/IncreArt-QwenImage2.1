@@ -46,11 +46,20 @@ pub fn copy_image(ctx: &egui::Context, root: &Path, img: &increart_core::ImageRe
     });
 }
 
-/// The "Copy image" menu item, for any image's right-click menu.
-pub fn copy_image_item(ui: &mut egui::Ui, root: &Path, img: &increart_core::ImageRef, out: &mut Vec<Msg>) {
+/// The "Copy image" and "Describe with PE…" menu items, for any image's
+/// right-click menu.
+pub fn image_menu_items(ui: &mut egui::Ui, root: &Path, img: &increart_core::ImageRef, out: &mut Vec<Msg>) {
     if ui.button(ic(ph::COPY, "Copy image")).on_hover_text("to the clipboard, full size").clicked() {
         copy_image(ui.ctx(), root, img);
         out.push(Msg::Info("Image copied to the clipboard".into()));
+        ui.close();
+    }
+    if ui
+        .button(ic(ph::MAGIC_WAND, "Describe with PE…"))
+        .on_hover_text("the prompt-enhance server describes it as a prompt")
+        .clicked()
+    {
+        out.push(Msg::PeRewrite(increart_gui_core::PeTarget::Describe(img.clone())));
         ui.close();
     }
 }
@@ -275,21 +284,50 @@ pub fn verdict_color(v: Option<increart_core::Verdict>) -> Color32 {
     }
 }
 
-/// The tab bar's **Details** toggle, at its right end: shows or hides the
-/// tab's right-side panel.
+/// One unit of a wrapping row (`horizontal_wrapped`): it goes to the next
+/// line whole when it doesn't fit (by its width last frame), so a label
+/// stays with its control.
+pub fn group<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let id = ui.scope_id().with(("group", id));
+    let width = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let at_start = ui.cursor().min.x <= ui.max_rect().min.x + 1.0;
+    if !at_start && width > ui.available_size_before_wrap().x {
+        ui.end_row();
+    }
+    let r = ui.horizontal(|ui| {
+        let inner = add(ui);
+        (inner, ui.min_rect().width())
+    });
+    let (inner, w) = r.inner;
+    ui.ctx().data_mut(|d| d.insert_temp(id, w));
+    inner
+}
+
+/// The last unit of a wrapping row: at the right edge while it fits on
+/// the line, else on the next line like the others.
+pub fn right_group<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let key = ui.scope_id().with(("group", id));
+    let width = ui.ctx().data(|d| d.get_temp::<f32>(key)).unwrap_or(0.0);
+    let room = ui.available_size_before_wrap().x - ui.spacing().item_spacing.x;
+    if width > 0.0 && width <= room {
+        ui.add_space(room - width);
+    }
+    group(ui, id, add)
+}
+
+/// The tab bar's **Details** toggle (put it in the bar's
+/// [`right_group`]): shows or hides the tab's right-side panel.
 pub fn details_toggle(
     ui: &mut egui::Ui,
     st: &increart_gui_core::AppState,
     panel: increart_gui_core::InfoPanel,
     out: &mut Vec<increart_gui_core::Msg>,
 ) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let on = !st.info_hidden.contains(&panel);
-        let tip = if on { "hide the details panel on the right" } else { "show the details panel on the right" };
-        if ui.selectable_label(on, ic(ph::INFO, "Details")).on_hover_text(tip).clicked() {
-            out.push(increart_gui_core::Msg::ShowInfo(panel, !on));
-        }
-    });
+    let on = !st.info_hidden.contains(&panel);
+    let tip = if on { "hide the details panel on the right" } else { "show the details panel on the right" };
+    if ui.selectable_label(on, ic(ph::INFO, "Details")).on_hover_text(tip).clicked() {
+        out.push(increart_gui_core::Msg::ShowInfo(panel, !on));
+    }
 }
 
 /// A details panel's placeholder while nothing is selected.
@@ -297,6 +335,19 @@ pub fn nothing_selected(ui: &mut egui::Ui, title: &str, text: &str) {
     ui.label(egui::RichText::new(title).strong());
     ui.add_space(6.0);
     ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
+}
+
+/// "2026-10-21 11:00 UTC · 6 days ago".
+pub fn when(t: increart_core::id::Timestamp) -> String {
+    let secs = (increart_core::id::now() - t).num_seconds().max(0);
+    let ago = match secs {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{} min ago", secs / 60),
+        3600..86_400 => format!("{} h ago", secs / 3600),
+        86_400..172_800 => "yesterday".to_string(),
+        _ => format!("{} days ago", secs / 86_400),
+    };
+    format!("{} · {ago}", t.format("%Y-%m-%d %H:%M UTC"))
 }
 
 #[cfg(test)]

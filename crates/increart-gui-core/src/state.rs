@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use increart_core::HistoryKey;
-use increart_core::config::{Config, RecipePreset, Resolution, ServerPreset};
+use increart_core::config::{Config, RecipePreset, Resolution, ServerConfig, ServerPreset, TreeOrder};
 use increart_core::history::{HistoryEntry, HistoryKind};
 use increart_core::id::Timestamp;
 use increart_core::model::IdeaSource;
 use increart_core::model::{GenerateDraft, GenerateImage, IdeaDraftFile};
 use increart_core::model::{Recipe, SourceInfo};
-use increart_core::prompts::{PromptPreset, PromptPresets, Sweep};
+use increart_core::prompts::{PromptPreset, PromptPresets, SuggestAsk, Sweep};
 use increart_core::scan::{IdeaEntry, OutputLink, ProjectEntry};
 use increart_core::{Id, IdeaLoc, ImageRef, Index, Tree, Verdict};
 
@@ -70,6 +70,8 @@ pub enum InfoPanel {
     Library,
     /// The Output library's selected image (its lineage).
     Output,
+    /// Review Grid's current image.
+    Review,
 }
 
 /// Where an idea came from, as the Idea inbox's source filter groups it.
@@ -930,11 +932,35 @@ pub const SHEET_CELL_MIN: u32 = 64;
 pub const SHEET_CELL_DEFAULT: u32 = 128;
 pub const SHEET_CELL_MAX: u32 = increart_core::thumbs::SIZE;
 
+/// An image grid with its own zoom (the contact sheet has its own).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoomGrid {
+    Review,
+    Output,
+    /// The Input library's idea cards (their width).
+    Library,
+}
+
+/// The image grids' tile sizes (points): smaller can't be judged, larger
+/// than the thumbnails would blur.
+pub const GRID_CELL_MIN: u32 = 96;
+pub const GRID_CELL_MAX: u32 = increart_core::thumbs::SIZE;
+
+impl ZoomGrid {
+    pub fn default_size(self) -> u32 {
+        match self {
+            ZoomGrid::Review => 200,
+            ZoomGrid::Output => 180,
+            ZoomGrid::Library => 210,
+        }
+    }
+}
+
 /// The interface zoom (percent): its range, and the step of the status
 /// bar's buttons and Ctrl + / Ctrl −.
 pub const UI_ZOOM_MIN: u32 = 70;
 pub const UI_ZOOM_MAX: u32 = 300;
-pub const UI_ZOOM_STEP: u32 = 10;
+pub const UI_ZOOM_STEP: u32 = 5;
 
 /// A sweep as a table (Review → Sheet): rows in run order, columns the
 /// seeds of any of its runs.
@@ -1038,6 +1064,14 @@ pub struct ServerDialog {
     pub settings: bool,
     /// Why the command line's `--servers` didn't skip this screen.
     pub notice: Option<String>,
+    /// The **Continue without servers** dialog.
+    pub without: Option<Box<Without>>,
+}
+
+/// **Continue without servers**: the chat server to use meanwhile, if any.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Without {
+    pub chat: Option<increart_core::pe::PeServer>,
 }
 
 /// The command line's choice for the servers screen, applied (if valid)
@@ -1261,22 +1295,475 @@ pub struct PresetsPanel {
     pub search: String,
 }
 
+/// Prompt enhance: the server's state and what it suggested.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeState {
+    /// The chat server in use: the open preset's, or the one picked to
+    /// continue without sd-servers.
+    pub server: Option<increart_core::pe::PeServer>,
+    pub status: PeStatus,
+    /// Blanks asked to reroll: their answer replaces the values offered,
+    /// rather than adding to them.
+    pub rerolls: BTreeSet<BlankKey>,
+    /// Blanks asked avoiding the values offered before: their answer drops
+    /// any the server offers again.
+    pub avoiding: BTreeSet<BlankKey>,
+    /// The **Suggest…** dialog, for one blank.
+    pub suggest: Option<SuggestDialog>,
+    /// The **Suggest for blanks…** dialog, for the shared blanks ticked.
+    pub batch_suggest: Option<BatchSuggest>,
+    /// The **Prompt enhance settings** window.
+    pub editor: Option<PeEditor>,
+    /// The **Enhance style prompts…** dialog: its settings and the styles
+    /// ticked.
+    pub style_dialog: Option<increart_core::prompts::EnhanceAsk>,
+    /// Styles waiting for an answer: how asked, what was sent to improve,
+    /// and how many times asked again after an empty or unchanged answer.
+    pub style_tries: BTreeMap<increart_core::prompts::PresetKey, StyleTry>,
+    /// Styles whose asks failed even when asked again, and why (until asked
+    /// again).
+    pub style_failed: BTreeMap<increart_core::prompts::PresetKey, String>,
+    /// The prompt built for each style asked, when asked: what its answer
+    /// was made from.
+    pub style_from: BTreeMap<increart_core::prompts::PresetKey, String>,
+    /// Styles asked for since none were waiting (for "4 of 6").
+    pub style_batch: usize,
+    /// Blanks prompt enhance added to styles' prompts this batch (names
+    /// without braces), asked about when the batch ends.
+    pub added_blanks: Vec<(increart_core::prompts::PresetKey, Vec<String>)>,
+    /// The batch ended with blanks added: keep them, or make them words?
+    pub added_blanks_ask: bool,
+    /// The GPUs listed for it (`vulkaninfo`), once asked.
+    pub gpus: Option<Result<Vec<(u32, String)>, String>>,
+    /// The asks not answered yet, in the order they're worked on (the
+    /// first is the one being worked on, unless it's still queued).
+    pub jobs: Vec<PeJobState>,
+    /// The rewrite / describe window.
+    pub text: Option<PeText>,
+    /// Counts asks: each has its own number.
+    pub asks: u64,
+    /// Blanks asked for since none were waiting (for "5 of 13").
+    pub blank_batch: usize,
+    /// Blanks waiting for an answer: the settings asked with, and how many
+    /// times asked again after an answer with nothing new.
+    pub blank_tries: BTreeMap<BlankKey, BlankTry>,
+    /// Blanks that got nothing new even when asked again, and why (until
+    /// asked again).
+    pub blank_failed: BTreeMap<BlankKey, String>,
+    /// When the server started starting (`now`).
+    pub starting_since: f64,
+    /// How long the model took to load, last time.
+    pub last_load: Option<f64>,
+    /// How long the server took to read an ask before writing, last time,
+    /// by the number of images it had.
+    pub read_times: BTreeMap<usize, f64>,
+}
+
+impl PeState {
+    /// The ask for a blank, if it's waiting.
+    pub fn blank_job(&self, key: &BlankKey) -> Option<&PeJobState> {
+        self.jobs.iter().find(|j| matches!(&j.key, PeKey::Blank(k) if k == key))
+    }
+
+    pub fn job(&self, id: u64) -> Option<&PeJobState> {
+        self.jobs.iter().find(|j| j.id == id)
+    }
+
+    /// How many asks are ahead of this one.
+    pub fn ahead(&self, id: u64) -> usize {
+        self.jobs.iter().position(|j| j.id == id).unwrap_or(0)
+    }
+
+    /// How many times a blank waiting has been asked again.
+    pub fn blank_retry(&self, key: &BlankKey) -> u8 {
+        self.blank_tries.get(key).map_or(0, |t| t.retry)
+    }
+
+    pub fn blanks_waiting(&self) -> usize {
+        self.jobs.iter().filter(|j| matches!(j.key, PeKey::Blank(_))).count()
+    }
+
+    /// The ask for a style's prompt, if it's waiting.
+    pub fn style_job(&self, key: &increart_core::prompts::PresetKey) -> Option<&PeJobState> {
+        self.jobs.iter().find(|j| matches!(&j.key, PeKey::Style(k) if k == key))
+    }
+
+    pub fn styles_waiting(&self) -> usize {
+        self.jobs.iter().filter(|j| matches!(j.key, PeKey::Style(_))).count()
+    }
+
+    /// The asks waiting, a batch per kind (Jobs): suggesting values for
+    /// blanks, enhancing styles' prompts, the rewrite window's ask; in the
+    /// order their first ask is worked on.
+    pub fn batches(&self) -> Vec<PeBatch> {
+        let mut out: Vec<PeBatch> = vec![];
+        for j in &self.jobs {
+            let kind = match &j.key {
+                PeKey::Blank(_) => PeBatchKind::Blanks,
+                PeKey::Style(_) => PeBatchKind::Styles,
+                PeKey::Text(_) => match &self.text {
+                    Some(t) => PeBatchKind::Text(t.target.clone()),
+                    None => continue,
+                },
+            };
+            match out.iter_mut().find(|b| b.kind == kind) {
+                Some(b) => b.ids.push(j.id),
+                None => out.push(PeBatch { kind, ids: vec![j.id], total: 0 }),
+            }
+        }
+        for b in &mut out {
+            let asked = match b.kind {
+                PeBatchKind::Blanks => self.blank_batch,
+                PeBatchKind::Styles => self.style_batch,
+                PeBatchKind::Text(_) => 0,
+            };
+            b.total = asked.max(b.ids.len());
+        }
+        out
+    }
+}
+
+/// What a batch of prompt-enhance asks is for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PeBatchKind {
+    /// Values for the Generate form's blanks (its project's).
+    Blanks,
+    /// The Generate form's sweep styles' prompts.
+    Styles,
+    /// The rewrite / describe window's ask.
+    Text(PeTarget),
+}
+
+/// Asks of one kind waiting: `ids` in the order they're worked on, `total`
+/// asked since none of the kind were waiting ("4 of 41": the first is
+/// number `total - ids.len() + 1`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeBatch {
+    pub kind: PeBatchKind,
+    pub ids: Vec<u64>,
+    pub total: usize,
+}
+
+impl PeBatch {
+    /// The number of the ask being worked on, from 1.
+    pub fn at(&self) -> usize {
+        self.total - self.ids.len() + 1
+    }
+}
+
+/// An ask waiting for its answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeJobState {
+    pub id: u64,
+    pub key: PeKey,
+    pub step: PeStep,
+    /// When it was asked (`now`).
+    pub asked: f64,
+    /// When its step began.
+    pub since: f64,
+    /// Tokens a second while writing, and when worked out: kept for half a
+    /// second so the figure can be read.
+    pub rate: Option<(f64, f64)>,
+}
+
+/// Where an ask is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PeStep {
+    /// Waiting behind others (or for the server to start).
+    Queued,
+    /// Scaling its images.
+    Preparing,
+    /// Sent: the server reads the prompt and images before writing.
+    Reading { images: usize },
+    /// The answer so far (`pieces`: about one per token).
+    Writing { pieces: u32, text: String },
+}
+
+/// What a PE answer is for.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PeKey {
+    Blank(BlankKey),
+    /// A sweep style's prompt, improved.
+    Style(increart_core::prompts::PresetKey),
+    /// The rewrite / describe window's ask, by number.
+    Text(u64),
+}
+
+/// The text a rewrite is of, or the image described.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PeTarget {
+    /// The Generate prompt.
+    Prompt,
+    /// The New idea form's text.
+    NewIdea,
+    /// An idea's text (Edit idea).
+    Idea(Id),
+    Describe(ImageRef),
+}
+
+/// The rewrite / describe window: the original, the answer to look over
+/// (and edit), and instructions for another try.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeText {
+    pub target: PeTarget,
+    /// The text rewritten (empty when describing).
+    pub original: String,
+    /// The user's instructions ("more cinematic, keep it short").
+    pub how: String,
+    /// The answer, as edited; empty until it comes.
+    pub text: String,
+    /// The answer as it came, to tell an edit from it.
+    pub answer: String,
+    /// The ask waiting for its answer (its number).
+    pub waiting: Option<u64>,
+    pub error: Option<String>,
+    /// How many images went with the ask.
+    pub images: usize,
+}
+
+impl PeText {
+    /// The server and system prompt the answer came from, for a variant.
+    pub fn origin(
+        server: &increart_core::pe::PeServer,
+        pe: &increart_core::pe::PeConfig,
+        describe: bool,
+    ) -> increart_core::model::VariantOrigin {
+        use increart_core::pe::{DESCRIBE, REWRITE, prompt_hash};
+        let job = if describe { DESCRIBE } else { REWRITE };
+        increart_core::model::VariantOrigin::Rewritten {
+            model: server.name.clone(),
+            system_prompt_hash: prompt_hash(pe.system_prompt(job)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PeStatus {
+    /// Not started (or not set up).
+    #[default]
+    Off,
+    /// Starting the server (loading the model).
+    Starting,
+    Ready,
+    Failed(String),
+}
+
+impl AppState {
+    /// The values prompt enhance offered for a blank of the Generate sweep,
+    /// to pick from (saved with the project's draft).
+    pub fn blank_shown(&self, key: &BlankKey) -> Option<&Vec<String>> {
+        let v = self.generate.sweep.blank_values(key.style.as_ref(), &key.slot)?;
+        Some(&v.shown).filter(|s| !s.is_empty())
+    }
+
+    /// **Suggest for blanks…**'s **Tick only** sets among the shared blanks
+    /// `names`: (fewer than `count` suggestions showing, no value, failed).
+    pub fn batch_picks(&self, names: &[String], count: usize) -> [Vec<String>; 3] {
+        let key = |n: &String| BlankKey { style: None, slot: n.clone() };
+        let pick = |f: &dyn Fn(&String) -> bool| names.iter().filter(|n| f(n)).cloned().collect::<Vec<_>>();
+        [
+            pick(&|n| self.blank_shown(&key(n)).map_or(0, |v| v.len()) < count),
+            pick(&|n| self.generate.sweep.slots.get(n).is_none_or(|v| v.trim().is_empty())),
+            pick(&|n| self.pe.blank_failed.contains_key(&key(n))),
+        ]
+    }
+
+    /// Every value offered for a blank (rerolled ones too): asks avoid them.
+    pub fn blank_offered(&self, key: &BlankKey) -> &[String] {
+        self.generate.sweep.blank_values(key.style.as_ref(), &key.slot).map_or(&[], |v| v.offered.as_slice())
+    }
+}
+
+/// A sweep blank: its shared value (`style` None), or a style's own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BlankKey {
+    pub style: Option<increart_core::prompts::PresetKey>,
+    pub slot: String,
+}
+
+/// **Prompt enhance settings**: the server dialog's draft's chat server,
+/// being edited or made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeEditor {
+    /// Its place in the draft's servers; None: a new one.
+    pub index: Option<usize>,
+    pub draft: increart_core::pe::PeServer,
+    /// Why it can't be saved as it is.
+    pub error: Option<String>,
+}
+
+/// A style's ask: its settings, the prompt sent to improve, and how many
+/// times asked again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StyleTry {
+    pub ask: increart_core::prompts::EnhanceAsk,
+    pub sent: String,
+    pub retry: u8,
+}
+
+/// The **Suggest…** dialog: asking for a blank's values with instructions
+/// and the asks' settings at hand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestDialog {
+    pub key: BlankKey,
+    pub form: SuggestForm,
+}
+
+/// The **Suggest for blanks…** dialog: one ask for each shared blank
+/// ticked, each with the same settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchSuggest {
+    /// Ticked, by slot.
+    pub blanks: Vec<String>,
+    pub form: SuggestForm,
+}
+
+/// A blank's ask: with a Suggest dialog's settings (None: the quick ask's),
+/// and how many times asked again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlankTry {
+    pub form: Option<SuggestForm>,
+    pub retry: u8,
+}
+
+/// A Suggest dialog's settings, as the asks get them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestForm {
+    /// Instructions sent with the ask ("only stones").
+    pub how: String,
+    pub count: usize,
+    pub sampling: increart_core::pe::Sampling,
+    /// Attach the reference and start images (with a vision server).
+    pub images: bool,
+    /// Name the values offered before, not to offer them again.
+    pub avoid: bool,
+    /// The answer replaces the values offered, rather than adding to them.
+    pub replace: bool,
+}
+
+impl SuggestForm {
+    /// The settings remembered, the sampling `server`'s unless they set
+    /// their own.
+    pub fn from_ask(a: &SuggestAsk, server: increart_core::pe::Sampling) -> SuggestForm {
+        SuggestForm {
+            how: a.how.clone(),
+            count: a.count,
+            sampling: a.sampling.unwrap_or(server),
+            images: a.images,
+            avoid: a.avoid,
+            replace: a.replace,
+        }
+    }
+
+    /// To remember: the sampling only if not `server`'s, so it follows
+    /// Settings until changed here.
+    pub fn to_ask(&self, server: increart_core::pe::Sampling) -> SuggestAsk {
+        SuggestAsk {
+            how: self.how.clone(),
+            count: self.count,
+            sampling: Some(self.sampling).filter(|s| *s != server),
+            images: self.images,
+            avoid: self.avoid,
+            replace: self.replace,
+        }
+    }
+}
+
+/// The sweep's **Choose styles** window. Its ticks are the sweep's own
+/// (`generate.sweep.selected`); Cancel puts back those it opened with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StylePicker {
+    pub view: StyleView,
+    pub search: String,
+    pub filter: StyleFilter,
+    /// The sweep as it was on opening.
+    pub before: Sweep,
+    /// What every style has made so far, as of opening.
+    pub stats: HashMap<increart_core::prompts::PresetKey, StyleStats>,
+}
+
+/// What the Choose styles window lists (when not searching).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum StyleView {
+    #[default]
+    Ticked,
+    Favourites,
+    All,
+    Task(String),
+    /// A group within a task.
+    Group(String, String),
+}
+
+/// Choose styles' filters, each narrowing the list.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StyleFilter {
+    pub favourites: bool,
+    /// Needs no more reference images than Generate has.
+    pub usable: bool,
+    /// Never used in the selected project.
+    pub untried_here: bool,
+    /// Has a Good image in some project.
+    pub has_good: bool,
+}
+
+impl StyleFilter {
+    pub fn count(&self) -> usize {
+        [self.favourites, self.usable, self.untried_here, self.has_good].iter().filter(|&&x| x).count()
+    }
+}
+
+/// A style's images (in every project), by verdict.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StyleStats {
+    pub good: usize,
+    pub neutral: usize,
+    pub bad: usize,
+    pub unrated: usize,
+    /// Its newest run.
+    pub last: Option<Id>,
+    /// Its newest Good image, else its newest image.
+    pub sample: Option<ImageRef>,
+    /// Runs of it in the selected project.
+    pub here: usize,
+}
+
+impl StyleStats {
+    pub fn images(&self) -> usize {
+        self.good + self.neutral + self.bad + self.unrated
+    }
+}
+
+/// Whether the search `q` (lower case) finds a preset.
+pub fn preset_matches(p: &PromptPreset, q: &str) -> bool {
+    [&p.name, &p.description, &p.prompt, &p.group].iter().any(|s| s.to_lowercase().contains(q))
+}
+
+/// How many reference images a prompt needs: its highest `<imageN>`.
+pub fn needs_refs(prompt: &str) -> usize {
+    image_tags(prompt).into_iter().map(|(_, n)| n).max().unwrap_or(0)
+}
+
 /// What the Presets window lists (when not searching).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum PresetsView {
     #[default]
     Favourites,
-    /// The sweep's ticked presets (sweep mode): those ticked on choosing the
-    /// view, which stay listed when unticked (to tick again) until another
-    /// view, and any ticked since.
-    Ticked(Vec<increart_core::prompts::PresetKey>),
     Task(usize),
+    /// One group (heading) of a task.
+    Group(usize, String),
 }
 
 impl PresetsView {
     pub fn task(&self) -> Option<usize> {
         match self {
-            PresetsView::Task(t) => Some(*t),
+            PresetsView::Task(t) | PresetsView::Group(t, _) => Some(*t),
+            _ => None,
+        }
+    }
+
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            PresetsView::Group(_, g) => Some(g),
             _ => None,
         }
     }
@@ -1390,7 +1877,8 @@ impl GenerateForm {
             images: if d.images.is_empty() { images_of(&d.refs, d.init.as_ref()) } else { d.images.clone() },
             strength: d.strength,
             source_idea: d.source_idea.clone(),
-            sweep: d.sweep.clone(),
+            // ticks from before Modify style was split, in the style tasks
+            sweep: d.sweep.current(&increart_core::prompts::builtin()),
         }
     }
 
@@ -1479,10 +1967,22 @@ pub enum PickKind {
     TileFile,
     SdServerBinary,
     ModelDir,
+    /// A file for the PE server being edited.
+    Pe(PeFile),
+}
+
+/// Which of a KoboldCpp PE server's files is picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeFile {
+    Binary,
+    Model,
+    Mmproj,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerStatus {
+    /// What it was opened as.
+    pub config: Option<ServerConfig>,
     pub name: String,
     pub device: String,
     pub state: String,
@@ -1521,6 +2021,8 @@ pub struct Alerts {
     pub test_result: Option<Result<String, String>>,
     /// When the conditions were last checked (once a second).
     pub checked: f64,
+    /// When prompt enhance was last seen asking.
+    pub pe_busy_at: Option<f64>,
 }
 
 impl Alerts {
@@ -1564,6 +2066,7 @@ pub struct Place {
     pub proj_folder: Option<PathBuf>,
     pub review_scope: Option<Id>,
     pub review_folder: Option<PathBuf>,
+    pub review_view: ReviewView,
     pub output_tab: OutputTab,
     pub output_source: OutputSource,
 }
@@ -1610,6 +2113,8 @@ pub struct AppState {
     pub proj_scope_kept: Option<PathBuf>,
     pub generate: GenerateForm,
     pub servers: Vec<ServerStatus>,
+    /// The shared sd-server settings `servers` were opened with.
+    pub servers_opened_with: Option<increart_core::config::SdServerConfig>,
     pub engine_running: bool,
     /// Numbers server-opening attempts; reports from older ones are ignored.
     pub open_attempt: u32,
@@ -1643,10 +2148,20 @@ pub struct AppState {
     pub review_search: String,
     /// The contact sheet's selected cell (row, column).
     pub sheet_cell: (usize, usize),
+    /// How many rows the contact sheet shows side by side (what fits the
+    /// window; set as it is drawn): row r is on line r / bands, in band
+    /// r % bands.
+    pub sheet_bands: usize,
     /// The contact sheet's name filter: rows whose style (or run label)
     /// has every word of it.
     pub sheet_filter: String,
+    /// A new sweep asked for, waiting for its project's prompt history (the
+    /// form it was queued with).
+    pub new_sweep: Option<NewSweepAsk>,
     pub review_cursor: usize,
+    /// Review stays on the newest unreviewed image as they come (Single,
+    /// Grid, and Compare's B); going to another image turns it off.
+    pub review_follow: bool,
     pub review_view: ReviewView,
     /// A/B compare: the pinned image (A).
     pub review_pinned: Option<ImageRef>,
@@ -1743,6 +2258,8 @@ pub struct AppState {
     /// e.g. in tests).
     pub presets_path: Option<PathBuf>,
     pub presets_panel: Option<PresetsPanel>,
+    pub styles: Option<StylePicker>,
+    pub pe: PeState,
     pub presets_editor: Option<PresetsEditor>,
     pub save_preset: Option<SavePresetDialog>,
     /// The Generate prompt's characters to select, once (a preset's first
@@ -1763,8 +2280,9 @@ pub struct AppState {
     pub imports: Option<Vec<(Id, SourceInfo)>>,
     /// Review: checkerboard behind transparent images (else a flat colour).
     pub checkerboard: bool,
-    /// (link path now, verdict before) of review actions, for `Ctrl+Z`.
-    pub review_undo: Vec<(PathBuf, Option<Verdict>)>,
+    /// (link path now, verdict before) of review actions, for `Ctrl+Z`:
+    /// one entry per action (rating the picked rates them all at once).
+    pub review_undo: Vec<Vec<(PathBuf, Option<Verdict>)>>,
     pub renaming: Option<Renaming>,
     /// Library operations in flight.
     pub busy: usize,
@@ -1807,6 +2325,7 @@ impl AppState {
             proj_folder: None,
             proj_scope_kept: None,
             servers: vec![],
+            servers_opened_with: None,
             engine_running: false,
             open_attempt: 0,
             background: None,
@@ -1823,8 +2342,11 @@ impl AppState {
             review_all_runs: false,
             review_search: String::new(),
             sheet_cell: (0, 0),
+            sheet_bands: 1,
             sheet_filter: String::new(),
+            new_sweep: None,
             review_cursor: 0,
+            review_follow: false,
             review_view: ReviewView::Single,
             review_pinned: None,
             output_tab: OutputTab::Grid,
@@ -1876,6 +2398,8 @@ impl AppState {
             prompt_presets: increart_core::prompts::builtin(),
             presets_path: None,
             presets_panel: None,
+            styles: None,
+            pe: PeState::default(),
             presets_editor: None,
             save_preset: None,
             prompt_select: None,
@@ -2033,6 +2557,7 @@ impl AppState {
             proj_folder: self.proj_folder.clone(),
             review_scope: self.review_scope.clone(),
             review_folder: self.review_folder.clone(),
+            review_view: self.review_view,
             output_tab: self.output_tab,
             output_source: self.output_source.clone(),
         }
@@ -2089,12 +2614,98 @@ impl AppState {
         v
     }
 
-    /// Newest first, or by name (any case; newest first among equals).
-    pub fn sort_projects(&self, v: &mut [&ProjectEntry]) {
-        v.sort_by(|a, b| b.project.id.cmp(&a.project.id));
-        if self.config.projects_by_name {
-            v.sort_by_cached_key(|p| p.name().to_lowercase());
+    /// The subfolders of a project-tree folder (relative to `projects/`,
+    /// empty = the top): by name (any case), or newest created / last run
+    /// first, by the newest project anywhere in them (empty folders last,
+    /// by name).
+    pub fn project_folder_children(&self, parent: &Path) -> Vec<&PathBuf> {
+        let mut v: Vec<&PathBuf> = self.index.project_folders.iter().filter(|f| f.parent() == Some(parent)).collect();
+        self.sort_folders(&mut v, self.config.folder_order.0);
+        v
+    }
+
+    /// Folders (relative to `projects/`) by name (any case), or newest
+    /// created / last run first by the newest project anywhere in them
+    /// (empty folders last, by name).
+    fn sort_folders(&self, v: &mut [&PathBuf], order: TreeOrder) {
+        v.sort_by_cached_key(|f| f.to_string_lossy().to_lowercase());
+        let last_run = match order {
+            TreeOrder::Name => return,
+            o => o == TreeOrder::LastRun,
+        };
+        v.sort_by_cached_key(|f| {
+            let dir = Path::new("projects").join(f);
+            let newest = self
+                .index
+                .projects
+                .iter()
+                .filter(|p| p.dir.starts_with(&dir))
+                .map(|p| (last_run.then(|| p.last_run()), p.project.id.clone()))
+                .max();
+            std::cmp::Reverse(newest)
+        });
+    }
+
+    /// Unreviewed images in a project folder (relative to `projects/`) and
+    /// all its subfolders.
+    pub fn unreviewed_under(&self, folder: &Path) -> usize {
+        let dir = Path::new("projects").join(folder);
+        self.index.projects.iter().filter(|p| p.dir.starts_with(&dir)).map(|p| counts(p)[3]).sum()
+    }
+
+    /// Review's scope tree at a folder (relative to `projects/`): its
+    /// subfolders and its projects in [`ReviewOrder`] order, and, with **hide
+    /// reviewed**, without those that have none (unless selected or
+    /// holding the selection).
+    pub fn review_tree_children(&self, parent: &Path) -> (Vec<&PathBuf>, Vec<&ProjectEntry>) {
+        let hide = !self.config.review_show_reviewed;
+        let selected_dir = match (&self.review_folder, &self.review_scope) {
+            (Some(f), _) => Some(Path::new("projects").join(f)),
+            (None, Some(id)) => self.index.project(id).map(|p| p.dir.clone()),
+            _ => None,
+        };
+        let holds_selection = |dir: &Path| selected_dir.as_ref().is_some_and(|s| s.starts_with(dir));
+        let mut folders: Vec<&PathBuf> = self
+            .index
+            .project_folders
+            .iter()
+            .filter(|f| f.parent() == Some(parent))
+            .filter(|f| !hide || self.unreviewed_under(f) > 0 || holds_selection(&Path::new("projects").join(f)))
+            .collect();
+        let dir = Path::new("projects").join(parent);
+        let mut projects: Vec<&ProjectEntry> = self
+            .index
+            .projects
+            .iter()
+            .filter(|p| p.dir.parent() == Some(dir.as_path()))
+            .filter(|p| !hide || counts(p)[3] > 0 || holds_selection(&p.dir))
+            .collect();
+        if let Some(order) = self.config.review_order.tree() {
+            self.sort_folders(&mut folders, order);
+            sort_projects(&mut projects, order);
+            return (folders, projects);
         }
+        projects.sort_by(|a, b| {
+            let key = |p: &ProjectEntry| (counts(p)[3] == 0, p.project.id.clone());
+            key(a).cmp(&key(b))
+        });
+        folders.sort_by_cached_key(|f| {
+            let dir = Path::new("projects").join(f);
+            let oldest = self
+                .index
+                .projects
+                .iter()
+                .filter(|p| p.dir.starts_with(&dir) && counts(p)[3] > 0)
+                .map(|p| p.project.id.clone())
+                .min();
+            (oldest.is_none(), oldest, f.to_string_lossy().to_lowercase())
+        });
+        (folders, projects)
+    }
+
+    /// [`sort_projects`] by the project tree's order.
+    pub fn sort_projects(&self, v: &mut [&ProjectEntry]) {
+        sort_projects(v, self.config.project_order)
     }
 
     /// One past the highest seed any run of the selected project has used
@@ -2259,14 +2870,16 @@ impl AppState {
         }
     }
 
-    /// The (column, row) of each image on the contact sheet.
+    /// The (column, row) of each image on the contact sheet, as shown
+    /// (rows folded into bands side by side).
     pub fn sheet_cells(&self) -> HashMap<ImageRef, (u32, u32)> {
         let Some(sh) = self.sheet() else { return HashMap::new() };
+        let (k, seeds) = (self.sheet_bands.max(1), sh.seeds.len());
         let mut m = HashMap::new();
         for (r, row) in sh.rows.iter().enumerate() {
             for (c, cell) in row.cells.iter().enumerate() {
                 if let SheetCell::Image(o) = cell {
-                    m.insert(o.image.clone(), (c as u32, r as u32));
+                    m.insert(o.image.clone(), (((r % k) * seeds + c) as u32, (r / k) as u32));
                 }
             }
         }
@@ -2401,6 +3014,16 @@ impl AppState {
         }
     }
 
+    /// An image grid's tile size in points.
+    pub fn grid_cell_size(&self, grid: ZoomGrid) -> u32 {
+        let n = match grid {
+            ZoomGrid::Review => self.config.review_grid_cell,
+            ZoomGrid::Output => self.config.output_grid_cell,
+            ZoomGrid::Library => self.config.library_grid_cell,
+        };
+        if n == 0 { grid.default_size() } else { n.clamp(GRID_CELL_MIN, GRID_CELL_MAX) }
+    }
+
     /// The contact sheet's cell size in points.
     pub fn sheet_cell_size(&self) -> u32 {
         match self.config.sheet_cell {
@@ -2466,6 +3089,103 @@ impl AppState {
     pub fn image_title(&self, image: &ImageRef) -> Option<&str> {
         let p = self.project_of_link(self.output_link(image)?)?;
         p.project.titles.get(&image.id).map(String::as_str)
+    }
+
+    /// What each style (a sweep's prompt preset) has made, in every project.
+    pub fn style_stats(&self) -> HashMap<increart_core::prompts::PresetKey, StyleStats> {
+        let mut m: HashMap<increart_core::prompts::PresetKey, StyleStats> = HashMap::new();
+        for p in &self.index.projects {
+            let here = self.project.as_ref() == Some(&p.project.id);
+            let mut of_run = HashMap::new();
+            for r in &p.runs {
+                let Some(tag) = r.sweep.as_ref().filter(|t| !t.preset.is_empty()) else { continue };
+                let key = increart_core::prompts::PresetKey { task: tag.task.clone(), name: tag.preset.clone() };
+                let s = m.entry(key.clone()).or_default();
+                s.here += here as usize;
+                if s.last.as_ref().is_none_or(|l| *l < r.id) {
+                    s.last = Some(r.id.clone());
+                }
+                of_run.insert(&r.id, key);
+            }
+            // newest last, so the sample ends up the newest
+            let mut outs: Vec<_> = p.outputs.iter().filter(|o| of_run.contains_key(&o.name.run)).collect();
+            outs.sort_by(|a, b| (&a.name.run, a.name.seed).cmp(&(&b.name.run, b.name.seed)));
+            for o in outs {
+                let s = m.get_mut(&of_run[&o.name.run]).expect("counted above");
+                let good = o.verdict == Some(Verdict::Good);
+                match o.verdict {
+                    Some(Verdict::Good) => s.good += 1,
+                    Some(Verdict::Neutral) => s.neutral += 1,
+                    Some(Verdict::Bad) => s.bad += 1,
+                    None => s.unrated += 1,
+                }
+                if good || s.good == 0 {
+                    s.sample = Some(o.image.clone());
+                }
+            }
+        }
+        m
+    }
+
+    /// The presets (task, preset) Choose styles lists: those the search
+    /// finds in every task, else the view's; filtered, then sorted.
+    pub fn style_rows(&self, picker: &StylePicker) -> Vec<(usize, usize)> {
+        use increart_core::config::StyleSort;
+        let list = &self.prompt_presets;
+        let ticked = &self.generate.sweep.selected;
+        let refs = self.generate.refs().len();
+        let q = picker.search.to_lowercase();
+        let none = StyleStats::default();
+        let stats = |t: &str, p: &PromptPreset| {
+            picker
+                .stats
+                .get(&increart_core::prompts::PresetKey { task: t.into(), name: p.name.clone() })
+                .unwrap_or(&none)
+        };
+        let f = picker.filter;
+        let mut v = vec![];
+        for (ti, t) in list.tasks.iter().enumerate() {
+            for (pi, p) in t.presets.iter().enumerate() {
+                let in_view = if !q.is_empty() {
+                    preset_matches(p, &q)
+                } else {
+                    match &picker.view {
+                        StyleView::Ticked => ticked.iter().any(|k| k.task == t.name && k.name == p.name),
+                        StyleView::Favourites => p.favourite,
+                        StyleView::All => true,
+                        StyleView::Task(x) => *x == t.name,
+                        StyleView::Group(x, g) => *x == t.name && *g == p.group,
+                    }
+                };
+                let s = stats(&t.name, p);
+                let keep = in_view
+                    && (!f.favourites || p.favourite)
+                    && (!f.usable || needs_refs(&p.prompt) <= refs)
+                    && (!f.untried_here || s.here == 0)
+                    && (!f.has_good || s.good > 0);
+                if keep {
+                    v.push((ti, pi));
+                }
+            }
+        }
+        let at = |&(t, p): &(usize, usize)| (&list.tasks[t], &list.tasks[t].presets[p]);
+        match self.config.style_sort {
+            StyleSort::Listed => {}
+            StyleSort::Name => v.sort_by_cached_key(|x| at(x).1.name.to_lowercase()),
+            StyleSort::MostGood => v.sort_by_key(|x| {
+                let (t, p) = at(x);
+                std::cmp::Reverse(stats(&t.name, p).good)
+            }),
+            StyleSort::Recent => v.sort_by_key(|x| {
+                let (t, p) = at(x);
+                std::cmp::Reverse(stats(&t.name, p).last.clone())
+            }),
+            StyleSort::Untried => v.sort_by_key(|x| {
+                let (t, p) = at(x);
+                stats(&t.name, p).last.clone()
+            }),
+        }
+        v
     }
 
     /// The link of a store image (the first project link to it), any verdict.
@@ -2847,7 +3567,10 @@ impl AppState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunProgress {
     pub run: Id,
+    pub project_id: Id,
     pub project: String,
+    /// Its sweep's label (`r05`) and its row there (the style, "cfg 3").
+    pub sweep: Option<(String, String)>,
     pub label: String,
     pub prompt: String,
     /// Seeds with an image.
@@ -2886,6 +3609,63 @@ impl RunProgress {
     }
 }
 
+/// **New sweep from these**: a sweep's runs to sweep again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewSweepAsk {
+    pub project: Id,
+    /// The sweep's label (`r05`).
+    pub sweep: String,
+    pub runs: Vec<Id>,
+}
+
+/// A project's runs in the engine (Jobs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunGroup {
+    pub project: Id,
+    pub name: String,
+    pub items: Vec<RunItem>,
+}
+
+impl RunGroup {
+    pub fn runs(&self) -> Vec<&RunProgress> {
+        self.items.iter().flat_map(RunItem::runs).collect()
+    }
+}
+
+/// A run on its own, or a sweep's runs in the engine.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunItem {
+    Run(Box<RunProgress>),
+    Sweep { name: String, runs: Vec<RunProgress> },
+}
+
+impl RunItem {
+    pub fn runs(&self) -> Vec<&RunProgress> {
+        match self {
+            RunItem::Run(r) => vec![r.as_ref()],
+            RunItem::Sweep { runs, .. } => runs.iter().collect(),
+        }
+    }
+}
+
+/// Several runs together: seeds done and to do, 0..1 (partly sampled seeds
+/// by their steps), and roughly the time left: the images still to make at
+/// each run's time per image (else the others' mean), `servers` at once.
+pub fn runs_progress(runs: &[&RunProgress], servers: usize) -> (u64, u64, f32, Option<f64>) {
+    let done: u64 = runs.iter().map(|r| r.done).sum();
+    let total: u64 = runs.iter().map(|r| r.total).sum();
+    let weighted: f32 = runs.iter().map(|r| r.fraction() * r.total as f32).sum();
+    let fraction = if total == 0 { 0.0 } else { (weighted / total as f32).min(1.0) };
+    let known: Vec<f64> = runs.iter().filter_map(|r| r.image_s()).collect();
+    let eta = (!known.is_empty()).then(|| {
+        let mean = known.iter().sum::<f64>() / known.len() as f64;
+        let left: f64 =
+            runs.iter().map(|r| (1.0 - r.fraction() as f64) * r.total as f64 * r.image_s().unwrap_or(mean)).sum();
+        left / servers.max(1) as f64
+    });
+    (done, total, fraction, eta)
+}
+
 /// All runs in the engine together, for the status bar.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct JobSummary {
@@ -2907,7 +3687,9 @@ impl AppState {
             self.sampling_times.iter().filter(|((r2, _), _)| r2 == run).filter_map(|(_, t)| t.step_s()).collect();
         Some(RunProgress {
             run: run.clone(),
+            project_id: p.project.id.clone(),
             project: p.name(),
+            sweep: r.sweep.as_ref().map(|s| (s.name.clone(), s.row())),
             label: r.label.clone(),
             prompt: r.prompt.clone(),
             done,
@@ -2929,6 +3711,33 @@ impl AppState {
         self.active_runs.iter().filter_map(|r| self.run_progress(r)).collect()
     }
 
+    /// The runs in the engine by project, a sweep's together (Jobs):
+    /// projects in the order their first run is in the queue, and in each,
+    /// runs and sweeps in the order of their first run.
+    pub fn run_groups(&self) -> Vec<RunGroup> {
+        let mut groups: Vec<RunGroup> = vec![];
+        for j in self.jobs() {
+            let g = match groups.iter().position(|g| g.project == j.project_id) {
+                Some(i) => &mut groups[i],
+                None => {
+                    groups.push(RunGroup { project: j.project_id.clone(), name: j.project.clone(), items: vec![] });
+                    groups.last_mut().unwrap()
+                }
+            };
+            let sweep = j.sweep.as_ref().map(|(s, _)| s.clone());
+            match sweep {
+                Some(name) => {
+                    match g.items.iter_mut().find(|i| matches!(i, RunItem::Sweep { name: n, .. } if *n == name)) {
+                        Some(RunItem::Sweep { runs, .. }) => runs.push(j),
+                        _ => g.items.push(RunItem::Sweep { name, runs: vec![j] }),
+                    }
+                }
+                None => g.items.push(RunItem::Run(Box::new(j))),
+            }
+        }
+        groups
+    }
+
     pub fn job_summary(&self) -> JobSummary {
         let jobs = self.jobs();
         let total: u64 = jobs.iter().map(|j| j.total).sum();
@@ -2939,6 +3748,17 @@ impl AppState {
             total,
             fraction: if total == 0 { 0.0 } else { weighted / total as f32 },
         }
+    }
+}
+
+/// Newest created first, last run first, or by name (any case); newest
+/// created first among equals.
+fn sort_projects(v: &mut [&ProjectEntry], order: TreeOrder) {
+    v.sort_by(|a, b| b.project.id.cmp(&a.project.id));
+    match order {
+        TreeOrder::Created => {}
+        TreeOrder::LastRun => v.sort_by_cached_key(|p| std::cmp::Reverse(p.last_run())),
+        TreeOrder::Name => v.sort_by_cached_key(|p| p.name().to_lowercase()),
     }
 }
 

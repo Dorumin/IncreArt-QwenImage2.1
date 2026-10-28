@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use increart_core::config::{RecipePreset, SdServerConfig, ServerConfig};
 use increart_core::engine::{Endpoint, Engine, EngineOptions};
@@ -23,7 +23,10 @@ const START_WAIT: Duration = Duration::from_secs(180);
 #[derive(Default)]
 struct Shared {
     library: Option<Arc<Mutex<Library>>>,
-    servers: Vec<Option<ServerProcess>>,
+    /// The sd-servers open, each with what it was opened as.
+    servers: Vec<Option<(ServerConfig, ServerProcess)>>,
+    /// The shared settings `servers` were opened with.
+    opened_with: Option<SdServerConfig>,
     engine: Option<Engine>,
     /// The opening attempt `servers` belongs to.
     attempt: u32,
@@ -33,6 +36,14 @@ struct Shared {
     opening: Arc<std::sync::atomic::AtomicUsize>,
     /// The open library's watch for outside changes.
     watch: Option<crate::watch::LibraryWatch>,
+    /// The PE server in use, and the settings it was opened with.
+    pe: Option<(increart_core::pe::PeServer, increart_core::pe::PeProcess)>,
+    /// Set to stop a PE server still starting.
+    pe_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// PE asks stopped: skipped if still queued, cut short if being answered.
+    pe_stopped: std::collections::HashSet<u64>,
+    /// The PE ask being answered.
+    pe_current: Option<u64>,
 }
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -41,6 +52,9 @@ pub struct Runtime {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     work: Sender<Effect>,
+    /// PE requests, carried out in order on their own thread.
+    /// Asks for the PE server, in order; None: stop it.
+    pe_work: Sender<Option<(increart_core::pe::PeServer, Vec<crate::update::PeJob>)>>,
     shared: Arc<Mutex<Shared>>,
     wake: Wake,
 }
@@ -81,7 +95,27 @@ impl Runtime {
                 }
             })
             .expect("spawn library worker");
-        Runtime { tx, rx, work, shared, wake }
+        let (pe_work, pe_jobs) = mpsc::channel();
+        let (ptx, pshared, pwake) = (tx.clone(), shared.clone(), wake.clone());
+        std::thread::Builder::new()
+            .name("prompt enhance".into())
+            .spawn(move || {
+                for work in pe_jobs {
+                    match work {
+                        Some((server, jobs)) => pe_ask(&ptx, &pwake, &pshared, server, jobs),
+                        None => {
+                            // dropping it stops the process (and waits for
+                            // it: one started next may want its port)
+                            let p = pshared.lock().unwrap().pe.take();
+                            drop(p);
+                            let _ = ptx.send(Msg::PeStatus(crate::state::PeStatus::Off));
+                            pwake();
+                        }
+                    }
+                }
+            })
+            .expect("spawn PE worker");
+        Runtime { tx, rx, work, pe_work, shared, wake }
     }
 
     pub fn run(&self, fx: Effect) {
@@ -138,6 +172,34 @@ impl Runtime {
                     wake();
                 });
             }
+            Effect::PeAsk { server, jobs } => {
+                let _ = self.pe_work.send(Some((server, jobs)));
+            }
+            Effect::PeStop(ids) => {
+                let mut s = self.shared.lock().unwrap();
+                s.pe_stopped.extend(&ids);
+                // the server stops writing (it would finish the answer
+                // nobody reads before starting the next)
+                let current = s.pe_current.is_some_and(|c| ids.contains(&c));
+                if let (true, Some((cfg, p))) = (current, &s.pe)
+                    && matches!(cfg.run, increart_core::pe::PeRun::KoboldCpp { .. })
+                {
+                    let client = p.client.clone();
+                    std::thread::spawn(move || client.abort());
+                }
+            }
+            Effect::PeShutdown => {
+                // one starting gives up
+                self.shared.lock().unwrap().pe_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.pe_work.send(None);
+            }
+            Effect::PeListGpus => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::PeGpus(increart_core::pe::list_gpus()));
+                    wake();
+                });
+            }
             Effect::Pick { kind, start } => {
                 let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 std::thread::spawn(move || {
@@ -191,6 +253,9 @@ impl Runtime {
             s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             s.opening.clone()
         });
+        if let Ok(s) = self.shared.lock() {
+            s.pe_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Ok(opening) = opening {
             let deadline = std::time::Instant::now() + Duration::from_millis(1500);
             while opening.load(std::sync::atomic::Ordering::Relaxed) > 0 && std::time::Instant::now() < deadline {
@@ -202,9 +267,11 @@ impl Runtime {
                 engine.shutdown();
             }
             if leave_running {
-                s.servers.iter_mut().flatten().for_each(ServerProcess::detach);
+                s.servers.iter_mut().flatten().for_each(|(_, p)| p.detach());
             }
             s.servers.clear();
+            // a KoboldCpp the app started stops with it
+            s.pe = None;
         }
     }
 }
@@ -215,6 +282,98 @@ impl Drop for Runtime {
     /// [`Runtime::shutdown`] first when started servers should stay up.
     fn drop(&mut self) {
         self.shutdown(false);
+    }
+}
+
+/// How often an answer being written is reported.
+const PE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
+
+/// How long a started KoboldCpp may take to load its model.
+const PE_START_WAIT: Duration = Duration::from_secs(300);
+
+/// Carries out PE jobs in order: opens the server first (reopening it if
+/// how it runs changed), then one chat request per job. No jobs: only
+/// opens it.
+fn pe_ask(
+    tx: &Sender<Msg>,
+    wake: &Wake,
+    shared: &Arc<Mutex<Shared>>,
+    server: increart_core::pe::PeServer,
+    jobs: Vec<crate::update::PeJob>,
+) {
+    use crate::state::{PeStatus, PeStep};
+    use increart_core::pe;
+    let send = |m: Msg| {
+        let _ = tx.send(m);
+        wake();
+    };
+    let current = {
+        let s = shared.lock().unwrap();
+        s.pe.as_ref().filter(|(cfg, _)| cfg.same_process(&server)).map(|(_, p)| p.client.clone())
+    };
+    let client = match current {
+        Some(c) => c,
+        None => {
+            let cancel = {
+                let mut s = shared.lock().unwrap();
+                s.pe = None;
+                s.pe_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                s.pe_cancel.clone()
+            };
+            send(Msg::PeStatus(PeStatus::Starting));
+            match pe::open(&server, &log_dir(), PE_START_WAIT, &cancel) {
+                Ok(p) => {
+                    let c = p.client.clone();
+                    shared.lock().unwrap().pe = Some((server.clone(), p));
+                    send(Msg::PeStatus(PeStatus::Ready));
+                    c
+                }
+                // stopped while starting: not a failure
+                Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                    send(Msg::PeStatus(PeStatus::Off));
+                    return;
+                }
+                Err(e) => {
+                    send(Msg::PeStatus(PeStatus::Failed(e)));
+                    return;
+                }
+            }
+        }
+    };
+    for job in jobs {
+        let stopped = |shared: &Arc<Mutex<Shared>>| shared.lock().unwrap().pe_stopped.contains(&job.id);
+        {
+            let mut s = shared.lock().unwrap();
+            if s.pe_stopped.remove(&job.id) {
+                continue;
+            }
+            s.pe_current = Some(job.id);
+        }
+        if !job.images.is_empty() {
+            send(Msg::PeProgress(job.id, PeStep::Preparing));
+        }
+        let images: Result<Vec<_>, String> =
+            job.images.iter().map(|p| pe::image_for_request(p, job.image_size)).collect();
+        send(Msg::PeProgress(job.id, PeStep::Reading { images: job.images.len() }));
+        // the answer so far, a few times a second
+        let mut last = Instant::now() - PE_PROGRESS_EVERY;
+        let r = images.and_then(|imgs| {
+            client.chat_stream(&job.system, &job.text, &imgs, job.max_tokens, job.sampling, |pieces, text| {
+                if last.elapsed() >= PE_PROGRESS_EVERY {
+                    last = Instant::now();
+                    send(Msg::PeProgress(job.id, PeStep::Writing { pieces, text: text.to_string() }));
+                }
+                !stopped(shared)
+            })
+        });
+        let was_stopped = {
+            let mut s = shared.lock().unwrap();
+            s.pe_current = None;
+            s.pe_stopped.remove(&job.id)
+        };
+        if !was_stopped {
+            send(Msg::PeAnswer(job.id, r));
+        }
     }
 }
 
@@ -235,6 +394,16 @@ fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
             .collect(),
         PickKind::ModelDir => d.set_title("Model folder (sd-server --model-dir)").pick_folder().into_iter().collect(),
         PickKind::SdServerBinary => d.set_title("sd-server binary").pick_file().into_iter().collect(),
+        PickKind::Pe(f) => {
+            let d = match f {
+                crate::state::PeFile::Binary => d.set_title("KoboldCpp binary"),
+                crate::state::PeFile::Model => d.set_title("Model (.gguf)").add_filter("GGUF", &["gguf"]),
+                crate::state::PeFile::Mmproj => {
+                    d.set_title("Vision projector (mmproj .gguf)").add_filter("GGUF", &["gguf"])
+                }
+            };
+            d.pick_file().into_iter().collect()
+        }
         PickKind::IdeaImages => {
             d.set_title("Images for the new idea").add_filter("Images", IMAGE_EXTS).pick_files().unwrap_or_default()
         }
@@ -266,13 +435,38 @@ fn open_servers(
     cfg: SdServerConfig,
     attempt: u32,
 ) {
-    let (cancel, opening) = {
+    let (cancel, opening, kept) = {
         let mut s = shared.lock().unwrap();
-        s.servers = (0..servers.len()).map(|_| None).collect();
+        // the attempt before (if still opening) and the engine stop; the
+        // servers opened as asked again are kept, the others stop
+        s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(engine) = s.engine.take() {
+            engine.shutdown();
+        }
+        let same_settings = s.opened_with.as_ref() == Some(&cfg);
+        let mut old = std::mem::take(&mut s.servers);
+        let slots: Vec<_> = servers
+            .iter()
+            .map(|c| {
+                let same = |o: &Option<(ServerConfig, ServerProcess)>| {
+                    o.as_ref()
+                        .is_some_and(|(x, _)| x == c && (same_settings || !matches!(c, ServerConfig::Start { .. })))
+                };
+                old.iter().position(same).and_then(|i| old[i].take())
+            })
+            .collect();
+        let kept: Vec<bool> = slots.iter().map(Option::is_some).collect();
+        // dropping a process the app started stops it (kill, then wait)
+        let stopped = old.iter().flatten().filter(|(_, p)| p.launched()).map(|(_, p)| p.name.clone()).collect();
+        drop(old);
+        let _ = tx.send(Msg::ServersStopped(stopped));
+        wake();
+        s.servers = slots;
+        s.opened_with = Some(cfg.clone());
         s.attempt = attempt;
         s.cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        s.opening.fetch_add(servers.len(), std::sync::atomic::Ordering::Relaxed);
-        (s.cancel.clone(), s.opening.clone())
+        s.opening.fetch_add(kept.iter().filter(|k| !**k).count(), std::sync::atomic::Ordering::Relaxed);
+        (s.cancel.clone(), s.opening.clone(), kept)
     };
     let (tx, wake, shared) = (tx.clone(), wake.clone(), shared.clone());
     std::thread::spawn(move || {
@@ -282,7 +476,13 @@ fn open_servers(
             .map(|(i, server)| {
                 let (tx, wake, shared, cfg) = (tx.clone(), wake.clone(), shared.clone(), cfg.clone());
                 let (cancel, opening) = (cancel.clone(), opening.clone());
+                let kept = kept[i];
                 std::thread::spawn(move || {
+                    if kept {
+                        let _ = tx.send(Msg::ServerOpened(attempt, i, Ok(())));
+                        wake();
+                        return;
+                    }
                     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     if matches!(server, ServerConfig::Start { .. }) {
                         watch_start_log(&server, attempt, i, &tx, &wake, &done);
@@ -298,7 +498,7 @@ fn open_servers(
                             if s.attempt == attempt
                                 && let Some(slot) = s.servers.get_mut(i)
                             {
-                                *slot = Some(p);
+                                *slot = Some((server, p));
                             }
                             Msg::ServerOpened(attempt, i, Ok(()))
                         }
@@ -643,8 +843,9 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
                 engine.shutdown();
             }
             // dropping a process the app started stops it (kill, then wait)
-            let names = s.servers.iter().flatten().filter(|p| p.launched()).map(|p| p.name.clone()).collect();
+            let names = s.servers.iter().flatten().filter(|(_, p)| p.launched()).map(|(_, p)| p.name.clone()).collect();
             s.servers.clear();
+            s.opened_with = None;
             vec![Msg::ServersStopped(names)]
         }
         Effect::SetJobOrder(order) => {
@@ -676,7 +877,7 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
                 .servers
                 .iter()
                 .flatten()
-                .map(|p| Endpoint { name: p.name.clone(), device: p.device.clone(), client: p.client.clone() })
+                .map(|(_, p)| Endpoint { name: p.name.clone(), device: p.device.clone(), client: p.client.clone() })
                 .collect();
             let opts = EngineOptions {
                 generation: GenOptions { preview: cfg.preview.clone(), ..Default::default() },
@@ -733,6 +934,10 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
         | Effect::PlaySound { .. }
         | Effect::OpenServers { .. }
         | Effect::Pick { .. }
+        | Effect::PeAsk { .. }
+        | Effect::PeStop(_)
+        | Effect::PeShutdown
+        | Effect::PeListGpus
         | Effect::FolderPreviews { .. }
         | Effect::ComposeTiles { .. }
         | Effect::WatchLibrary(_)
@@ -872,6 +1077,7 @@ pub fn lib_op(lib: &mut Library, op: LibOp) -> Result<OpOk, String> {
             lib.idea_from_output(&image, with_prompt, loc).map(OpOk::Idea).map_err(err)
         }
         LibOp::AddSeeds(run, n) => lib.add_seeds(&run, n, false).map(|_| OpOk::SeedsAdded(run, n)).map_err(err),
+        LibOp::AddVariant(id, v) => lib.update_idea(&id, |i| i.variants.push(v)).map(|_| OpOk::Done).map_err(err),
         LibOp::SaveIdea { id, title, text, tags, images } => lib
             .update_idea(&id, |i| {
                 (i.title, i.text, i.tags, i.images) = (title, text, tags, images);
@@ -903,10 +1109,18 @@ pub fn lib_op(lib: &mut Library, op: LibOp) -> Result<OpOk, String> {
             }
             Ok(OpOk::Done)
         }
-        LibOp::ReviewOutput { link, verdict, undo } => {
-            let previous = verdict_of(&link);
-            let new = lib.review_output(&link, verdict).map_err(err)?;
-            Ok(OpOk::Reviewed { link: new, previous, undo })
+        LibOp::ReviewOutputs { links, undo } => {
+            let mut done = vec![];
+            for (link, verdict) in links {
+                let previous = verdict_of(&link);
+                match lib.review_output(&link, verdict) {
+                    Ok(new) => done.push((new, previous)),
+                    // nothing rated: an error as before; else keep what was
+                    Err(e) if done.is_empty() => return Err(err(e)),
+                    Err(e) => return Ok(OpOk::Reviewed { done, undo, error: Some(err(e)) }),
+                }
+            }
+            Ok(OpOk::Reviewed { done, undo, error: None })
         }
     }
 }

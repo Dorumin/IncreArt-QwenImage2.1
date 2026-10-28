@@ -7,15 +7,16 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Key, Panel, RichText, ScrollArea, Sense, Vec2};
 use increart_core::Tree;
 use increart_core::Verdict;
+use increart_core::config::ReviewOrder;
 use increart_core::scan::OutputLink;
 use increart_gui_core::{
-    AppState, InfoPanel, Msg, OutputPreset, OutputSource, OutputTab, Ratings, ReviewRun, ReviewView, Smart, Tab,
-    UseTarget, counts,
+    AppState, GRID_CELL_MAX, GRID_CELL_MIN, InfoPanel, Msg, OutputPreset, OutputSource, OutputTab, Ratings, ReviewRun,
+    ReviewView, Smart, Tab, UseTarget, ZoomGrid, counts,
 };
 
 use crate::textures::Textures;
 use crate::widgets::{
-    BAD, GOOD, NEUTRAL, copy_image_item, ic, image_fit_bg, ph, short, single_click, thumb, verdict_color,
+    BAD, GOOD, NEUTRAL, ic, image_fit_bg, image_menu_items, ph, short, single_click, thumb, verdict_color,
 };
 
 pub const VERDICTS: [(&str, Verdict, egui::Color32); 3] =
@@ -104,29 +105,41 @@ pub fn view(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
     let queue = st.review_queue();
     Panel::left("review_scope").default_size(230.0).show(ui, |ui| scope_panel(ui, st, out));
     Panel::top("review_tabs").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            for (v, label) in [
-                (ReviewView::Single, ic(ph::SQUARE, "Single")),
-                (ReviewView::Grid, ic(ph::SQUARES_FOUR, "Grid")),
-                (ReviewView::Compare, ic(ph::COLUMNS, "A/B compare")),
-                (ReviewView::Sheet, ic(ph::TABLE, "Contact sheet")),
-            ] {
-                if v == ReviewView::Sheet && st.review_sweep.is_none() {
-                    continue;
+        // groups wrap whole when the bar is short of room
+        use crate::widgets::{group, right_group};
+        ui.horizontal_wrapped(|ui| {
+            group(ui, "views", |ui| {
+                for (v, label) in [
+                    (ReviewView::Single, ic(ph::SQUARE, "Single")),
+                    (ReviewView::Grid, ic(ph::SQUARES_FOUR, "Grid")),
+                    (ReviewView::Compare, ic(ph::COLUMNS, "A/B compare")),
+                    (ReviewView::Sheet, ic(ph::TABLE, "Contact sheet")),
+                ] {
+                    if v == ReviewView::Sheet && st.review_sweep.is_none() {
+                        continue;
+                    }
+                    if ui.selectable_label(st.review_view == v, label).clicked() && st.review_view != v {
+                        out.push(Msg::ReviewView(v));
+                    }
                 }
-                if ui.selectable_label(st.review_view == v, label).clicked() && st.review_view != v {
-                    out.push(Msg::ReviewView(v));
+            });
+            group(ui, "queue", |ui| {
+                ui.separator();
+                let generating = st.progress.len();
+                ui.weak(format!("{} unreviewed · oldest first", queue.len()));
+                if generating > 0 {
+                    ui.weak(format!("· {generating} generating, new images join the end"));
                 }
-            }
-            ui.separator();
-            let generating = st.progress.len();
-            ui.weak(format!("{} unreviewed · oldest first", queue.len()));
-            if generating > 0 {
-                ui.weak(format!("· {generating} generating, new images join the end"));
-            }
-            if ui.small_button("newest ›").on_hover_text("jump to the newest unreviewed image").clicked() {
-                out.push(Msg::ReviewNewest);
-            }
+                if ui.small_button("newest ›").on_hover_text("jump to the newest unreviewed image").clicked() {
+                    out.push(Msg::ReviewNewest);
+                }
+                let follow = ui.selectable_label(st.review_follow, ic(ph::BROADCAST, "Follow")).on_hover_text(
+                    "stay on the newest unreviewed image as new ones arrive; going to another image turns it off",
+                );
+                if follow.clicked() {
+                    out.push(Msg::ReviewFollow(!st.review_follow));
+                }
+            });
             // the current image is one style of a sweep: its contact sheet
             let sweep = queue
                 .get(st.review_cursor)
@@ -134,22 +147,33 @@ pub fn view(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
                 .and_then(|o| st.index.run(&o.name.run))
                 .and_then(|(p, r)| Some((p.project.id.clone(), r.sweep.as_ref()?)));
             if let Some((project, tag)) = sweep {
-                ui.separator();
-                let label = RichText::new(ic(ph::TABLE, &format!("Sweep {} contact sheet", tag.name)))
-                    .color(crate::widgets::ACCENT);
-                if ui
-                    .button(label)
-                    .on_hover_text(format!(
-                        "this image is the {} row of sweep {}: see every row side by side",
-                        tag.row(),
-                        tag.name
-                    ))
-                    .clicked()
-                {
-                    out.push(Msg::ReviewSweep(project, tag.name.clone()));
-                }
+                group(ui, "sweep", |ui| {
+                    ui.separator();
+                    let label = RichText::new(ic(ph::TABLE, &format!("Sweep {} contact sheet", tag.name)))
+                        .color(crate::widgets::ACCENT);
+                    if ui
+                        .button(label)
+                        .on_hover_text(format!(
+                            "this image is the {} row of sweep {}: see every row side by side",
+                            tag.row(),
+                            tag.name
+                        ))
+                        .clicked()
+                    {
+                        out.push(Msg::ReviewSweep(project, tag.name.clone()));
+                    }
+                });
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if st.review_view == ReviewView::Grid && !queue.is_empty() {
+                group(ui, "zoom", |ui| {
+                    ui.separator();
+                    grid_zoom(ui, st, ZoomGrid::Review, out);
+                });
+            }
+            right_group(ui, "right", |ui| {
+                if st.review_view == ReviewView::Grid {
+                    crate::widgets::details_toggle(ui, st, InfoPanel::Review, out);
+                }
                 let mut on = st.checkerboard;
                 if ui.checkbox(&mut on, "checkerboard behind alpha").changed() {
                     out.push(Msg::Checkerboard(on));
@@ -201,15 +225,37 @@ fn scope_panel(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     if ui.checkbox(&mut all_runs, "runs of all projects").on_hover_text(tip).changed() {
         out.push(Msg::ReviewAllRuns(all_runs));
     }
+    ui.horizontal_wrapped(|ui| {
+        // one group: the label wraps with its dropdown
+        crate::widgets::group(ui, "sort", |ui| {
+            ui.label(ic(ph::SORT_ASCENDING, "Sort"));
+            let order = st.config.review_order;
+            egui::ComboBox::from_id_salt("review_order")
+                .selected_text(order.name())
+                .show_ui(ui, |ui| {
+                    for o in ReviewOrder::EVERY {
+                        if ui.selectable_label(order == o, o.name()).clicked() && order != o {
+                            out.push(Msg::ReviewOrder(o));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "folders and projects: newest created first, last run first, A–Z, or the oldest projects \
+                     with images to review first, then those with none (a folder goes by the projects in it); \
+                     runs and sweeps stay newest first",
+                );
+        });
+        let mut hide = !st.config.review_show_reviewed;
+        let tip = "hide folders, projects, runs and sweeps with nothing to review (the selected one stays)";
+        if ui.checkbox(&mut hide, "hide reviewed").on_hover_text(tip).changed() {
+            out.push(Msg::ReviewHideReviewed(hide));
+        }
+    });
     let all = st.review_scope.is_none() && st.review_folder.is_none();
     if ui.selectable_label(all, format!("All projects ({})", st.unreviewed_outputs())).clicked() {
         out.push(Msg::ReviewScope(None));
     }
-    // Unreviewed images under a folder (relative to `projects/`).
-    let under = |f: &Path| -> usize {
-        let base = Path::new("projects").join(f);
-        st.index.projects.iter().filter(|p| p.dir.starts_with(&base)).map(|p| counts(p)[3]).sum()
-    };
     /// Whether the folder's name or anything under it matches the search
     /// (lowercase).
     fn folder_matches(st: &AppState, f: &Path, q: &str) -> bool {
@@ -224,23 +270,15 @@ fn scope_panel(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                 .any(|g| g != f && g.starts_with(f) && hit(&g.file_name().unwrap_or_default().to_string_lossy()))
     }
     /// `q`: the search (lowercase); a matching folder shows all it holds.
-    fn rec(
-        ui: &mut egui::Ui,
-        st: &AppState,
-        parent: &Path,
-        q: &str,
-        out: &mut Vec<Msg>,
-        under: &dyn Fn(&Path) -> usize,
-    ) {
+    fn rec(ui: &mut egui::Ui, st: &AppState, parent: &Path, q: &str, out: &mut Vec<Msg>) {
         let depth = parent.components().count() as f32 + 1.0;
-        let mut folders: Vec<_> = st.index.project_folders.iter().filter(|f| f.parent() == Some(parent)).collect();
-        folders.sort();
+        let (folders, ps) = st.review_tree_children(parent);
         for f in folders {
             if !q.is_empty() && !folder_matches(st, f, q) {
                 continue;
             }
             let own = f.file_name().unwrap_or_default().to_string_lossy().to_lowercase().contains(q);
-            let n = under(f);
+            let n = st.unreviewed_under(f);
             ui.horizontal(|ui| {
                 ui.add_space(12.0 * depth);
                 let name = f.file_name().unwrap_or_default().to_string_lossy();
@@ -249,17 +287,9 @@ fn scope_panel(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                     out.push(Msg::ReviewScopeFolder(f.clone()));
                 }
             });
-            rec(ui, st, f, if own { "" } else { q }, out, under);
+            rec(ui, st, f, if own { "" } else { q }, out);
         }
-        let dir = Path::new("projects").join(parent);
-        let mut ps: Vec<_> = st
-            .index
-            .projects
-            .iter()
-            .filter(|p| p.dir.parent() == Some(dir.as_path()))
-            .filter(|p| q.is_empty() || p.name().to_lowercase().contains(q))
-            .collect();
-        ps.sort_by_key(|p| p.name());
+        let ps = ps.into_iter().filter(|p| q.is_empty() || p.name().to_lowercase().contains(q));
         for p in ps {
             let u = counts(p)[3];
             ui.horizontal(|ui| {
@@ -294,6 +324,9 @@ fn scope_panel(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                         (sel, ic(ph::TABLE, &format!("sweep {name} ({u})")), "this style sweep's contact sheet", u, msg)
                     }
                 };
+                if u == 0 && !sel && !st.config.review_show_reviewed {
+                    continue;
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(12.0 * depth + 18.0);
                     let text = if u == 0 { RichText::new(label).weak() } else { RichText::new(label) };
@@ -308,8 +341,10 @@ fn scope_panel(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     ScrollArea::vertical().auto_shrink([false, true]).id_salt("review_scope_tree").show(ui, |ui| {
         if !q.is_empty() && !folder_matches(st, Path::new(""), &q) {
             ui.weak("No project or folder matches.");
+        } else if q.is_empty() && st.review_tree_children(Path::new("")) == (vec![], vec![]) {
+            ui.weak("Nothing to review. Untick hide reviewed to see every project.");
         }
-        rec(ui, st, Path::new(""), &q, out, &under);
+        rec(ui, st, Path::new(""), &q, out);
     });
 }
 
@@ -389,9 +424,22 @@ pub fn recipe_grid(
         ui.weak("no recipe in this image");
         return;
     };
-    let project = st.output_link(image).and_then(|o| st.project_of_link(o)).map(|p| p.name()).unwrap_or_default();
-    let run =
-        st.output_link(image).and_then(|o| st.index.run(&o.name.run)).map(|(_, r)| r.label.clone()).unwrap_or_default();
+    let link = st.output_link(image);
+    let project = link.and_then(|o| st.project_of_link(o)).map(|p| p.name()).unwrap_or_default();
+    let run_entry = link.and_then(|o| st.index.run(&o.name.run)).map(|(_, r)| r);
+    let run = run_entry.map(|r| r.label.clone()).unwrap_or_default();
+    // queued with its revision; generated when stored (older runs have no
+    // timing: the image ID's minute)
+    let queued = link
+        .zip(run_entry)
+        .and_then(|(o, r)| r.revisions.iter().find(|v| v.rev == o.name.rev))
+        .map(|v| crate::widgets::when(v.created));
+    let timing =
+        link.zip(run_entry).and_then(|(o, r)| r.timings.iter().find(|t| t.rev == o.name.rev && t.seed == o.name.seed));
+    let generated = match timing {
+        Some(t) => Some(crate::widgets::when(t.done)),
+        None => image.id.time().map(|t| format!("{} (from its ID)", crate::widgets::when(t))),
+    };
     let mode = match &r.mode {
         increart_core::model::Mode::Generate => "generate".to_string(),
         increart_core::model::Mode::Edit { strength, init } => {
@@ -402,9 +450,10 @@ pub fn recipe_grid(
         }
     };
     egui::Grid::new(ui.scope_id().with("recipe")).num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
-        let rows: Vec<(&str, String)> = vec![
-            ("project", project),
-            ("run", run),
+        let mut rows: Vec<(&str, String)> = vec![("project", project), ("run", run)];
+        rows.extend(queued.map(|q| ("queued", q)));
+        rows.extend(generated.map(|g| ("generated", g)));
+        rows.extend([
             ("seed", r.seed.to_string()),
             ("recipe", r.model.recipe.clone()),
             ("size", crate::widgets::size_info(r.width, r.height)),
@@ -419,7 +468,7 @@ pub fn recipe_grid(
             ("GPU", r.device.clone()),
             ("elapsed", format!("{:.1} s", r.elapsed_s)),
             ("sd.cpp", r.sdcpp.clone()),
-        ];
+        ]);
         for (k, v) in rows {
             ui.weak(k);
             ui.label(v);
@@ -442,10 +491,10 @@ pub fn recipe_grid(
         });
     }
     ui.weak("prompt_sent");
-    ui.add(egui::Label::new(RichText::new(&r.prompt_sent).small()).wrap());
+    ui.add(egui::Label::new(r.prompt_sent.as_str()).wrap());
     if !r.negative_prompt.is_empty() {
         ui.weak("negative");
-        ui.add(egui::Label::new(RichText::new(&r.negative_prompt).small()).wrap());
+        ui.add(egui::Label::new(r.negative_prompt.as_str()).wrap());
     }
 }
 
@@ -526,7 +575,11 @@ fn single(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, out
 /// "Use this image" actions: into the current, its own, a new or a
 /// duplicated project, or to the input side (DESIGN.md, Outputs as inputs).
 pub fn use_menu(ui: &mut egui::Ui, root: &Path, image: &increart_core::ImageRef, out: &mut Vec<Msg>) {
-    copy_image_item(ui, root, image, out);
+    image_menu_items(ui, root, image, out);
+    if ui.button(ic(ph::REPEAT_ONCE, "Same recipe & seed in Generate")).clicked() {
+        out.push(Msg::RecipeInGenerate(image.clone()));
+        ui.close();
+    }
     ui.separator();
     for (label, target) in [
         (ic(ph::PLUS, "Use in current project"), UseTarget::CurrentProject),
@@ -552,16 +605,38 @@ pub fn use_menu(ui: &mut egui::Ui, root: &Path, image: &increart_core::ImageRef,
 
 fn grid(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, out: &mut Vec<Msg>) {
     let queue = st.review_queue();
+    if !st.info_hidden.contains(&InfoPanel::Review) {
+        let cur = st.review_cursor.min(queue.len() - 1);
+        Panel::right("review_info").default_size(300.0).show(ui, |ui| {
+            Panel::bottom("review_grid_actions").show(ui, |ui| {
+                ui.add_space(4.0);
+                verdict_buttons(ui, out, Msg::ReviewCurrent);
+                ui.add_space(2.0);
+            });
+            ScrollArea::vertical().auto_shrink([false, false]).id_salt("review_info_scroll").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Details").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(ph::X).on_hover_text("hide the details panel").clicked() {
+                            out.push(Msg::ShowInfo(InfoPanel::Review, false));
+                        }
+                    });
+                });
+                info_panel(ui, st, root, tex, queue[cur], cur, queue.len(), out);
+            });
+        });
+    }
+    let size = st.grid_cell_size(ZoomGrid::Review) as f32;
     egui::CentralPanel::default().show(ui, |ui| {
         let bg = crate::tiles::background(ui, st, out);
         let mut rects = vec![];
-        ui.weak("Click to select, double-click to open; keys rate the selected image (or the picked ones).");
+        grid_ctrl_scroll(ui, st, ZoomGrid::Review, out);
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::splat(6.0);
                 for (i, o) in queue.iter().enumerate() {
                     let t = tex.thumb(root, &o.image);
-                    let r = thumb(ui, t.as_ref(), 200.0, crate::tiles::cursor(st, i == st.review_cursor), None)
+                    let r = thumb(ui, t.as_ref(), size, crate::tiles::cursor(st, i == st.review_cursor), None)
                         .on_hover_text(describe(st, o));
                     crate::tiles::mark(ui, st, r.rect, &o.image);
                     rects.push((o.image.clone(), r.rect));
@@ -616,12 +691,31 @@ fn sheet_keys(ui: &egui::Ui, picking: bool, out: &mut Vec<Msg>) {
 
 /// A style sweep as a contact sheet: a row per style, a column per seed.
 fn sheet(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, out: &mut Vec<Msg>) {
+    use increart_core::config::SheetRows;
     use increart_gui_core::SheetCell;
     let Some(sh) = st.sheet() else { return };
     let size = st.sheet_cell_size() as f32;
     egui::CentralPanel::default().show(ui, |ui| {
         let bg = crate::tiles::background(ui, st, out);
         let mut rects = vec![];
+        // as many rows side by side as fit (room left for the scroll bar,
+        // so it can't flip the count); Auto's headers go compact to fold
+        let cells_w = sh.seeds.len().max(1) as f32 * (size + SHEET_GAP) - SHEET_GAP;
+        let avail = ui.available_width() - 16.0;
+        let fit = |w: f32| (((avail + SHEET_BAND_GAP) / (w + SHEET_BAND_GAP)) as usize).clamp(1, sh.rows.len().max(1));
+        let compact_w = cells_w.max(SHEET_CAPTION_MIN);
+        let compact = match st.config.sheet_rows {
+            SheetRows::Auto => fit(compact_w) > 1,
+            SheetRows::Full => false,
+            SheetRows::Compact => true,
+        };
+        let band_w = if compact { compact_w } else { SHEET_HEAD + SHEET_GAP + cells_w };
+        let k = fit(band_w);
+        if k != st.sheet_bands {
+            out.push(Msg::SheetBands(k));
+        }
+        // one seed side by side: its number up here, not over every band
+        let seed_heads = !(k > 1 && sh.seeds.len() == 1);
         ui.horizontal(|ui| {
             let mut f = st.sheet_filter.clone();
             let r = ui.add(
@@ -645,10 +739,27 @@ fn sheet(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, out:
             }
             ui.separator();
             zoom(ui, st, out);
+            let mode = st.config.sheet_rows;
+            if ui
+                .button(ic(ph::ROWS, mode.name()))
+                .on_hover_text(
+                    "Row headers: Full (the style, counts and buttons beside the row), Compact (the style above; \
+                     right-click it to rate the row or use the style) or Auto (compact once rows sit side by side). \
+                     Click for the next.",
+                )
+                .clicked()
+            {
+                out.push(Msg::SheetRows(mode.next()));
+            }
+            if !seed_heads && let Some(s) = sh.seeds.first() {
+                ui.separator();
+                ui.weak(format!("seed {s}"));
+            }
             ui.separator();
             ui.weak(ph::INFO).on_hover_text(
                 "Click selects, double-click opens; keys rate, arrows move. Row buttons rate unreviewed images only. \
-                 Ctrl+click, Shift+click or drag a box to pick images: to rate them together, or Tile… them.",
+                 Ctrl+click, Shift+click or drag a box to pick images: to rate them together, Tile… them, or \
+                 sweep their styles again (New sweep from their styles…).",
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let kept = sh
@@ -682,129 +793,261 @@ fn sheet(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, out:
             out.push(Msg::SheetZoom { size: (size * zoom).round() as u32, save: true });
         }
         ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("contact_sheet").spacing([6.0, 6.0]).show(ui, |ui| {
-                ui.label("");
-                for s in &sh.seeds {
-                    ui.weak(format!("seed {s}"));
-                }
-                ui.end_row();
-                for (r, row) in sh.rows.iter().enumerate() {
-                    ui.vertical(|ui| {
-                        ui.set_width(170.0);
-                        let style = row.run.sweep.as_ref().map_or(row.run.label.clone(), |s| s.row());
-                        ui.label(RichText::new(style).strong()).on_hover_text(&row.run.label);
-                        let param = row.run.sweep.as_ref().and_then(|s| s.param.as_ref());
-                        if let Some(p) =
-                            param.filter(|p| p.name == "cfg" && p.value.parse().is_ok_and(|c: f32| c <= 1.0))
-                        {
-                            ui.colored_label(crate::widgets::NEUTRAL, "no negative prompt")
-                                .on_hover_text(format!("at {} the negative prompt isn't used", p.label()));
+            ui.spacing_mut().item_spacing = Vec2::splat(SHEET_GAP);
+            if seed_heads {
+                ui.horizontal(|ui| {
+                    for b in 0..k {
+                        if b > 0 {
+                            ui.add_space(SHEET_BAND_GAP - SHEET_GAP);
                         }
-                        let [mut g, mut b, mut u] = [0, 0, 0];
-                        for c in &row.cells {
-                            if let SheetCell::Image(o) = c {
-                                match o.verdict {
-                                    Some(Verdict::Good) => g += 1,
-                                    Some(Verdict::Bad) => b += 1,
-                                    None => u += 1,
-                                    _ => {}
-                                }
-                            }
+                        if !compact {
+                            ui.add_space(SHEET_HEAD + SHEET_GAP);
                         }
-                        ui.weak(format!("{g} good · {b} bad · {u} new"));
                         ui.horizontal(|ui| {
-                            for (label, v, c) in VERDICTS {
-                                let b = egui::Button::new(RichText::new(&label[..1]).color(c));
-                                if ui
-                                    .add_enabled(u > 0, b)
-                                    .on_hover_text(format!("{label} for this row's unreviewed images"))
-                                    .clicked()
-                                {
-                                    out.push(Msg::SheetRow(r, v));
-                                }
-                            }
-                            if ui
-                                .small_button(ph::ARROW_SQUARE_OUT)
-                                .on_hover_text(if param.is_some() {
-                                    "Use these settings: open its run in Generate"
-                                } else {
-                                    "Use this style: open its run in Generate"
-                                })
-                                .clicked()
-                            {
-                                out.push(Msg::RunInGenerate(row.run.id.clone()));
+                            ui.set_width(if compact { band_w } else { cells_w });
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            for s in &sh.seeds {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(size, font.size + 4.0), Sense::hover());
+                                ui.painter().text(
+                                    rect.left_center(),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("seed {s}"),
+                                    font.clone(),
+                                    ui.visuals().weak_text_color(),
+                                );
                             }
                         });
-                    });
-                    for (c, cell) in row.cells.iter().enumerate() {
-                        let sel = crate::tiles::cursor(st, st.sheet_cell == (r, c));
-                        match cell {
-                            SheetCell::Image(o) => {
-                                let t = tex.thumb(root, &o.image);
-                                let resp = thumb(ui, t.as_ref(), size, sel, o.verdict.map(|v| verdict_color(Some(v))))
-                                    .on_hover_text(describe(st, o));
-                                crate::tiles::mark(ui, st, resp.rect, &o.image);
-                                rects.push((o.image.clone(), resp.rect));
-                                if !crate::tiles::click(ui, st, &resp, &o.image, out) && resp.clicked() {
-                                    out.push(Msg::SheetCell(r, c));
-                                }
-                                if resp.double_clicked() {
-                                    out.push(Msg::Preview(Some(o.image.clone())));
-                                }
-                                resp.context_menu(|ui| {
-                                    crate::tiles::menu(ui, st, &o.image, out);
-                                    for (label, v, col) in VERDICTS {
-                                        if ui.button(RichText::new(label).color(col)).clicked() {
-                                            out.push(Msg::ReviewLink(o.path.clone(), Some(v)));
-                                            ui.close();
-                                        }
-                                    }
-                                    ui.separator();
-                                    use_menu(ui, root, &o.image, out);
-                                });
-                            }
-                            SheetCell::Pending | SheetCell::Empty => {
-                                let (text, tip) = match cell {
-                                    SheetCell::Pending => ("…", "still to be generated"),
-                                    _ => ("–", "not generated (cancelled or failed)"),
-                                };
-                                let resp = empty_cell(ui, size, sel, text).on_hover_text(tip);
-                                if resp.clicked() {
-                                    out.push(Msg::SheetCell(r, c));
-                                }
-                            }
+                    }
+                });
+            }
+            for (l, line) in sh.rows.chunks(k).enumerate() {
+                ui.horizontal_top(|ui| {
+                    for (b, row) in line.iter().enumerate() {
+                        let r = l * k + b;
+                        if b > 0 {
+                            ui.add_space(SHEET_BAND_GAP - SHEET_GAP);
+                        }
+                        if compact {
+                            ui.vertical(|ui| {
+                                ui.set_width(band_w);
+                                sheet_caption(ui, row, r, out);
+                                ui.horizontal(|ui| sheet_row(ui, st, root, tex, row, r, size, &mut rects, out));
+                            });
+                        } else {
+                            sheet_head(ui, row, r, out);
+                            sheet_row(ui, st, root, tex, row, r, size, &mut rects, out);
                         }
                     }
-                    ui.end_row();
-                }
-            });
+                });
+            }
         });
         crate::tiles::band(ui, st, &bg, &rects, out);
     });
 }
 
+/// The contact sheet's spacing, its full row header's width, and the least
+/// width a compact row's caption gets (cells smaller than that leave room).
+const SHEET_GAP: f32 = 6.0;
+const SHEET_BAND_GAP: f32 = 24.0;
+const SHEET_HEAD: f32 = 170.0;
+const SHEET_CAPTION_MIN: f32 = 110.0;
+
+/// A sheet row's (good, bad, unreviewed) images.
+fn sheet_counts(row: &increart_gui_core::SheetRow) -> [usize; 3] {
+    let mut n = [0; 3];
+    for c in &row.cells {
+        if let increart_gui_core::SheetCell::Image(o) = c {
+            match o.verdict {
+                Some(Verdict::Good) => n[0] += 1,
+                Some(Verdict::Bad) => n[1] += 1,
+                None => n[2] += 1,
+                _ => {}
+            }
+        }
+    }
+    n
+}
+
+/// A sheet row's style, and its CFG when that is 1 or below (the negative
+/// prompt unused).
+fn sheet_style(row: &increart_gui_core::SheetRow) -> (String, Option<String>) {
+    let style = row.run.sweep.as_ref().map_or(row.run.label.clone(), |s| s.row());
+    let param = row.run.sweep.as_ref().and_then(|s| s.param.as_ref());
+    let low_cfg = param.filter(|p| p.name == "cfg" && p.value.parse().is_ok_and(|c: f32| c <= 1.0)).map(|p| p.label());
+    (style, low_cfg)
+}
+
+fn sheet_use_tip(row: &increart_gui_core::SheetRow) -> &'static str {
+    if row.run.sweep.as_ref().is_some_and(|s| s.param.is_some()) {
+        "Use these settings: open its run in Generate"
+    } else {
+        "Use this style: open its run in Generate"
+    }
+}
+
+/// A full row header beside the row: the style, its counts, G N B for its
+/// unreviewed images and Use.
+fn sheet_head(ui: &mut egui::Ui, row: &increart_gui_core::SheetRow, r: usize, out: &mut Vec<Msg>) {
+    ui.vertical(|ui| {
+        ui.set_width(SHEET_HEAD);
+        let (style, low_cfg) = sheet_style(row);
+        ui.label(RichText::new(style).strong()).on_hover_text(&row.run.label);
+        if let Some(cfg) = low_cfg {
+            ui.colored_label(crate::widgets::NEUTRAL, "no negative prompt")
+                .on_hover_text(format!("at {cfg} the negative prompt isn't used"));
+        }
+        let [g, b, u] = sheet_counts(row);
+        ui.weak(format!("{g} good · {b} bad · {u} new"));
+        ui.horizontal(|ui| {
+            for (label, v, c) in VERDICTS {
+                let b = egui::Button::new(RichText::new(&label[..1]).color(c));
+                if ui.add_enabled(u > 0, b).on_hover_text(format!("{label} for this row's unreviewed images")).clicked()
+                {
+                    out.push(Msg::SheetRow(r, v));
+                }
+            }
+            if ui.small_button(ph::ARROW_SQUARE_OUT).on_hover_text(sheet_use_tip(row)).clicked() {
+                out.push(Msg::RunInGenerate(row.run.id.clone()));
+            }
+        });
+    });
+}
+
+/// A compact row header: the style as a caption above the row; its menu
+/// rates the row's unreviewed images or uses the style.
+fn sheet_caption(ui: &mut egui::Ui, row: &increart_gui_core::SheetRow, r: usize, out: &mut Vec<Msg>) {
+    let (style, low_cfg) = sheet_style(row);
+    ui.horizontal(|ui| {
+        if let Some(cfg) = &low_cfg {
+            ui.colored_label(crate::widgets::NEUTRAL, ph::WARNING)
+                .on_hover_text(format!("no negative prompt: at {cfg} it isn't used"));
+        }
+        let resp = ui
+            .add(egui::Label::new(RichText::new(style).strong()).truncate().sense(Sense::click()))
+            .on_hover_text(format!("{}\nRight-click: rate the row, or use it", row.run.label));
+        resp.context_menu(|ui| {
+            let u = sheet_counts(row)[2];
+            for (label, v, c) in VERDICTS {
+                let b = egui::Button::new(RichText::new(format!("{label} for the unreviewed")).color(c));
+                if ui.add_enabled(u > 0, b).clicked() {
+                    out.push(Msg::SheetRow(r, v));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            let label = sheet_use_tip(row).split(':').next().unwrap_or_default();
+            if ui.button(ic(ph::ARROW_SQUARE_OUT, label)).clicked() {
+                out.push(Msg::RunInGenerate(row.run.id.clone()));
+                ui.close();
+            }
+        });
+    });
+}
+
+/// A sheet row's cells, a seed each.
+#[allow(clippy::too_many_arguments)]
+fn sheet_row(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    root: &Path,
+    tex: &mut Textures,
+    row: &increart_gui_core::SheetRow,
+    r: usize,
+    size: f32,
+    rects: &mut Vec<(increart_core::ImageRef, egui::Rect)>,
+    out: &mut Vec<Msg>,
+) {
+    use increart_gui_core::SheetCell;
+    for (c, cell) in row.cells.iter().enumerate() {
+        let sel = crate::tiles::cursor(st, st.sheet_cell == (r, c));
+        match cell {
+            SheetCell::Image(o) => {
+                let t = tex.thumb(root, &o.image);
+                let resp = thumb(ui, t.as_ref(), size, sel, o.verdict.map(|v| verdict_color(Some(v))))
+                    .on_hover_text(describe(st, o));
+                crate::tiles::mark(ui, st, resp.rect, &o.image);
+                rects.push((o.image.clone(), resp.rect));
+                if !crate::tiles::click(ui, st, &resp, &o.image, out) && resp.clicked() {
+                    out.push(Msg::SheetCell(r, c));
+                }
+                if resp.double_clicked() {
+                    out.push(Msg::Preview(Some(o.image.clone())));
+                }
+                resp.context_menu(|ui| {
+                    crate::tiles::menu(ui, st, &o.image, out);
+                    for (label, v, col) in VERDICTS {
+                        if ui.button(RichText::new(label).color(col)).clicked() {
+                            out.push(Msg::ReviewLink(o.path.clone(), Some(v)));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    use_menu(ui, root, &o.image, out);
+                });
+            }
+            SheetCell::Pending | SheetCell::Empty => {
+                let (text, tip) = match cell {
+                    SheetCell::Pending => ("…", "still to be generated"),
+                    _ => ("–", "not generated (cancelled or failed)"),
+                };
+                let resp = empty_cell(ui, size, sel, text).on_hover_text(tip);
+                if resp.clicked() {
+                    out.push(Msg::SheetCell(r, c));
+                }
+            }
+        }
+    }
+}
+
 /// The contact sheet's cell size: a slider; also Ctrl+scroll over the sheet.
 fn zoom(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     use increart_gui_core::{SHEET_CELL_DEFAULT, SHEET_CELL_MAX, SHEET_CELL_MIN};
-    let now = st.sheet_cell_size();
+    let range = (SHEET_CELL_MIN, SHEET_CELL_MAX, SHEET_CELL_DEFAULT);
+    if let Some((size, save)) = zoom_control(ui, st.sheet_cell_size(), range, "cell size", "the sheet") {
+        out.push(Msg::SheetZoom { size, save });
+    }
+}
+
+/// An image grid's tile size: a slider; also Ctrl+scroll over the grid.
+pub fn grid_zoom(ui: &mut egui::Ui, st: &AppState, grid: ZoomGrid, out: &mut Vec<Msg>) {
+    let range = (GRID_CELL_MIN, GRID_CELL_MAX, grid.default_size());
+    if let Some((size, save)) = zoom_control(ui, st.grid_cell_size(grid), range, "tile size", "the grid") {
+        out.push(Msg::GridZoom { grid, size, save });
+    }
+}
+
+/// Ctrl+scroll over the rest of `ui`: an image grid's tile size.
+pub fn grid_ctrl_scroll(ui: &egui::Ui, st: &AppState, grid: ZoomGrid, out: &mut Vec<Msg>) {
+    let over = ui.rect_contains_pointer(ui.available_rect_before_wrap());
+    let zoom = ui.input(|i| i.zoom_delta());
+    if over && zoom != 1.0 {
+        let size = (st.grid_cell_size(grid) as f32 * zoom).round() as u32;
+        out.push(Msg::GridZoom { grid, size, save: true });
+    }
+}
+
+/// − slider +: a size within (min, max, default; double-click the slider
+/// for the default), and whether to save it (not while dragging).
+fn zoom_control(ui: &mut egui::Ui, now: u32, range: (u32, u32, u32), what: &str, over: &str) -> Option<(u32, bool)> {
+    let (min, max, default) = range;
     let step = |ui: &mut egui::Ui, icon: &str, tip: &str, to: u32| {
         ui.add_enabled(to != now, egui::Button::new(icon).small()).on_hover_text(tip).clicked().then_some(to)
     };
-    let mut to = step(ui, ph::MAGNIFYING_GLASS_MINUS, "smaller", now.saturating_sub(32).max(SHEET_CELL_MIN));
+    let mut to = step(ui, ph::MAGNIFYING_GLASS_MINUS, "smaller", now.saturating_sub(32).max(min));
     let mut size = now;
     let r = ui
-        .add(egui::Slider::new(&mut size, SHEET_CELL_MIN..=SHEET_CELL_MAX).show_value(false))
-        .on_hover_text(format!("cell size {now} (Ctrl+scroll over the sheet; double-click: {SHEET_CELL_DEFAULT})"));
+        .add(egui::Slider::new(&mut size, min..=max).show_value(false))
+        .on_hover_text(format!("{what} {now} (Ctrl+scroll over {over}; double-click: {default})"));
     if r.double_clicked() {
-        size = SHEET_CELL_DEFAULT;
+        size = default;
     }
-    if size != now || r.drag_stopped() {
-        out.push(Msg::SheetZoom { size, save: !r.dragged() });
-    }
-    to = to.or(step(ui, ph::MAGNIFYING_GLASS_PLUS, "larger", (now + 32).min(SHEET_CELL_MAX)));
+    let mut changed = (size != now || r.drag_stopped()).then_some((size, !r.dragged()));
+    to = to.or(step(ui, ph::MAGNIFYING_GLASS_PLUS, "larger", (now + 32).min(max)));
     if let Some(size) = to {
-        out.push(Msg::SheetZoom { size, save: true });
+        changed = Some((size, true));
     }
+    changed
 }
 
 /// A contact sheet cell without an image: `…` pending, `–` none.
@@ -867,7 +1110,7 @@ fn compare(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, ou
                             let t = tex.full(root, &o.image);
                             let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click());
                             image_fit_bg(&ui.painter_at(rect), rect.shrink(4.0), t.as_ref(), st.checkerboard);
-                            resp.context_menu(|ui| copy_image_item(ui, root, &o.image, out));
+                            resp.context_menu(|ui| image_menu_items(ui, root, &o.image, out));
                         });
                     }
                     None => {
@@ -904,33 +1147,47 @@ pub fn output_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out:
         out.push(Msg::TitleDialog(Some(img.clone())));
     }
     Panel::top("out_tabs").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(st.output_tab == OutputTab::Grid, ic(ph::SQUARES_FOUR, "Grid")).clicked() {
-                out.push(Msg::OutputTab(OutputTab::Grid));
-            }
-            if ui.selectable_label(st.output_tab == OutputTab::Folder, ic(ph::FOLDER, "Folder")).clicked() {
-                out.push(Msg::OutputTab(OutputTab::Folder));
-            }
-            ui.separator();
-            let shown = &images;
-            if ui
-                .add_enabled(
-                    !shown.is_empty(),
-                    egui::Button::new(ic(ph::EXPORT, &format!("Export these {}…", shown.len()))),
-                )
-                .clicked()
-            {
-                out.push(Msg::OpenExport(shown.iter().map(|o| o.image.clone()).collect(), source_name(st)));
-            }
+        // groups wrap whole when the bar is short of room
+        use crate::widgets::{group, right_group};
+        ui.horizontal_wrapped(|ui| {
+            group(ui, "tabs", |ui| {
+                if ui.selectable_label(st.output_tab == OutputTab::Grid, ic(ph::SQUARES_FOUR, "Grid")).clicked() {
+                    out.push(Msg::OutputTab(OutputTab::Grid));
+                }
+                if ui.selectable_label(st.output_tab == OutputTab::Folder, ic(ph::FOLDER, "Folder")).clicked() {
+                    out.push(Msg::OutputTab(OutputTab::Folder));
+                }
+            });
+            group(ui, "export", |ui| {
+                ui.separator();
+                let shown = &images;
+                if ui
+                    .add_enabled(
+                        !shown.is_empty(),
+                        egui::Button::new(ic(ph::EXPORT, &format!("Export these {}…", shown.len()))),
+                    )
+                    .clicked()
+                {
+                    out.push(Msg::OpenExport(shown.iter().map(|o| o.image.clone()).collect(), source_name(st)));
+                }
+            });
+            group(ui, "source", |ui| {
+                if st.output_tab == OutputTab::Grid {
+                    ui.weak(format!("· {}", source_name(st)));
+                }
+                if let OutputSource::Collection(f) = &st.output_source
+                    && ui.button(ic(ph::FOLDER_OPEN, "Open in file manager")).clicked()
+                {
+                    out.push(Msg::ShowInFileManager(Path::new("collections").join(f)));
+                }
+            });
             if st.output_tab == OutputTab::Grid {
-                ui.weak(format!("· {}", source_name(st)));
+                group(ui, "zoom", |ui| {
+                    ui.separator();
+                    grid_zoom(ui, st, ZoomGrid::Output, out);
+                });
             }
-            if let OutputSource::Collection(f) = &st.output_source
-                && ui.button(ic(ph::FOLDER_OPEN, "Open in file manager")).clicked()
-            {
-                out.push(Msg::ShowInFileManager(Path::new("collections").join(f)));
-            }
-            crate::widgets::details_toggle(ui, st, InfoPanel::Output, out);
+            right_group(ui, "right", |ui| crate::widgets::details_toggle(ui, st, InfoPanel::Output, out));
         });
     });
     if st.output_tab == OutputTab::Grid {
@@ -1376,7 +1633,7 @@ fn lineage_row(
                 tex.dims_text(root, &i),
                 st.usage(&i).label().map(|u| format!("\nused: {u}")).unwrap_or_default()
             ));
-            r.context_menu(|ui| copy_image_item(ui, root, &i, out));
+            r.context_menu(|ui| image_menu_items(ui, root, &i, out));
             if r.double_clicked() {
                 out.push(Msg::Preview(Some(i.clone())));
             }
@@ -1503,6 +1760,8 @@ fn image_grid(
 ) {
     let bg = crate::tiles::background(ui, st, out);
     let mut rects = vec![];
+    let size = st.grid_cell_size(ZoomGrid::Output) as f32;
+    grid_ctrl_scroll(ui, st, ZoomGrid::Output, out);
     ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(6.0);
@@ -1514,7 +1773,7 @@ fn image_grid(
                     .map(|(_, run)| format!("{}\n{}\ndouble-click: full size", describe(st, o), short(&run.prompt, 80)))
                     .unwrap_or_else(|| "double-click: full size".into());
                 let selected = crate::tiles::cursor(st, st.output_selected.as_ref() == Some(&o.image));
-                let r = thumb(ui, t.as_ref(), 180.0, selected, Some(verdict_color(o.verdict))).on_hover_text(tip);
+                let r = thumb(ui, t.as_ref(), size, selected, Some(verdict_color(o.verdict))).on_hover_text(tip);
                 if rects.is_empty() {
                     // where it is, for the screenshot tour's double-click check
                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_first_output"), r.rect));

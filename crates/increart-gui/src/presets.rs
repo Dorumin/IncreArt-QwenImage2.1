@@ -4,7 +4,8 @@
 use eframe::egui::{self, ComboBox, RichText, ScrollArea};
 use increart_core::prompts::{PresetKey, Sweep};
 use increart_core::prompts::{PromptPreset, PromptPresets, PromptTask};
-use increart_gui_core::{AppState, GenerateForm, Msg, PresetsEditor, PresetsView, SavePresetDialog};
+use increart_gui_core::preset_matches as matches;
+use increart_gui_core::{AppState, GenerateForm, Msg, PresetsEditor, PresetsView, SavePresetDialog, needs_refs};
 
 use crate::widgets::{BAD, ICON_FILL, ic, ph, short};
 
@@ -13,29 +14,13 @@ pub fn prompt_id() -> egui::Id {
     egui::Id::unique("gen_prompt")
 }
 
-/// How many reference images a prompt needs: its highest `<imageN>`.
-fn needs_refs(prompt: &str) -> usize {
-    increart_gui_core::image_tags(prompt).into_iter().map(|(_, n)| n).max().unwrap_or(0)
-}
-
-fn matches(p: &PromptPreset, q: &str) -> bool {
-    [&p.name, &p.description, &p.prompt, &p.group].iter().any(|s| s.to_lowercase().contains(q))
-}
-
 /// The Presets window, beside Generate: tasks on the left, their presets on
 /// the right. Click replaces the prompt, Shift+click inserts at its cursor.
 pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     let Some(panel) = &st.presets_panel else { return };
     let list = &st.prompt_presets;
     let refs = st.generate.refs().len();
-    // in sweep mode a click ticks the preset instead of using it
-    let style_sweep = st.generate.sweep.on && st.generate.sweep.vary == increart_core::prompts::SweepVary::Style;
-    let sweep = style_sweep.then_some(st.generate.sweep.selected.as_slice());
-    // Ticked only in a style sweep
-    let view = match &panel.view {
-        PresetsView::Ticked(_) if sweep.is_none() => &PresetsView::Favourites,
-        v => v,
-    };
+    let view = &panel.view;
     let mut open = true;
     egui::Window::new(ic(ph::SWATCHES, "Prompt presets"))
         .id(egui::Id::unique("prompt_presets_window"))
@@ -68,57 +53,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
                 }
                 ui.weak(format!("{} presets in {} tasks", list.count(), list.tasks.len()));
             });
-            if let Some(ticked) = sweep {
-                ui.horizontal(|ui| {
-                    ui.weak("Style sweep: click to tick or untick a preset  ·  ★: favourite");
-                    let q = panel.search.to_lowercase();
-                    let all = shown(list, view, ticked, &q);
-                    let usable: Vec<_> = all
-                        .iter()
-                        .copied()
-                        .filter(|&(t, p)| needs_refs(&list.tasks[t].presets[p].prompt) <= refs)
-                        .collect();
-                    let skipped = all.len() - usable.len();
-                    // the Ticked view only unticks: Clear all ticks does it
-                    let ticked_view = matches!(view, PresetsView::Ticked(_)) && q.is_empty();
-                    let tip = match skipped {
-                        0 => "tick every preset listed here".to_string(),
-                        n => format!("tick every preset listed here ({n} need more reference images and are left out)"),
-                    };
-                    if !ticked_view
-                        && ui
-                            .add_enabled(
-                                !usable.is_empty(),
-                                egui::Button::new(ic(ph::CHECK_SQUARE, "Tick all")).small(),
-                            )
-                            .on_hover_text(tip)
-                            .on_disabled_hover_text(format!(
-                                "every preset listed here needs more reference images than Generate has ({refs})"
-                            ))
-                            .clicked()
-                    {
-                        out.push(Msg::SweepTicks(usable, true));
-                    }
-                    if !ticked_view
-                        && ui
-                            .add_enabled(!all.is_empty(), egui::Button::new(ic(ph::SQUARE, "Untick all")).small())
-                            .on_hover_text("untick every preset listed here")
-                            .clicked()
-                    {
-                        out.push(Msg::SweepTicks(all, false));
-                    }
-                    let clear = egui::Button::new(ic(ph::X, &format!("Clear all ticks ({})", ticked.len()))).small();
-                    if ui
-                        .add_enabled(!ticked.is_empty(), clear)
-                        .on_hover_text("untick every preset, in every task")
-                        .clicked()
-                    {
-                        out.push(Msg::SweepClearTicks);
-                    }
-                });
-            } else {
-                ui.weak("Click: replace the prompt  ·  Shift+click: insert at the prompt's cursor  ·  ★: favourite");
-            }
+            ui.weak("Click: replace the prompt  ·  Shift+click: insert at the prompt's cursor  ·  ★: favourite");
             ui.separator();
             // the lists take what the (resizable) window leaves above the buttons
             let height = (ui.available_height() - 40.0).max(120.0);
@@ -131,7 +66,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
                         ui,
                         |ui| {
                             ui.set_width(190.0);
-                            task_list(ui, list, view, sweep, panel.search.is_empty(), out)
+                            task_list(ui, list, view, panel.search.is_empty(), out)
                         },
                     );
                 });
@@ -141,7 +76,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
                         .id_salt("preset_list")
                         .max_height(height)
                         .auto_shrink([false, false])
-                        .show(ui, |ui| preset_list(ui, list, view, &panel.search.to_lowercase(), refs, sweep, out));
+                        .show(ui, |ui| preset_list(ui, list, view, &panel.search.to_lowercase(), refs, out));
                 });
             });
             ui.separator();
@@ -164,45 +99,38 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     }
 }
 
-/// Ticked presets of task `t` (by name).
-fn ticked_in(t: &PromptTask, ticks: &[PresetKey]) -> usize {
-    t.presets.iter().filter(|p| ticks.iter().any(|k| k.task == t.name && k.name == p.name)).count()
-}
-
-fn task_list(
-    ui: &mut egui::Ui,
-    list: &PromptPresets,
-    view: &PresetsView,
-    ticks: Option<&[PresetKey]>,
-    enabled: bool,
-    out: &mut Vec<Msg>,
-) {
+fn task_list(ui: &mut egui::Ui, list: &PromptPresets, view: &PresetsView, enabled: bool, out: &mut Vec<Msg>) {
     ui.add_enabled_ui(enabled, |ui| {
         let favs = list.tasks.iter().flat_map(|t| &t.presets).filter(|p| p.favourite).count();
         let fav = RichText::new(format!("{}  Favourites  ({favs})", ph::STAR));
         if ui.selectable_label(*view == PresetsView::Favourites, fav).clicked() {
             out.push(Msg::PresetsShow(PresetsView::Favourites));
         }
-        if let Some(ticks) = ticks {
-            let label = format!("{}  Ticked  ({})", ph::CHECK_SQUARE, ticks.len());
-            let on = matches!(view, PresetsView::Ticked(_));
-            let r = ui.selectable_label(on, label).on_hover_text("every preset ticked for the sweep, in every task");
-            if r.clicked() && !on {
-                out.push(Msg::PresetsShow(PresetsView::Ticked(vec![])));
-            }
-        }
         ui.add_space(4.0);
+        // each task a folder of its groups (the one shown starts open)
         for (i, t) in list.tasks.iter().enumerate() {
             let n = t.presets.len();
-            let label = match ticks.map(|k| ticked_in(t, k)) {
-                Some(k) if k > 0 => format!("{}  ({k} / {n})", t.name),
-                _ => format!("{}  ({n})", t.name),
-            };
-            let r = ui.selectable_label(*view == PresetsView::Task(i), label);
-            let r = if t.description.is_empty() { r } else { r.on_hover_text(&t.description) };
-            if r.clicked() {
-                out.push(Msg::PresetsShow(PresetsView::Task(i)));
+            let label = format!("{}  ({n})", t.name);
+            let groups = task_groups(t);
+            if groups.is_empty() {
+                // nothing to fold: the row, lined up with the folders' labels
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.spacing().indent);
+                    task_row(ui, i, t, label, view, out);
+                });
+                continue;
             }
+            let id = ui.make_persistent_id(("preset task", i));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, view.task() == Some(i))
+                .show_header(ui, |ui| task_row(ui, i, t, label, view, out))
+                .body(|ui| {
+                    for (g, n) in groups {
+                        let shown = PresetsView::Group(i, g.to_string());
+                        if ui.selectable_label(*view == shown, format!("{g}  ({n})")).clicked() {
+                            out.push(Msg::PresetsShow(shown));
+                        }
+                    }
+                });
         }
     });
     if !enabled {
@@ -211,38 +139,33 @@ fn task_list(
     }
 }
 
-/// The Ticked view's presets: those listed on choosing it, then any ticked
-/// since.
-fn ticked_keys(view: &PresetsView, ticks: &[PresetKey]) -> Vec<PresetKey> {
-    let PresetsView::Ticked(listed) = view else { return vec![] };
-    let mut v = listed.clone();
-    v.extend(ticks.iter().filter(|k| !listed.contains(k)).cloned());
+fn task_row(ui: &mut egui::Ui, i: usize, t: &PromptTask, label: String, view: &PresetsView, out: &mut Vec<Msg>) {
+    let r = ui.selectable_label(*view == PresetsView::Task(i), label);
+    let r = if t.description.is_empty() { r } else { r.on_hover_text(&t.description) };
+    if r.clicked() {
+        out.push(Msg::PresetsShow(PresetsView::Task(i)));
+    }
+}
+
+/// A task's groups (headings) in order, with their preset counts; empty
+/// when it has none.
+fn task_groups(t: &PromptTask) -> Vec<(&str, usize)> {
+    let mut v: Vec<(&str, usize)> = vec![];
+    for p in t.presets.iter().filter(|p| !p.group.is_empty()) {
+        match v.iter_mut().find(|(g, _)| *g == p.group) {
+            Some((_, n)) => *n += 1,
+            None => v.push((&p.group, 1)),
+        }
+    }
     v
 }
 
-/// Where a preset is in the list, if it still is.
-fn find(list: &PromptPresets, k: &PresetKey) -> Option<(usize, usize)> {
-    let ti = list.tasks.iter().position(|t| t.name == k.task)?;
-    Some((ti, list.tasks[ti].presets.iter().position(|p| p.name == k.name)?))
-}
-
-fn preset_list(
-    ui: &mut egui::Ui,
-    list: &PromptPresets,
-    view: &PresetsView,
-    q: &str,
-    refs: usize,
-    ticks: Option<&[PresetKey]>,
-    out: &mut Vec<Msg>,
-) {
-    if let (PresetsView::Ticked(_), true, Some(ticks)) = (view, q.is_empty(), ticks) {
-        return ticked_list(ui, list, view, refs, ticks, out);
-    }
+fn preset_list(ui: &mut egui::Ui, list: &PromptPresets, view: &PresetsView, q: &str, refs: usize, out: &mut Vec<Msg>) {
     let task = view.task();
     // (task, preset) shown, under (task or group) headings
     let mut count = 0;
     let mut heading = String::new();
-    let list_of = shown(list, view, ticks.unwrap_or_default(), q);
+    let list_of = shown(list, view, q);
     for (ti, t) in list.tasks.iter().enumerate() {
         let in_view = if !q.is_empty() { true } else { task.is_none_or(|x| x == ti) };
         if !in_view {
@@ -262,25 +185,10 @@ fn preset_list(
             };
             if h != heading {
                 ui.add_space(6.0);
-                // a group's ticks (in a task's view)
-                let k = match (ticks, task.is_some() && q.is_empty()) {
-                    (Some(k), true) => t
-                        .presets
-                        .iter()
-                        .filter(|x| x.group == h && k.iter().any(|k| k.task == t.name && k.name == x.name))
-                        .count(),
-                    _ => 0,
-                };
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&h).strong().size(15.0));
-                    if k > 0 {
-                        ui.weak(format!("·  {k} ticked"));
-                    }
-                });
+                ui.label(RichText::new(&h).strong().size(15.0));
                 heading = h;
             }
-            let ticked = ticks.map(|k| k.iter().any(|k| k.task == t.name && k.name == p.name));
-            preset_row(ui, ti, pi, p, refs, ticked, out);
+            preset_row(ui, ti, pi, p, refs, out);
             count += 1;
         }
     }
@@ -289,19 +197,15 @@ fn preset_list(
         ui.weak(match (q.is_empty(), task) {
             (false, _) => "No preset matches.",
             (true, None) => "No favourites yet: click ☆ next to a preset to add it here.",
+            (true, Some(_)) if view.group().is_some() => "No presets in this group.",
             (true, Some(_)) => "No presets in this task: add some with Edit presets….",
         });
     }
 }
 
 /// The presets (task, preset) the window lists: those matching the search
-/// `q` (lower case), else the view's (Ticked: those still there).
-fn shown(list: &PromptPresets, view: &PresetsView, ticks: &[PresetKey], q: &str) -> Vec<(usize, usize)> {
-    if let (PresetsView::Ticked(_), true) = (view, q.is_empty()) {
-        let mut v: Vec<_> = ticked_keys(view, ticks).iter().filter_map(|k| find(list, k)).collect();
-        v.sort();
-        return v;
-    }
+/// `q` (lower case), else the view's.
+fn shown(list: &PromptPresets, view: &PresetsView, q: &str) -> Vec<(usize, usize)> {
     let task = view.task();
     let mut v = vec![];
     for (ti, t) in list.tasks.iter().enumerate() {
@@ -309,7 +213,11 @@ fn shown(list: &PromptPresets, view: &PresetsView, ticks: &[PresetKey], q: &str)
             continue;
         }
         for (pi, p) in t.presets.iter().enumerate() {
-            let keep = if !q.is_empty() { matches(p, q) } else { task.is_some() || p.favourite };
+            let keep = match (q.is_empty(), task) {
+                (false, _) => matches(p, q),
+                (true, Some(_)) => view.group().is_none_or(|g| g == p.group),
+                (true, None) => p.favourite,
+            };
             if keep {
                 v.push((ti, pi));
             }
@@ -318,62 +226,7 @@ fn shown(list: &PromptPresets, view: &PresetsView, ticks: &[PresetKey], q: &str)
     v
 }
 
-/// The Ticked view: its presets under their tasks' headings, in the list's
-/// order; then those no longer there (renamed or deleted), which the sweep
-/// skips, to untick.
-fn ticked_list(
-    ui: &mut egui::Ui,
-    list: &PromptPresets,
-    view: &PresetsView,
-    refs: usize,
-    ticks: &[PresetKey],
-    out: &mut Vec<Msg>,
-) {
-    let keys = ticked_keys(view, ticks);
-    let is_ticked = |k: &PresetKey| ticks.contains(k);
-    let mut heading = "";
-    for (ti, pi) in shown(list, view, ticks, "") {
-        let t = &list.tasks[ti];
-        if t.name != heading {
-            ui.add_space(6.0);
-            ui.label(RichText::new(&t.name).strong().size(15.0));
-            heading = &t.name;
-        }
-        let k = PresetKey { task: t.name.clone(), name: t.presets[pi].name.clone() };
-        preset_row(ui, ti, pi, &t.presets[pi], refs, Some(is_ticked(&k)), out);
-    }
-    let missing: Vec<_> = keys.iter().filter(|k| find(list, k).is_none()).collect();
-    if !missing.is_empty() {
-        ui.add_space(6.0);
-        ui.label(RichText::new("No longer there").strong().size(15.0));
-        ui.weak("Renamed or deleted since they were ticked: the sweep skips them.");
-        for k in missing {
-            ui.horizontal(|ui| {
-                let mut on = is_ticked(k);
-                if ui.checkbox(&mut on, "").on_hover_text("in the sweep (skipped)").clicked() {
-                    out.push(Msg::SweepToggleKey(k.clone()));
-                }
-                ui.label(RichText::new(&k.name).weak().strikethrough());
-                ui.weak(format!("({})", k.task));
-            });
-        }
-    }
-    if keys.is_empty() {
-        ui.add_space(8.0);
-        ui.weak("Nothing ticked: click presets in the tasks to add them to the sweep.");
-    }
-}
-
-/// `ticked` is set in sweep mode: whether the sweep has this preset.
-fn preset_row(
-    ui: &mut egui::Ui,
-    task: usize,
-    preset: usize,
-    p: &PromptPreset,
-    refs: usize,
-    ticked: Option<bool>,
-    out: &mut Vec<Msg>,
-) {
+fn preset_row(ui: &mut egui::Ui, task: usize, preset: usize, p: &PromptPreset, refs: usize, out: &mut Vec<Msg>) {
     let need = needs_refs(&p.prompt);
     let ok = need <= refs;
     ui.horizontal_top(|ui| {
@@ -386,13 +239,8 @@ fn preset_row(
         if ui.add(egui::Button::new(star).frame(false)).on_hover_text(tip).clicked() {
             out.push(Msg::PresetFavourite(task, preset));
         }
-        if let Some(mut on) = ticked
-            && ui.checkbox(&mut on, "").on_hover_text("in the sweep").clicked()
-        {
-            out.push(Msg::SweepToggle(task, preset));
-        }
         ui.vertical(|ui| {
-            let r = ui.add_enabled(ok, egui::Button::selectable(ticked == Some(true), RichText::new(&p.name).strong()));
+            let r = ui.add_enabled(ok, egui::Button::new(RichText::new(&p.name).strong()).frame(false));
             let mut tip = p.prompt.clone();
             if !p.negative.is_empty() {
                 tip.push_str(&format!("\n\nNegative: {}", p.negative));
@@ -400,9 +248,7 @@ fn preset_row(
             let r = r
                 .on_hover_text(&tip)
                 .on_disabled_hover_text(format!("Needs {need} reference image(s); Generate has {refs}.\n\n{tip}"));
-            if r.clicked() && ticked.is_some() {
-                out.push(Msg::SweepToggle(task, preset));
-            } else if r.clicked() {
+            if r.clicked() {
                 let shift = ui.input(|i| i.modifiers.shift);
                 let insert_at = shift.then(|| cursor(ui.ctx())).flatten();
                 out.push(Msg::ApplyPreset { task, preset, insert_at: insert_at.or(shift.then_some(usize::MAX)) });
@@ -865,7 +711,7 @@ fn setting_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm) {
 }
 
 fn style_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut Vec<Msg>) {
-    use increart_core::prompts::{Removed, SweepSource, needing_slot, slot_names, sweep_presets};
+    use increart_core::prompts::{Removed, SweepSource, slot_names, sweep_presets};
     let list = &st.prompt_presets;
     let per = crate::projects::estimate(f);
     let seeds = f.seeds;
@@ -878,48 +724,27 @@ fn style_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut
             sweep_presets(list, &Sweep { source: src, random: 0, removed: vec![], ..base.clone() }).len()
         };
         let name = |src: &SweepSource| match src {
-            SweepSource::Selected => format!("Ticked in Presets ({})", base.selected.len()),
+            SweepSource::Selected => format!("{} ticked", base.selected.len()),
             SweepSource::Favourites => format!("★ Favourites ({})", count(SweepSource::Favourites)),
             SweepSource::Task(t) => format!("{t} ({})", count(src.clone())),
             SweepSource::Group(t, g) => format!("{t} → {g} ({})", count(src.clone())),
         };
         ui.horizontal(|ui| {
-            ui.label("Styles from");
-            let mut src = sw.source.clone();
-            ComboBox::from_id_salt("sweep_source").selected_text(name(&src)).width(300.0).show_ui(ui, |ui| {
-                for s in [SweepSource::Selected, SweepSource::Favourites] {
-                    let n = name(&s);
-                    ui.selectable_value(&mut src, s, n);
-                }
-                for t in &list.tasks {
-                    let s = SweepSource::Task(t.name.clone());
-                    let n = name(&s);
-                    ui.selectable_value(&mut src, s, n);
-                    let mut groups: Vec<&str> =
-                        t.presets.iter().map(|p| p.group.as_str()).filter(|g| !g.is_empty()).collect();
-                    groups.dedup();
-                    for g in groups {
-                        let s = SweepSource::Group(t.name.clone(), g.to_string());
-                        let n = format!("      {g} ({})", count(s.clone()));
-                        ui.selectable_value(&mut src, s, n);
-                    }
-                }
-            });
-            if src != sw.source {
-                sw.removed.clear();
+            ui.label("Styles");
+            // the styles stay as they are while PE suggests for them
+            if locked(st) {
+                ui.disable();
             }
-            sw.source = src;
-            if sw.source == SweepSource::Selected
-                && ui
-                    .button(ic(ph::SWATCHES, "Tick in Presets…"))
-                    .on_hover_text("tick presets in the Presets window")
-                    .clicked()
-            {
-                out.push(Msg::PresetsPanel(true));
+            let r = ui.button(ic(ph::SWATCHES, &format!("{}  ·  Choose…", name(&sw.source))));
+            if r.on_hover_text("browse, search and tick the styles").clicked() {
+                out.push(Msg::StylesOpen);
             }
         });
         ui.horizontal(|ui| {
             ui.label("Use");
+            if locked(st) {
+                ui.disable();
+            }
             let mut random = sw.random > 0;
             ui.radio_value(&mut random, false, "all of them");
             ui.radio_value(&mut random, true, "a random");
@@ -938,47 +763,43 @@ fn style_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut
         let mut remove: Option<Removed> = None;
         // the slots of the template and the chosen presets, asked once each,
         // with what needs them
-        let names = slot_names(std::iter::once(prompt.as_str()).chain(chosen.iter().map(|(_, p)| p.prompt.as_str())));
+        let names = slot_names(std::iter::once(prompt.as_str()).chain(sw.blank_texts(&chosen)));
+        // styles' own values, from before their prompts could be edited,
+        // become their prompts
+        let keyed: Vec<_> = chosen
+            .iter()
+            .map(|(t, p)| (PresetKey { task: t.name.clone(), name: p.name.clone() }, p.prompt.as_str()))
+            .collect();
+        sw.fold_style_slots(&prompt, &keyed);
         if !names.is_empty() {
-            egui::Grid::new("sweep_slots").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                for n in &names {
-                    ui.label(format!("{{{n}}}"));
-                    let v = sw.slots.entry(n.clone()).or_default();
-                    ui.add(egui::TextEdit::singleline(v).desired_width(320.0).hint_text("fill in for every run"));
-                    ui.end_row();
-                    ui.label("");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if slot_names([prompt.as_str()]).contains(n) {
-                            ui.label(RichText::new("needed by the template;").weak());
-                        }
-                        let need = needing_slot(&chosen, n);
-                        if !need.is_empty() {
-                            ui.label(RichText::new("needed by").weak());
-                        }
-                        for (t, p) in need {
-                            ui.label(RichText::new(&p.name).weak().italics()).on_hover_text(&p.prompt);
-                            let key = PresetKey { task: t.name.clone(), name: p.name.clone() };
-                            if spare
-                                && ui
-                                    .small_button(ic(ph::SHUFFLE, "Replace"))
-                                    .on_hover_text(format!("replace {} with another random style", p.name))
-                                    .clicked()
-                            {
-                                remove = Some(Removed { preset: key.clone(), replace: true });
-                            }
-                            if ui
-                                .small_button(ic(ph::X, "Omit"))
-                                .on_hover_text(format!("leave {} out of this sweep", p.name))
-                                .clicked()
-                            {
-                                remove = Some(Removed { preset: key, replace: false });
-                            }
-                        }
-                    });
-                    ui.end_row();
-                }
-            });
+            let in_template = slot_names([prompt.as_str()]);
+            pe_bar(ui, st, &names, sw, out);
+            // while PE suggests, only its suggestions can be picked
+            table_box(
+                ui,
+                "shared_values",
+                &format!("Shared values ({} blanks)", names.len()),
+                "one value per blank, in every run that has it (the template's and every style's)",
+                |ui| slot_table(ui, st, &names, &in_template, &chosen, sw, out),
+            );
+            suggest_dialog(ui.ctx(), st, sw, out);
+            batch_dialog(ui.ctx(), st, &names, out);
+        }
+        let fit: Vec<_> = chosen.iter().filter(|(_, p)| needs_refs(&p.prompt) <= refs).copied().collect();
+        if !fit.is_empty() {
+            ui.add_space(8.0);
+            style_bar(ui, st, sw, out);
+            table_box(
+                ui,
+                "style_prompts",
+                &format!("Each style's prompt ({} styles)", fit.len()),
+                "what each style's run is sent: built from the template, the style and the values, or improved by \
+                 prompt enhance or by hand",
+                |ui| remove = style_prompts(ui, st, &prompt, &fit, spare, sw, out),
+            );
+            if st.pe.style_dialog.is_some() {
+                enhance_dialog(ui.ctx(), st, out);
+            }
         }
         if !sw.removed.is_empty() {
             ui.horizontal_wrapped(|ui| {
@@ -1029,5 +850,1114 @@ fn style_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut
                 format!("{} chosen preset(s) left out: they need more than {refs} reference image(s).", unfit.len()),
             );
         }
+    }
+}
+
+/// A table in a box of its own, with its title and what it's for; the
+/// title's arrow folds it up (for the session, by `id`).
+fn table_box(ui: &mut egui::Ui, id: &str, title: &str, what: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let key = egui::Id::unique(("table_box_folded", id));
+    let folded: bool = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(false);
+    egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let arrow = if folded { ph::CARET_RIGHT } else { ph::CARET_DOWN };
+            let r = ui
+                .add(egui::Button::new(RichText::new(format!("{arrow} {title}")).strong()).frame(false))
+                .on_hover_text(if folded { "show it" } else { "fold it up" });
+            if r.clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(key, !folded));
+            }
+            ui.weak(what);
+        });
+        if !folded {
+            ui.separator();
+            add(ui);
+        }
+    });
+}
+
+/// Text of a table cell, cut to its width (the whole of it on hover).
+fn cell_text(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(egui::Label::new(text).truncate())
+}
+
+/// Above the blanks: Clear all, Random picks (of the values offered),
+/// prompt enhance's state, and Suggest for every empty blank.
+fn pe_bar(ui: &mut egui::Ui, st: &AppState, names: &[String], sw: &mut Sweep, out: &mut Vec<Msg>) {
+    use increart_gui_core::{BlankKey, PeStatus};
+    let busy = st.pe.blanks_waiting() > 0;
+    ui.horizontal_wrapped(|ui| {
+        let filled = sw.slots.values().any(|v| !v.trim().is_empty()) || !sw.style_slots.is_empty();
+        if ui
+            .add_enabled(filled && !busy, egui::Button::new(ic(ph::ERASER, "Clear values")))
+            .on_hover_text("empty every value: the shared ones and the styles' own (the suggestions stay)")
+            .clicked()
+        {
+            sw.slots.clear();
+            sw.style_slots.clear();
+        }
+        // every blank with values offered
+        let mut offered: Vec<(BlankKey, &Vec<String>)> = vec![];
+        for n in names {
+            let k = BlankKey { style: None, slot: n.clone() };
+            if let Some(vs) = st.blank_shown(&k) {
+                offered.push((k, vs));
+            }
+        }
+        if ui
+            .add_enabled(!offered.is_empty() && !busy, egui::Button::new(ic(ph::BROOM, "Clear suggestions")))
+            .on_hover_text("every blank's suggestion chips (the values stay; asks still avoid them)")
+            .clicked()
+        {
+            out.extend(offered.iter().map(|(k, _)| Msg::PeClearSuggestions(k.clone())));
+        }
+        if ui
+            .add_enabled(!offered.is_empty() && !busy, egui::Button::new(ic(ph::SHUFFLE, "Random picks")))
+            .on_hover_text("each blank with suggestions gets one of them at random (again for others)")
+            .clicked()
+        {
+            let mut seed = (ui.input(|i| i.time) * 1e6) as u64 | 1;
+            for (k, vs) in offered.iter().filter(|(_, vs)| !vs.is_empty()) {
+                // xorshift
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let v = vs[(seed % vs.len() as u64) as usize].clone();
+                match &k.style {
+                    None => _ = sw.slots.insert(k.slot.clone(), v),
+                    Some(style) => sw.set_own_slot(style, &k.slot, v),
+                }
+            }
+        }
+        ui.separator();
+        let Some(server) = st.pe.server.as_ref() else {
+            ui.weak(ic(ph::MAGIC_WAND, "Prompt enhance can suggest values:"));
+            if ui
+                .small_button("Servers…")
+                .on_hover_text("add a chat server to a server preset, or pick one to continue without sd-servers")
+                .clicked()
+            {
+                out.push(Msg::OpenServerDialog);
+            }
+            return;
+        };
+        // the shared blanks short of a full set of suggestions
+        let count = increart_core::prompts::SUGGEST_COUNT;
+        let [few, ..] = st.batch_picks(names, count);
+        let few: Vec<_> = few.into_iter().map(|slot| BlankKey { style: None, slot }).collect();
+        let tip = format!(
+            "ask the PE server for more values for every shared blank with fewer than {count} suggestions, \
+             with the default settings{}",
+            if server.vision() { "; it looks at the reference images" } else { "" }
+        );
+        let b = egui::Button::new(ic(ph::MAGIC_WAND, &format!("Basic suggest ({})", few.len())));
+        if ui.add_enabled(!few.is_empty() && !busy, b).on_hover_text(tip).clicked() {
+            out.push(Msg::PeSuggest(few.clone()));
+        }
+        let b = egui::Button::new(ph::SLIDERS_HORIZONTAL);
+        let tip = "Suggest for blanks…: pick the blanks, with instructions, how many, how varied (kept with \
+                   the project)";
+        if ui.add_enabled(!busy, b).on_hover_text(tip).clicked() {
+            out.push(Msg::PeBatchSuggestOpen(few.into_iter().map(|k| k.slot).collect()));
+        }
+        // only while busy, or failed: idle (off or ready) is in the top bar
+        let status = match &st.pe.status {
+            PeStatus::Off | PeStatus::Ready => None,
+            PeStatus::Starting => Some((format!("PE {}: {}", server.name, crate::rewrite::starting(st)), None)),
+            PeStatus::Failed(e) => Some((format!("PE {}: failed: {e}", server.name), Some(BAD))),
+        };
+        let blanks: Vec<_> =
+            st.pe.jobs.iter().filter(|j| matches!(j.key, increart_gui_core::PeKey::Blank(_))).collect();
+        // Stop before the text, which changes as the ask goes, so it stays put
+        if !blanks.is_empty() {
+            ui.spinner();
+            if ui.small_button(ic(ph::STOP, "Stop")).on_hover_text("stop asking for these blanks").clicked() {
+                out.push(Msg::PeStop(blanks.iter().map(|j| j.id).collect()));
+            }
+        }
+        let status = match blanks.first() {
+            Some(j) => {
+                let total = st.pe.blank_batch.max(blanks.len());
+                let n = total - blanks.len() + 1;
+                let now = crate::rewrite::progress(st, j);
+                let again = match &j.key {
+                    increart_gui_core::PeKey::Blank(k) => retry_text(st, k),
+                    _ => String::new(),
+                };
+                let text = format!(
+                    "Suggesting {n} of {total} · {now}{again} · until it's done, only suggestions can be picked"
+                );
+                Some((text, None))
+            }
+            None => status,
+        };
+        match status {
+            Some((text, Some(c))) => _ = ui.colored_label(c, text),
+            Some((text, None)) => _ = ui.weak(text),
+            None => {}
+        }
+    });
+}
+
+/// The ✨ button for a blank (a spinner while asked), then the values PE
+/// offered for it: a click on one puts it in `value`.
+fn suggest_cells(
+    row: &mut egui_extras::TableRow,
+    st: &AppState,
+    key: increart_gui_core::BlankKey,
+    value: &mut String,
+    out: &mut Vec<Msg>,
+) {
+    let offered = st.blank_shown(&key);
+    row.col(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if let Some(j) = st.pe.blank_job(&key) {
+            let tip = format!("{}{}\nclick to stop", crate::rewrite::progress(st, j), retry_text(st, &key));
+            if ui.add(egui::Spinner::new()).interact(egui::Sense::click()).on_hover_text(tip).clicked() {
+                out.push(Msg::PeStop(vec![j.id]));
+            }
+        } else if st.pe.server.as_ref().is_some() {
+            let tip = if offered.is_some() {
+                "suggest more values, added to these (none offered before)"
+            } else {
+                "suggest values (prompt enhance)"
+            };
+            let b = ui.add_enabled(!locked(st), egui::Button::new(ph::MAGIC_WAND).small());
+            if b.on_hover_text(tip).clicked() {
+                out.push(Msg::PeSuggest(vec![key.clone()]));
+            }
+            if offered.is_some() {
+                let b = ui.add_enabled(!locked(st), egui::Button::new(ph::DICE_FIVE).small());
+                if b.on_hover_text("reroll: new values in place of these (none offered before)").clicked() {
+                    out.push(Msg::PeReroll(key.clone()));
+                }
+            }
+            let b = ui.add_enabled(!locked(st), egui::Button::new(ph::SLIDERS_HORIZONTAL).small());
+            if b.on_hover_text("Suggest…: with instructions, how many, how varied").clicked() {
+                out.push(Msg::PeSuggestOpen(key.clone()));
+            }
+        }
+        if offered.is_some() {
+            let b = ui.add_enabled(!locked(st), egui::Button::new(ph::BROOM).small());
+            if b.on_hover_text("clear these suggestion chips (the value stays; asks still avoid them)").clicked() {
+                out.push(Msg::PeClearSuggestions(key.clone()));
+            }
+        }
+        if let Some(why) = st.pe.blank_failed.get(&key) {
+            ui.colored_label(BAD, ph::WARNING)
+                .on_hover_text(format!("the last ask got nothing new: {why}\n(gone when asked again)"));
+        }
+        // every value offered, when the cell is too narrow to show them
+        if let Some(vs) = offered {
+            ui.menu_button(RichText::new(format!("{} ▾", vs.len())).small(), |ui| {
+                for v in vs {
+                    if ui.selectable_label(value.trim() == v, v).clicked() {
+                        *value = v.clone();
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("the values offered");
+        }
+    });
+    row.col(|ui| {
+        ui.spacing_mut().item_spacing = CHIP_SPACING;
+        let id = chips_height_id(&key);
+        // centred in the row: its height is known from the frame before
+        let known = ui.ctx().data(|d| d.get_temp::<f32>(id)).filter(|h| *h > 0.0);
+        let avail = ui.available_height();
+        let chips = ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            if let Some(h) = known {
+                ui.add_space(((avail - h) / 2.0).max(0.0));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true), |ui| {
+                for v in offered.into_iter().flatten() {
+                    let on = value.trim() == v;
+                    let (label, long) = chip_label(v);
+                    let tip = if long { format!("use this: {v}") } else { "use this".into() };
+                    // a bubble, filled when it's the value
+                    let chip = egui::Button::new(label).small().selected(on).corner_radius(8.0);
+                    if ui.add(chip).on_hover_text(tip).clicked() {
+                        *value = v.clone();
+                    }
+                }
+            })
+            .response
+            .rect
+            .height()
+        });
+        // the height they took, for the row's height (and centring) next frame
+        let h = if offered.is_some_and(|v| !v.is_empty()) { chips.inner } else { 0.0 };
+        if known.unwrap_or(0.0) != h {
+            ui.ctx().data_mut(|d| d.insert_temp(id, h));
+            ui.ctx().request_repaint();
+        }
+    });
+}
+
+/// **Suggest…** for one blank: instructions, how many, how varied, whether
+/// it sees the images and avoids the values offered before; the values
+/// offered, to pick from, and the message the ask sends.
+fn suggest_dialog(ctx: &egui::Context, st: &AppState, sw: &mut Sweep, out: &mut Vec<Msg>) {
+    let (Some(d), Some(server)) = (&st.pe.suggest, st.pe.server.as_ref()) else { return };
+    let mut d = d.clone();
+    let key = d.key.clone();
+    let job = st.pe.blank_job(&key);
+    let mut value = match &key.style {
+        None => sw.slots.get(&key.slot).cloned().unwrap_or_default(),
+        Some(style) => sw.own_slot(style, &key.slot).to_string(),
+    };
+    let mut close = false;
+    let m = egui::Modal::new(egui::Id::unique("pe_suggest")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        ui.heading(ic(ph::MAGIC_WAND, &format!("Suggest values for {{{}}}", key.slot)));
+        match &key.style {
+            Some(s) => ui.weak(format!("{}'s own value, for the {} style only", s.name, s.name)),
+            None => ui.weak("the shared value, for every run that has it"),
+        };
+        ui.add_space(6.0);
+        form_grid(ui, st, server, "pe_suggest_grid", &mut d.form, Some(&key), out);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if let Some(j) = job {
+                ui.spinner();
+                if ui.button(ic(ph::STOP, "Stop")).clicked() {
+                    out.push(Msg::PeStop(vec![j.id]));
+                }
+                ui.label(crate::rewrite::progress(st, j));
+            } else {
+                let b = egui::Button::new(RichText::new(ic(ph::MAGIC_WAND, "Suggest")).strong());
+                // other blanks being asked for wait their turn
+                if ui.add(b).on_hover_text(format!("ask {}", server.name)).clicked() {
+                    out.push(Msg::PeSuggestDialog(Some(d.clone())));
+                    out.push(Msg::PeSuggestAsk);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        let offered = st.blank_shown(&key).filter(|v| !v.is_empty());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Values offered").strong());
+            if offered.is_some()
+                && ui.small_button("Clear").on_hover_text("those shown; asks still avoid them").clicked()
+            {
+                out.push(Msg::PeClearSuggestions(key.clone()));
+            }
+        });
+        egui::ScrollArea::vertical().id_salt("pe_suggest_values").max_height(200.0).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = CHIP_SPACING;
+            ui.horizontal_wrapped(|ui| match offered {
+                None => _ = ui.weak("none yet"),
+                Some(vs) => {
+                    for v in vs {
+                        let chip = egui::Button::new(v.as_str()).small().selected(value.trim() == v).corner_radius(8.0);
+                        if ui.add(chip).on_hover_text("use this").clicked() {
+                            value = v.clone();
+                        }
+                    }
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Value");
+            ui.add(egui::TextEdit::singleline(&mut value).desired_width(f32::INFINITY));
+        });
+        egui::CollapsingHeader::new("The message sent").id_salt("pe_suggest_message").show(ui, |ui| {
+            let text =
+                increart_gui_core::suggest_message(st, &d.key, &d.form).unwrap_or_else(|| "(the blank is gone)".into());
+            egui::ScrollArea::vertical().id_salt("pe_suggest_text").max_height(160.0).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(text).monospace().small()).wrap());
+            });
+            ui.weak("the system prompt goes first: see Settings → Prompt enhance");
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            close = ui.button("Close").clicked();
+        });
+    });
+    let old = match &key.style {
+        None => sw.slots.get(&key.slot).cloned().unwrap_or_default(),
+        Some(style) => sw.own_slot(style, &key.slot).to_string(),
+    };
+    if value != old {
+        match &key.style {
+            None => _ = sw.slots.insert(key.slot.clone(), value),
+            Some(style) => sw.set_own_slot(style, &key.slot, value),
+        }
+    }
+    if close || m.should_close() {
+        out.push(Msg::PeSuggestDialog(None));
+    } else if Some(&d) != st.pe.suggest.as_ref() {
+        out.push(Msg::PeSuggestDialog(Some(d)));
+    }
+}
+
+/// **Suggest for blanks…**: the shared blanks to ask for (ticked), the
+/// settings each ask gets, and the first one's message.
+fn batch_dialog(ctx: &egui::Context, st: &AppState, names: &[String], out: &mut Vec<Msg>) {
+    use increart_gui_core::BlankKey;
+    let (Some(b), Some(server)) = (&st.pe.batch_suggest, st.pe.server.as_ref()) else { return };
+    let mut b = b.clone();
+    let (mut ask, mut close) = (false, false);
+    let ticked = |b: &increart_gui_core::BatchSuggest| -> Vec<String> {
+        names.iter().filter(|n| b.blanks.contains(n)).cloned().collect()
+    };
+    let m = egui::Modal::new(egui::Id::unique("pe_batch_suggest")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        ui.heading(ic(ph::MAGIC_WAND, "Suggest values for blanks"));
+        ui.weak("one ask for each blank ticked, each with these settings (kept with the project)");
+        ui.add_space(6.0);
+        let value = |n: &String| st.generate.sweep.slots.get(n).map_or("", |v| v.trim());
+        let key = |n: &String| BlankKey { style: None, slot: n.clone() };
+        let chips = |n: &String| st.blank_shown(&key(n)).map_or(0, |v| v.len());
+        // each ticks exactly those it names, unticking the rest
+        let want = b.form.count;
+        let [fewer, empty, failed] = st.batch_picks(names, want);
+        let picks: [(String, String, Vec<String>); 5] = [
+            ("All".into(), "every blank".into(), names.to_vec()),
+            ("None".into(), "no blank".into(), vec![]),
+            (
+                format!("Fewer than {want} suggestions"),
+                format!("those with 0 to {} suggestions showing (How many: {want})", want.saturating_sub(1)),
+                fewer,
+            ),
+            ("No value".into(), "those whose value is empty, suggestions or not".into(), empty),
+            (format!("Failed {}", ph::WARNING), "those whose last ask got nothing new".into(), failed),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Tick only").strong());
+            for (label, tip, set) in picks {
+                let (n, none) = (set.len(), label == "None");
+                let text = if none { label } else { format!("{label} ({n})") };
+                let r = ui.add_enabled(none || n > 0, egui::Button::new(text).small());
+                if r.on_hover_text(format!("tick {tip}; untick the rest")).clicked() {
+                    b.blanks = set;
+                }
+            }
+        });
+        ui.add_space(2.0);
+        // one blank a row: what it has can't be read as its neighbour's
+        egui::ScrollArea::vertical().id_salt("pe_batch_blanks").max_height(220.0).show(ui, |ui| {
+            egui::Grid::new("pe_batch_blanks_grid").num_columns(3).striped(true).spacing([16.0, 2.0]).show(ui, |ui| {
+                ui.weak("Blank");
+                ui.weak("Suggestions");
+                ui.weak("Value");
+                ui.end_row();
+                for n in names {
+                    let mut on = b.blanks.contains(n);
+                    if ui.checkbox(&mut on, RichText::new(format!("{{{n}}}")).monospace()).changed() {
+                        b.blanks.retain(|b| b != n);
+                        if on {
+                            b.blanks.push(n.clone());
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        let c = chips(n);
+                        let text = format!("{c}");
+                        if c < want {
+                            ui.colored_label(crate::widgets::NEUTRAL, text)
+                        } else {
+                            ui.label(text)
+                        };
+                        if let Some(why) = st.pe.blank_failed.get(&key(n)) {
+                            ui.colored_label(BAD, ph::WARNING)
+                                .on_hover_text(format!("the last ask got nothing new: {why}"));
+                        }
+                    });
+                    match value(n) {
+                        "" => ui.weak("—"),
+                        v if v.chars().count() > 40 => {
+                            let cut: String = v.chars().take(39).collect();
+                            ui.label(format!("{cut}…")).on_hover_text(v)
+                        }
+                        v => ui.label(v),
+                    };
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        form_grid(ui, st, server, "pe_batch_grid", &mut b.form, None, out);
+        ui.add_space(4.0);
+        let asked = ticked(&b);
+        ui.horizontal(|ui| {
+            let busy = st.pe.blanks_waiting() > 0;
+            let label = RichText::new(ic(ph::MAGIC_WAND, &format!("Suggest ({})", asked.len()))).strong();
+            let tip = if busy { "wait for the asks going on" } else { "ask for each blank ticked" };
+            let r = ui.add_enabled(!asked.is_empty() && !busy, egui::Button::new(label));
+            ask = r.on_hover_text(format!("{tip} ({})", server.name)).on_disabled_hover_text(tip).clicked();
+            close = ui.button("Close").clicked();
+        });
+        egui::CollapsingHeader::new("The message sent (the first blank's)").id_salt("pe_batch_message").show(
+            ui,
+            |ui| {
+                let first = asked.first().map(|slot| BlankKey { style: None, slot: slot.clone() });
+                let text = first
+                    .and_then(|k| increart_gui_core::suggest_message(st, &k, &b.form))
+                    .unwrap_or_else(|| "(no blank ticked)".into());
+                egui::ScrollArea::vertical().id_salt("pe_batch_text").max_height(160.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).monospace().small()).wrap());
+                });
+                ui.weak("each blank's names that blank; the system prompt goes first: see Settings → Prompt enhance");
+            },
+        );
+    });
+    if Some(&b) != st.pe.batch_suggest.as_ref() {
+        out.push(Msg::PeBatchSuggestDialog(Some(b)));
+    }
+    if ask {
+        out.push(Msg::PeBatchSuggestAsk);
+    } else if close || m.should_close() {
+        out.push(Msg::PeBatchSuggestDialog(None));
+    }
+}
+
+/// A Suggest dialog's settings: instructions, how many, how varied, whether
+/// the asks see the images and avoid the values offered before (`key`'s,
+/// else each blank's), and whether they add to them or replace them.
+fn form_grid(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    server: &increart_core::pe::PeServer,
+    id: &str,
+    form: &mut increart_gui_core::SuggestForm,
+    key: Option<&increart_gui_core::BlankKey>,
+    out: &mut Vec<Msg>,
+) {
+    use increart_core::pe::FILL_BLANKS;
+    egui::Grid::new(id).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        ui.label("Instructions");
+        ui.add(
+            egui::TextEdit::singleline(&mut form.how)
+                .hint_text("optional: e.g. only stones, stranger, from nature, 1920s")
+                .desired_width(f32::INFINITY),
+        );
+        ui.end_row();
+        ui.label("How many");
+        ui.add(egui::DragValue::new(&mut form.count).range(1..=30));
+        ui.end_row();
+        ui.label("Temperature");
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut form.sampling.temperature, 0.0..=2.0).step_by(0.05))
+                .on_hover_text("hotter: more varied and surprising, but less on topic");
+            if ui.small_button("Default").on_hover_text("the server's, as set in Settings").clicked() {
+                form.sampling = st.config.pe.sampling(FILL_BLANKS);
+            }
+        });
+        ui.end_row();
+        ui.label("min_p");
+        ui.add(egui::Slider::new(&mut form.sampling.min_p, 0.0..=0.5).step_by(0.01)).on_hover_text(
+            "drops words less than this fraction as likely as the likeliest: keeps a hot answer \
+             sensible (0: off)",
+        );
+        ui.end_row();
+        ui.label("");
+        ui.vertical(|ui| {
+            let refs = st.generate.refs().len() + st.generate.init().is_some() as usize;
+            let can = server.vision() && refs > 0;
+            let tip = if !server.vision() {
+                "this server has no vision"
+            } else if refs == 0 {
+                "there are no reference or start images"
+            } else {
+                "off: values for the template and styles alone, not matched to the images"
+            };
+            let mut images = form.images && can;
+            ui.add_enabled(can, egui::Checkbox::new(&mut images, "Look at the images"))
+                .on_hover_text(tip)
+                .on_disabled_hover_text(tip);
+            if can {
+                form.images = images;
+            }
+            match key {
+                Some(key) => {
+                    let before = st.blank_offered(key).len();
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            before > 0,
+                            egui::Checkbox::new(&mut form.avoid, format!("Not the {before} values offered before")),
+                        );
+                        if before > 0
+                            && ui
+                                .small_button("Forget them")
+                                .on_hover_text("asks may offer them again; those shown stay")
+                                .clicked()
+                        {
+                            out.push(Msg::PeForgetOffered(key.clone()));
+                        }
+                    });
+                }
+                None => _ = ui.checkbox(&mut form.avoid, "Not the values offered before (each blank's)"),
+            }
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut form.replace, false, "Add to the values offered");
+                ui.radio_value(&mut form.replace, true, "Replace them");
+            });
+        });
+        ui.end_row();
+    });
+}
+
+/// " · retry 1 of 2" while a blank is asked again after an answer with
+/// nothing new.
+fn retry_text(st: &AppState, key: &increart_gui_core::BlankKey) -> String {
+    match st.pe.blank_retry(key) {
+        0 => String::new(),
+        r => format!(" · retry {r} of {}", increart_gui_core::BLANK_RETRIES),
+    }
+}
+
+/// While PE suggests values for blanks, the tables are locked but for
+/// picking the values offered.
+fn locked(st: &AppState) -> bool {
+    st.pe.blanks_waiting() > 0
+}
+
+const CHIP_SPACING: egui::Vec2 = egui::vec2(4.0, 3.0);
+
+/// A suggestion as its chip shows it: at most 6 words and 36 characters
+/// (and whether it was cut).
+fn chip_label(v: &str) -> (String, bool) {
+    let words: Vec<&str> = v.split_whitespace().collect();
+    let mut s = words[..words.len().min(6)].join(" ");
+    if s.chars().count() > 36 {
+        s = s.chars().take(35).collect::<String>().trim_end().to_string();
+    }
+    let long = s != v.trim();
+    if long {
+        s.push('…');
+    }
+    (s, long)
+}
+
+fn chips_height_id(key: &increart_gui_core::BlankKey) -> egui::Id {
+    egui::Id::unique(("pe_chips_height", key))
+}
+
+/// How tall a row is with these suggestions wrapped in `width`: as they
+/// were last drawn, else as estimated.
+fn chips_height(ui: &egui::Ui, key: &increart_gui_core::BlankKey, offered: Option<&Vec<String>>, width: f32) -> f32 {
+    let min = 26.0;
+    let Some(vs) = offered.filter(|v| !v.is_empty()) else { return min };
+    if let Some(h) = ui.ctx().data(|d| d.get_temp::<f32>(chips_height_id(key))).filter(|h| *h > 0.0) {
+        return (h + 6.0).max(min);
+    }
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let pad = ui.spacing().button_padding;
+    let chip_h = ui.fonts_mut(|f| f.row_height(&font)) + 2.0 * pad.y;
+    let (mut x, mut lines) = (0.0, 1);
+    for v in vs {
+        let w = ui.fonts_mut(|f| f.layout_no_wrap(chip_label(v).0, font.clone(), egui::Color32::WHITE).size().x)
+            + 2.0 * pad.x;
+        if x > 0.0 && x + w > width {
+            (x, lines) = (0.0, lines + 1);
+        }
+        x += w + CHIP_SPACING.x;
+    }
+    (lines as f32 * chip_h + (lines - 1) as f32 * CHIP_SPACING.y + 6.0).max(min)
+}
+
+/// The sweep's blanks: a row per `{slot}` of the template and the chosen
+/// styles, its value (the same in every run unless a style has its own),
+/// PE's suggestions for it and what needs it.
+fn slot_table(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    names: &[String],
+    in_template: &[String],
+    chosen: &[(&PromptTask, &PromptPreset)],
+    sw: &mut Sweep,
+    out: &mut Vec<Msg>,
+) {
+    use egui_extras::{Column, TableBuilder};
+    use increart_core::prompts::needing_slot;
+    TableBuilder::new(ui)
+        .id_salt("sweep_slots_v2")
+        .striped(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::auto().at_least(90.0))
+        .column(Column::initial(170.0).at_least(110.0).clip(true))
+        .column(Column::auto())
+        .column(Column::remainder().at_least(160.0).clip(true))
+        .column(Column::initial(100.0).at_least(70.0).clip(true))
+        .header(20.0, |mut h| {
+            for title in ["Blank", "Value, in every run", "", "Suggestions (click to use)", "Needed by"] {
+                h.col(|ui| {
+                    ui.strong(title);
+                });
+            }
+        })
+        .body(|mut body| {
+            let width = body.widths()[3];
+            for n in names {
+                let key = increart_gui_core::BlankKey { style: None, slot: n.clone() };
+                let h = chips_height(body.ui_mut(), &key, st.blank_shown(&key), width);
+                body.row(h, |mut row| {
+                    row.col(|ui| {
+                        ui.monospace(format!("{{{n}}}"));
+                    });
+                    let v = sw.slots.entry(n.clone()).or_default();
+                    row.col(|ui| {
+                        let empty = v.trim().is_empty();
+                        // right to left: the clear button (always there, so the field keeps its
+                        // width), then the field takes what's left
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let b = ui.add_enabled(!empty && !locked(st), egui::Button::new(ph::X).small());
+                            if b.on_hover_text("clear this value (the suggestions stay)").clicked() {
+                                v.clear();
+                            }
+                            let edit = egui::TextEdit::singleline(v)
+                                .desired_width(ui.available_width())
+                                .hint_text(RichText::new("fill in").color(crate::widgets::NEUTRAL));
+                            let r = ui.add_enabled(!locked(st), edit);
+                            if empty && !r.has_focus() {
+                                ui.painter().rect_stroke(
+                                    r.rect,
+                                    2.0,
+                                    egui::Stroke::new(1.0, crate::widgets::NEUTRAL),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        });
+                    });
+                    suggest_cells(&mut row, st, increart_gui_core::BlankKey { style: None, slot: n.clone() }, v, out);
+                    row.col(|ui| {
+                        let need = needing_slot(sw, chosen, n);
+                        let mut parts = vec![];
+                        if in_template.contains(n) {
+                            parts.push("the template".to_string());
+                        }
+                        match need.len() {
+                            0 => {}
+                            1 => parts.push(need[0].1.name.clone()),
+                            k => parts.push(format!("{k} styles")),
+                        }
+                        let tip = need.iter().map(|(_, p)| p.name.as_str()).collect::<Vec<_>>().join("\n");
+                        // one style of several: its value sets nothing for the rest
+                        if need.len() == 1 && parts.len() == 1 && chosen.len() > 1 {
+                            cell_text(
+                                ui,
+                                RichText::new(format!("only {}", need[0].1.name)).color(crate::widgets::NEUTRAL),
+                            )
+                            .on_hover_text(format!(
+                                "only {}'s prompt has {{{n}}}: the other {} styles don't use its value. To set a \
+                                     scene or era for every style, put it in the template.",
+                                need[0].1.name,
+                                chosen.len() - 1
+                            ));
+                            return;
+                        }
+                        let r = cell_text(ui, RichText::new(parts.join(", ")).weak());
+                        if need.len() > 1 {
+                            r.on_hover_text(tip);
+                        }
+                    });
+                });
+            }
+        });
+}
+
+/// Above the styles' prompts: **Enhance style prompts** for those the
+/// settings take, its instructions, **Enhance…** for the rest of the
+/// settings, back to as built, and the asks' progress.
+fn style_bar(ui: &mut egui::Ui, st: &AppState, sw: &mut Sweep, out: &mut Vec<Msg>) {
+    use increart_gui_core::PeKey;
+    let styles: Vec<_> = st.pe.jobs.iter().filter(|j| matches!(j.key, PeKey::Style(_))).collect();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                !sw.style_prompts.is_empty(),
+                egui::Button::new(ic(ph::ARROW_COUNTER_CLOCKWISE, "All back to as built")),
+            )
+            .on_hover_text(
+                "drop every style's enhanced or edited prompt: each is built from the template and values again",
+            )
+            .clicked()
+        {
+            sw.style_prompts.clear();
+        }
+        ui.separator();
+        if st.pe.server.as_ref().is_some() {
+            let n = increart_gui_core::update::styles_to_enhance(st).len();
+            let b = egui::Button::new(ic(ph::MAGIC_WAND, &format!("Basic enhance ({n})")));
+            let tip = "prompt enhance improves each style's prompt not enhanced yet (or enhanced from older values), \
+                       filling any blank left, with the default settings; your edits are left as they are";
+            if ui.add_enabled(n > 0 && styles.is_empty(), b).on_hover_text(tip).clicked() {
+                out.push(Msg::PeStyleEnhance(vec![]));
+            }
+            let tip = "Enhance style prompts…: pick the styles, with instructions, from what, images, sampling, \
+                       length, the system prompt and the message sent (kept with the project)";
+            if ui.add_enabled(styles.is_empty(), egui::Button::new(ph::SLIDERS_HORIZONTAL)).on_hover_text(tip).clicked()
+            {
+                out.push(Msg::PeStyleOpen);
+            }
+        } else {
+            ui.weak(ic(ph::MAGIC_WAND, "Prompt enhance can improve these:"));
+            if ui
+                .small_button("Servers…")
+                .on_hover_text("add a chat server to a server preset, or pick one to continue without sd-servers")
+                .clicked()
+            {
+                out.push(Msg::OpenServerDialog);
+            }
+        }
+        if let Some(j) = styles.first() {
+            ui.spinner();
+            let total = st.pe.style_batch.max(styles.len());
+            let n = total - styles.len() + 1;
+            if ui.small_button(ic(ph::STOP, "Stop")).on_hover_text("stop improving these styles' prompts").clicked() {
+                out.push(Msg::PeStop(styles.iter().map(|j| j.id).collect()));
+            }
+            ui.weak(format!("Enhancing {n} of {total} · {}", crate::rewrite::progress(st, j)));
+        }
+    });
+}
+
+/// The styles that will run, a row each: the prompt its run gets (built
+/// from the template, the style and the values, or its own: enhanced or
+/// edited), where it is, ✨ to improve it, back to as built, and Replace /
+/// Omit to drop the style.
+fn style_prompts(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    template: &str,
+    styles: &[(&PromptTask, &PromptPreset)],
+    spare: bool,
+    sw: &mut Sweep,
+    out: &mut Vec<Msg>,
+) -> Option<increart_core::prompts::Removed> {
+    use increart_core::prompts::{Removed, StylePrompt, sweep_prompt};
+    use increart_gui_core::update::StyleRow;
+    let mut remove = None;
+    let can_ask = st.pe.server.as_ref().is_some();
+    // in the form, not a box of its own that scrolls: the form scrolls
+    for (i, (t, p)) in styles.iter().enumerate() {
+        let key = PresetKey { task: t.name.clone(), name: p.name.clone() };
+        // from the form as it is this frame
+        let built = sweep_prompt(template, &p.prompt, &sw.slots_for(&key));
+        let own = sw.style_prompt(&key).cloned();
+        let row = match &own {
+            None => StyleRow::Built,
+            Some(o) if o.enhanced => StyleRow::Enhanced { stale: o.from != built },
+            Some(o) => StyleRow::Edited { stale: o.from != built },
+        };
+        let waiting = st.pe.style_job(&key);
+        if i > 0 {
+            ui.add_space(2.0);
+            ui.separator();
+        }
+        // the name, where it is and the buttons; the prompt under them, the
+        // whole width
+        ui.horizontal(|ui| {
+            let g = if p.group.is_empty() { &t.name } else { &p.group };
+            ui.label(RichText::new(&p.name).strong()).on_hover_text(format!("{g}\n\n{}", p.prompt));
+            ui.weak(g);
+            let (label, color) = match row {
+                StyleRow::Built => ("as built".to_string(), None),
+                StyleRow::Enhanced { stale: false } => (ic(ph::MAGIC_WAND, "enhanced"), Some(crate::widgets::GOOD)),
+                StyleRow::Enhanced { stale: true } => {
+                    (ic(ph::MAGIC_WAND, "older values"), Some(crate::widgets::NEUTRAL))
+                }
+                StyleRow::Edited { stale: false } => ("edited".to_string(), Some(crate::widgets::ACCENT)),
+                StyleRow::Edited { stale: true } => ("edited, older values".to_string(), Some(crate::widgets::NEUTRAL)),
+            };
+            let tip = match row {
+                StyleRow::Built => "built from the template, the style and the values".to_string(),
+                StyleRow::Enhanced { stale: true } | StyleRow::Edited { stale: true } => format!(
+                    "made before the template or values changed; as built now:\n\n{built}\n\nthe wand makes it again"
+                ),
+                _ => format!("as built:\n\n{built}"),
+            };
+            ui.separator();
+            let r = match color {
+                Some(c) => ui.colored_label(c, label),
+                None => ui.weak(label),
+            };
+            r.on_hover_text(tip);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if let Some(j) = waiting {
+                let again =
+                    if st.pe.style_tries.get(&key).is_some_and(|t| t.retry > 0) { " · asked again" } else { "" };
+                let tip = format!("{}{again}\nclick to stop", crate::rewrite::progress(st, j));
+                if ui.add(egui::Spinner::new()).interact(egui::Sense::click()).on_hover_text(tip).clicked() {
+                    out.push(Msg::PeStop(vec![j.id]));
+                }
+            } else if can_ask {
+                let tip = "improve this style's prompt, from the one built, with the default settings (prompt \
+                           enhance)";
+                if ui.add_enabled(!locked(st), egui::Button::new(ph::MAGIC_WAND).small()).on_hover_text(tip).clicked() {
+                    out.push(Msg::PeStyleEnhance(vec![key.clone()]));
+                }
+            }
+            if let Some(why) = st.pe.style_failed.get(&key) {
+                ui.colored_label(BAD, ph::WARNING)
+                    .on_hover_text(format!("the last ask failed: {why}\n(gone when asked again)"));
+            }
+            if own.is_some()
+                && ui
+                    .add_enabled(waiting.is_none(), egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE).small())
+                    .on_hover_text("back to as built")
+                    .clicked()
+            {
+                sw.set_style_prompt(&key, None);
+            }
+            if locked(st) {
+                ui.disable();
+            }
+            if spare
+                && ui
+                    .small_button(ph::SHUFFLE)
+                    .on_hover_text(format!("replace {} with another random style", p.name))
+                    .clicked()
+            {
+                remove = Some(Removed { preset: key.clone(), replace: true });
+            }
+            if ui.small_button(ph::X).on_hover_text(format!("leave {} out of this sweep", p.name)).clicked() {
+                remove = Some(Removed { preset: key.clone(), replace: false });
+            }
+        });
+        let mut text = own.as_ref().map_or_else(|| built.clone(), |o| o.prompt.clone());
+        let r = ui.add_enabled(
+            waiting.is_none() && !locked(st),
+            egui::TextEdit::multiline(&mut text)
+                .id_salt(("style_prompt", &key))
+                .desired_width(f32::INFINITY)
+                .desired_rows(1),
+        );
+        if r.changed() {
+            let p = if text == built {
+                None
+            } else {
+                let (from, enhanced) = own.as_ref().map_or((built.clone(), false), |o| (o.from.clone(), o.enhanced));
+                Some(StylePrompt { preset: key.clone(), prompt: text, from, enhanced })
+            };
+            sw.set_style_prompt(&key, p);
+        }
+    }
+    remove
+}
+
+/// When an enhance batch ends with blanks prompt enhance added to styles'
+/// prompts: keep them to fill in, or make them plain words. Closed, they're
+/// kept.
+pub fn added_blanks_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    if !st.pe.added_blanks_ask {
+        return;
+    }
+    let m = egui::Modal::new(egui::Id::unique("added_blanks")).show(ctx, |ui| {
+        ui.set_max_width(480.0);
+        ui.heading(ic(ph::MAGIC_WAND, "Prompt enhance added blanks"));
+        ui.label(
+            "These styles' prompts came back with blanks they didn't have. Kept, they're in Shared values to fill \
+             in; made words, their braces go ({scrap_metal} → scrap metal).",
+        );
+        ui.add_space(6.0);
+        ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+            egui::Grid::new("added_blanks_grid").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                for (key, names) in &st.pe.added_blanks {
+                    ui.label(&key.name);
+                    ui.monospace(names.iter().map(|n| format!("{{{n}}}")).collect::<Vec<_>>().join(", "));
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Keep as blanks").strong()).clicked() {
+                out.push(Msg::PeAddedBlanks(true));
+            }
+            if ui.button("Make them words").clicked() {
+                out.push(Msg::PeAddedBlanks(false));
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::PeAddedBlanks(true));
+    }
+}
+
+/// **Enhance style prompts…**: the styles that will run, a row each to tick
+/// (with where its prompt is and the prompt), **Tick only** buttons, the
+/// settings each ask gets, the system prompt and the first one's message.
+fn enhance_dialog(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_core::pe::STYLE_PROMPT;
+    use increart_gui_core::update::{StyleRow, enhance_picks, running_styles, style_message_for, style_row};
+    let (Some(a), Some(server)) = (&st.pe.style_dialog, st.pe.server.as_ref()) else { return };
+    let mut a = a.clone();
+    let running = running_styles(st);
+    let busy = st.pe.styles_waiting() > 0;
+    let (mut ask, mut close) = (false, false);
+    let m = egui::Modal::new(egui::Id::unique("enhance_styles")).show(ctx, |ui| {
+        ui.set_width(640.0);
+        ui.heading(ic(ph::MAGIC_WAND, "Enhance style prompts"));
+        ui.weak(
+            "one ask for each style ticked, each with these settings (kept with the project): its prompt, the \
+             template with the style and the values in, improved",
+        );
+        ui.add_space(6.0);
+        // each ticks exactly those it names, unticking the rest
+        let [not_yet, failed] = enhance_picks(st);
+        let picks = [
+            ("All".to_string(), "every style that will run", running.iter().map(|(k, _)| k.clone()).collect()),
+            ("None".to_string(), "no style", vec![]),
+            ("Not enhanced yet".to_string(), "those as built, or enhanced from older values (not your edits)", not_yet),
+            (format!("Failed {}", ph::WARNING), "those whose last ask failed", failed),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Tick only").strong());
+            for (label, tip, set) in picks {
+                let (n, none) = (set.len(), label == "None");
+                let text = if none { label } else { format!("{label} ({n})") };
+                let r = ui.add_enabled(none || n > 0, egui::Button::new(text).small());
+                if r.on_hover_text(format!("tick {tip}; untick the rest")).clicked() {
+                    a.styles = set;
+                }
+            }
+        });
+        ui.add_space(2.0);
+        // one style a row: where its prompt is, and the prompt
+        let f = &st.generate;
+        ScrollArea::vertical().id_salt("enhance_styles_list").max_height(220.0).show(ui, |ui| {
+            egui::Grid::new("enhance_styles_grid").num_columns(3).striped(true).spacing([16.0, 2.0]).show(ui, |ui| {
+                ui.weak("Style");
+                ui.weak("Its prompt");
+                ui.weak("");
+                ui.end_row();
+                for (k, p) in &running {
+                    let mut on = a.styles.contains(k);
+                    if ui.checkbox(&mut on, &p.name).changed() {
+                        a.styles.retain(|s| s != k);
+                        if on {
+                            a.styles.push(k.clone());
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        let (state, tip) = match style_row(st, k, &p.prompt) {
+                            StyleRow::Built => ("as built", "from the template, the style and the values"),
+                            StyleRow::Enhanced { stale: false } => ("enhanced", "improved by prompt enhance"),
+                            StyleRow::Enhanced { stale: true } => {
+                                ("enhanced, older values", "improved from values changed since")
+                            }
+                            StyleRow::Edited { stale: false } => ("edited", "changed by hand"),
+                            StyleRow::Edited { stale: true } => {
+                                ("edited, older values", "changed by hand, from values changed since")
+                            }
+                        };
+                        ui.weak(state).on_hover_text(tip);
+                        if let Some(why) = st.pe.style_failed.get(k) {
+                            ui.colored_label(BAD, ph::WARNING).on_hover_text(format!("the last ask failed: {why}"));
+                        }
+                    });
+                    let text = f.sweep.prompt_for(&f.prompt, k, &p.prompt);
+                    let cut: String = text.chars().take(50).collect();
+                    let shown = if cut.len() < text.len() { format!("{cut}…") } else { cut };
+                    ui.label(RichText::new(shown).small()).on_hover_text(text);
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        ui.label("Instructions");
+        ui.add(
+            egui::TextEdit::multiline(&mut a.how)
+                .desired_width(f32::INFINITY)
+                .desired_rows(2)
+                .hint_text("more cinematic · keep it under 40 words · night scenes …"),
+        );
+        egui::Grid::new("enhance_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label("Improve");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut a.from_shown, false, "the prompt as built")
+                    .on_hover_text("from the template, the style and the values: a fresh start each time");
+                ui.radio_value(&mut a.from_shown, true, "the prompt as shown")
+                    .on_hover_text("an edit or enhancement is improved further");
+            });
+            ui.end_row();
+            ui.label("Images");
+            ui.add_enabled(
+                server.vision(),
+                egui::Checkbox::new(&mut a.images, "look at the reference and start images"),
+            )
+            .on_disabled_hover_text("this server's model has no vision (mmproj)");
+            ui.end_row();
+            ui.label("Sampling");
+            ui.horizontal(|ui| {
+                let usual = st.config.pe.sampling(STYLE_PROMPT);
+                let mut x = a.sampling.unwrap_or(usual);
+                ui.label("Temperature");
+                ui.add(egui::Slider::new(&mut x.temperature, 0.0..=2.0).step_by(0.05))
+                    .on_hover_text("hotter: more varied and surprising, but less on topic");
+                ui.label("min_p");
+                ui.add(egui::Slider::new(&mut x.min_p, 0.0..=0.5).step_by(0.01))
+                    .on_hover_text("drops words less than this fraction as likely as the likeliest (0: off)");
+                if a.sampling.is_some()
+                    && ui
+                        .small_button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Default"))
+                        .on_hover_text("the server's, as set in Settings")
+                        .clicked()
+                {
+                    a.sampling = None;
+                } else if x != usual {
+                    a.sampling = Some(x);
+                }
+            });
+            ui.end_row();
+            ui.label("Longest");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut a.max_tokens).range(100..=2000).speed(10));
+                ui.weak("tokens (about ¾ of a word each)");
+            });
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("System prompt (for every style)").id_salt("enhance_system").show(ui, |ui| {
+            let default = increart_core::pe::DEFAULT_STYLE_PROMPT;
+            let own = st.config.pe.system_prompts.get(STYLE_PROMPT).filter(|p| !p.trim().is_empty());
+            let mut text = own.cloned().unwrap_or_else(|| default.to_string());
+            if own.is_some() && ui.small_button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Default")).clicked() {
+                out.push(Msg::PeSystemPrompt { job: STYLE_PROMPT.into(), text: String::new() });
+            }
+            let r = ScrollArea::vertical().id_salt("enhance_system_text").max_height(140.0).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(5))
+            });
+            if r.inner.changed() {
+                let text = if text == default { String::new() } else { text };
+                out.push(Msg::PeSystemPrompt { job: STYLE_PROMPT.into(), text });
+            }
+        });
+        let ticked: Vec<_> = running.iter().filter(|(k, _)| a.styles.contains(k)).collect();
+        if let Some((k, _)) = ticked.first() {
+            egui::CollapsingHeader::new(format!("The message sent (for {}, the first)", k.name))
+                .id_salt("enhance_preview")
+                .show(ui, |ui| {
+                    let msg = style_message_for(st, k, &a).unwrap_or_default();
+                    ScrollArea::vertical().id_salt("enhance_preview_text").max_height(180.0).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(msg).monospace()).wrap());
+                    });
+                });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let label = RichText::new(ic(ph::MAGIC_WAND, &format!("Enhance ({})", ticked.len()))).strong();
+            let tip = if busy { "wait for the asks going on" } else { "ask for each style ticked" };
+            let r = ui.add_enabled(!ticked.is_empty() && !busy, egui::Button::new(label));
+            ask = r.on_hover_text(format!("{tip} ({})", server.name)).on_disabled_hover_text(tip).clicked();
+            close = ui.button("Close").clicked();
+        });
+    });
+    if Some(&a) != st.pe.style_dialog.as_ref() {
+        out.push(Msg::PeStyleDialog(Some(a)));
+    }
+    if ask {
+        out.push(Msg::PeStyleAsk);
+    } else if close || m.should_close() {
+        out.push(Msg::PeStyleDialog(None));
     }
 }

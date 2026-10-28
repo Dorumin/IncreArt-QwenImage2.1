@@ -3,20 +3,37 @@
 // beside config.rsn on every start (so edits to that copy are lost: put
 // your own presets in the task folders next to it instead).
 //
-// Modify style prompts read "Convert <image1> into <look>. Keep the
-// composition, pose and identity unchanged." Styles that turn a flat image
-// into 3D (Voxel, Animatronic) keep only the subject ("Keep the subject,
-// pose and identity unchanged.") and have a negative prompt: kept to its
-// composition, the model keeps the flat front view, and voxels seen face-on
-// come out as 2D pixel art.
+// Lazy Modify Style prompts read "Convert <image1> into <look>. Keep the
+// composition, pose and identity unchanged." and have no {slot}. Styles that
+// turn a flat image into 3D (Voxel, Animatronic) keep only the subject
+// ("Keep the subject, pose and identity unchanged.") and have a negative
+// prompt: kept to its composition, the model keeps the flat front view, and
+// voxels seen face-on come out as 2D pixel art.
+//
+// Effortful Modify Style prompts read "Transform <image1> …. Keep the
+// subject recognisable." and may change scene, scale and time; each has a
+// {slot}, from a shared few ({material}, {element}, {objects}, {place},
+// {backdrop}, {era}, {genre}, {topic}, {surface}, {colour}, {creature},
+// {animal}, {plant}, {action}, {weather}, {mood}, {amount}, {flavour},
+// {music}, …) so a sweep asks for few values; most have two or more, in
+// different roles, varied between neighbours so a group's images differ. A tag
+// has one job: {place} is where it happens, {backdrop} what's behind or
+// blended in; {genre} a kind of story or world, {topic} what it's about or
+// taken from. {action} is an -ing phrase read after "the subject"
+// ("juggling flaming torches"). No {subject}: "the subject" is the image's.
+// Effortful Modify Style — Text ones each have a tag for their words, quoted
+// in the prompt, by the part they play: {title}, {slogan}, {name},
+// {dialogue}, {sound} or {caption} ({text} for your own). The Text in a
+// scene and Comics & manga ones add {place}, {era}, {action}, {element} or
+// {genre}.
 //
 // A description loosely defines the name for someone who doesn't know the
 // term, then says what you get. Artist, studio and brand names are left out.
 PromptPresets {
     tasks: [
         PromptTask {
-            name: "Modify style",
-            description: "Redraw a reference image in another art style, keeping what it shows.",
+            name: "Lazy Modify Style",
+            description: "Redraw a reference image in another art style, keeping what it shows. Nothing to fill in.",
             presets: [
                 PromptPreset {
                     name: "Anime cel-shaded",
@@ -327,12 +344,6 @@ PromptPresets {
                     prompt: "Convert <image1> into an 1860s tintype photograph, wet-plate collodion, silvery monochrome tones, dark vignette, imperfections. Keep the composition, pose and identity unchanged."
                 },
                 PromptPreset {
-                    name: "Double exposure",
-                    group: "Photo & film",
-                    description: "Two photos overlaid: the subject's silhouette filled with a {scene}.",
-                    prompt: "Convert <image1> into a double exposure photograph, the subject's silhouette blended with {scene}. Keep the composition, pose and identity unchanged."
-                },
-                PromptPreset {
                     name: "Infrared",
                     group: "Photo & film",
                     description: "Photo taken with infrared film: foliage turns white or pink, dreamy glow.",
@@ -436,6 +447,613 @@ PromptPresets {
                 }
             ]
         },
+        PromptTask {
+            name: "Effortful Modify Style",
+            description: "Turn a reference image into something stranger, from a word or two you fill in.",
+            presets: [
+                PromptPreset {
+                    name: "Sculpted from",
+                    group: "Becomes something else",
+                    description: "A statue of the subject in {material}, e.g. ice, chocolate or bronze, on a plinth in {place}.",
+                    prompt: "Transform <image1> into a statue of the subject sculpted from {material}, standing on a plinth in {place}, soft natural light on the carved surface. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Made of an element",
+                    group: "Becomes something else",
+                    description: "The subject's body formed from {element}, e.g. fire, smoke or storm cloud, with a {mood} presence, e.g. serene or menacing.",
+                    prompt: "Transform <image1> so the subject's whole body is formed from {element}, swirling and alive, holding the subject's shape and features, a {mood} presence. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Grown from",
+                    group: "Becomes something else",
+                    description: "The subject grown out of {material}, e.g. moss, coral or crystal, sprouting {plant}.",
+                    prompt: "Transform <image1> so the subject is grown out of {material}, sprouting {plant}, organic growth following the subject's shape, as if it took decades to form. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Assembled from objects",
+                    group: "Becomes something else",
+                    description: "The subject built from many small {objects}, e.g. buttons, keys or autumn leaves, laid out on {surface}.",
+                    prompt: "Transform <image1> into an assemblage of the subject built entirely from {objects}, laid out on {surface}, arranged to form its shape, features and shading, seen from above. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Preserved",
+                    group: "Becomes something else",
+                    description: "The subject kept in {material}, like a fossil in stone or an insect in amber, dug up from {era}.",
+                    prompt: "Transform <image1> so the subject is preserved in {material}, dug up from {era} and displayed as a found specimen, with natural flaws, age and depth. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Shattering",
+                    group: "Becomes something else",
+                    description: "The subject frozen mid-burst, breaking apart into {material}, e.g. glass, petals or pixels, against {backdrop}.",
+                    prompt: "Transform <image1> into a frozen moment of the subject shattering into {material} against {backdrop}, fragments flying outward, high-speed photograph. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Melting",
+                    group: "Becomes something else",
+                    description: "The subject slowly melting into {material}, e.g. wax or liquid chrome, pooling across {surface}.",
+                    prompt: "Transform <image1> so the subject is melting into {material}, drips pooling across {surface} below while the face stays recognisable. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Mythic creature",
+                    group: "Becomes something else",
+                    description: "The subject as a {creature}, e.g. a dragon, faun or android, its scales, fur or skin in {colour}.",
+                    prompt: "Transform <image1> so the subject becomes a {creature}, its scales, fur or skin in {colour}, keeping the subject's face, expression and character. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Animal person",
+                    group: "Becomes something else",
+                    description: "The subject as an anthropomorphic {animal}, e.g. a fox, owl or tortoise, dressed as in {era}.",
+                    prompt: "Transform <image1> so the subject becomes an anthropomorphic {animal} dressed in the clothing of {era}, standing in the same pose, keeping the subject's expression, colouring and character. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Mid-transformation",
+                    group: "Becomes something else",
+                    description: "The subject caught halfway through turning into a {creature}, under a {weather} sky, e.g. thunderstorm or blood-red dusk.",
+                    prompt: "Transform <image1> into the subject caught halfway through turning into a {creature} under a {weather} sky, skin, limbs and shadow changing unevenly, the face still clearly the subject's. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Becoming a plant",
+                    group: "Becomes something else",
+                    description: "The subject turning into a {plant}, e.g. an oak, sunflower or cactus, rooted in {place}.",
+                    prompt: "Transform <image1> so the subject is turning into a {plant} rooted in {place}, skin becoming its bark or stem, hair becoming its leaves or petals, roots reaching into the ground from the feet. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Chimera",
+                    group: "Becomes something else",
+                    description: "A mythical hybrid (a \"chimera\"): the subject fused into one being, part {animal} and part {creature}.",
+                    prompt: "Transform <image1> into a chimera: the subject fused into a single living being that is part themselves, part {animal} and part {creature}, the joins natural and believable. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Machine version",
+                    group: "Becomes something else",
+                    description: "The subject rebuilt as a machine with technology from {era}, e.g. 1700s clockwork or the year 2300, plated in {material}.",
+                    prompt: "Transform <image1> into a mechanical version of the subject built with the technology of {era}, plated in {material}, visible joints and the wear of that time. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Elemental spirit",
+                    group: "Becomes something else",
+                    description: "A translucent ghost of the subject made of {element}, haunting {place}.",
+                    prompt: "Transform <image1> into a translucent spirit of the subject made of {element}, haunting {place}, glowing softly, edges dissolving into the air. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Giant monster",
+                    group: "Scale & physics",
+                    description: "The subject as a city-sized monster towering over {place} in a {weather}, while tiny people flee.",
+                    prompt: "Transform <image1> so the subject is a colossal giant towering over {place} in a {weather}, tiny people fleeing below, epic monster-movie scale and atmosphere. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Tiny world",
+                    group: "Scale & physics",
+                    description: "The subject as a small figure riding a {animal} among giant {objects}.",
+                    prompt: "Transform <image1> so the subject is tiny, riding a {animal} among enormous {objects}, macro photography, shallow depth of field. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Gravity off",
+                    group: "Scale & physics",
+                    description: "Everything floating weightlessly in {place}, {objects} drifting past.",
+                    prompt: "Transform <image1> so gravity is switched off: the subject floats weightlessly in {place} among drifting {objects}, hair and clothes floating. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Raining objects",
+                    group: "Scale & physics",
+                    description: "Weather made of things: {objects} falling from the sky over {place}.",
+                    prompt: "Transform <image1> so it is raining {objects} over {place}, falling from the sky all around the subject and piling on the ground. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Underwater",
+                    group: "Scale & physics",
+                    description: "The whole scene sunk into {place}, the subject swimming with {animal}s.",
+                    prompt: "Transform <image1> into an underwater scene in {place}, the subject swimming with {animal}s, light shafts from the surface, bubbles and drifting hair. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Split in time",
+                    group: "Time & worlds",
+                    description: "The left half the scene in {era}, the right half the same scene in {era2}.",
+                    prompt: "Transform <image1> into a split image: the left half the scene and subject in {era}, the right half the same scene and subject in {era2}, joined seamlessly down the middle. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Rewind to an era",
+                    group: "Time & worlds",
+                    description: "Everything moved to {era} in {place}: clothes, props, technology, buildings.",
+                    prompt: "Transform <image1> so the whole scene takes place in {place} in {era}: clothing, props, technology, architecture and photographic look of that time. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Portal",
+                    group: "Time & worlds",
+                    description: "The image torn open onto {place}, a {creature} stepping through.",
+                    prompt: "Transform <image1> with a glowing portal tearing the scene open, revealing {place} through it, a {creature} stepping through, light and debris spilling across. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Mirror world",
+                    group: "Time & worlds",
+                    description: "A mirror whose reflection shows a {mood}, {genre} version of the subject, e.g. a gleeful villain or a weary space pirate.",
+                    prompt: "Transform <image1> so the subject stands before a mirror whose reflection shows a {mood}, {genre} version of them, the room outside the mirror unchanged. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Dream merge",
+                    group: "Time & worlds",
+                    description: "The scene folding surreally into {backdrop}, {objects} drifting through, with dream logic.",
+                    prompt: "Transform <image1> into a surreal dream where the scene folds and blends into {backdrop}, {objects} drifting through it, impossible perspective, soft dreamlike light. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Reclaimed",
+                    group: "Time & worlds",
+                    description: "Years later, the scene overgrown or buried by {material}, e.g. vines, sand or ice, and home to {animal}s.",
+                    prompt: "Transform <image1> into the same scene decades later, abandoned and reclaimed by {material}, now home to {animal}s, the subject still there. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Genre shift",
+                    group: "Time & worlds",
+                    description: "{place} restyled as a {genre} world, e.g. steampunk, solarpunk or noir western.",
+                    prompt: "Transform <image1> into {place} reimagined as a {genre} world: costume, props, setting and colour reimagined to fit the genre. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Style fusion",
+                    group: "Time & worlds",
+                    description: "Two styles blended into one: {style} meets {style2}.",
+                    prompt: "Transform <image1> into an artwork fusing {style} with {style2}, both clearly present and blended into one coherent image. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "In the manner of",
+                    group: "Time & worlds",
+                    description: "Any art style or movement you name, {style}, in a {mood} mood.",
+                    prompt: "Transform <image1> into an artwork in the manner of {style}, its techniques and palette throughout, in a {mood} mood. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Action shot",
+                    group: "In action",
+                    description: "A freeze-frame photo of the subject {action}, e.g. surfing a huge wave, in {place}.",
+                    prompt: "Transform <image1> into a freeze-frame action photograph of the subject {action} in {place}, crisp sports-photography detail, motion blur in the background. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Motion study",
+                    group: "In action",
+                    description: "A grid of old sequential photographs, one phase per frame, of the subject {action}, a {animal} doing the same below.",
+                    prompt: "Transform <image1> into a grid of sequential 1880s black-and-white photographs of the subject {action}, one phase of the movement per frame, a row below of a {animal} doing the same, against a measured backdrop. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "How-to diagram",
+                    group: "In action",
+                    description: "An instruction-manual illustration of the subject {action} using only {objects}, with numbered steps.",
+                    prompt: "Transform <image1> into an instruction-manual illustration of the subject {action} using only {objects}, flat line art, numbered steps, arrows and simple captions. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Through the ages",
+                    group: "In action",
+                    description: "The subject {action}, recorded the way {era} would have, e.g. a vase painting, a woodcut or a VHS still.",
+                    prompt: "Transform <image1> into a record of the subject {action} made the way {era} would have made it, its medium, materials, clothing and setting. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Caught in the act",
+                    group: "In action",
+                    description: "A candid long-lens shot of the subject {action} in {place}.",
+                    prompt: "Transform <image1> into a candid long-lens photograph of the subject {action} in {place}, unaware of the camera, natural light, slight grain. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Gone wrong",
+                    group: "In action",
+                    description: "The subject {action}, going comically, catastrophically wrong, a {creature} making it worse.",
+                    prompt: "Transform <image1> so the subject is {action} and it is going comically, catastrophically wrong, a {creature} making it worse, the moment of disaster frozen, slapstick energy. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Multitasking",
+                    group: "In action",
+                    description: "The subject {action} and {action2} at the same time, somehow managing.",
+                    prompt: "Transform <image1> so the subject is {action} and {action2} at the same time, somehow managing both, a busy and believable scene. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Animal at work",
+                    group: "In action",
+                    description: "The subject as an anthropomorphic {animal}, {action}.",
+                    prompt: "Transform <image1> so the subject becomes an anthropomorphic {animal}, {action}, keeping the subject's expression, colouring and character. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Snow globe",
+                    group: "Displayed as",
+                    description: "The subject sealed in a snow globe with a miniature {place}, standing on {surface}.",
+                    prompt: "Transform <image1> into a miniature of the subject inside a glass snow globe, a tiny {place} around them, the globe standing on {surface}, snow drifting, reflections on the glass. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Museum diorama",
+                    group: "Displayed as",
+                    description: "The subject as part of a museum diorama about {topic} set in {era}, behind glass.",
+                    prompt: "Transform <image1> into a museum diorama about {topic} set in {era}, the subject as its centrepiece, painted backdrop, behind glass, gallery lighting. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Sand sculpture",
+                    group: "Displayed as",
+                    description: "A huge sand sculpture of the subject beside a sand {creature}, at {place}.",
+                    prompt: "Transform <image1> into a large, detailed sand sculpture of the subject beside a sand {creature} at {place}, sharp carved edges, footprints and tools nearby. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Ice sculpture",
+                    group: "Displayed as",
+                    description: "A carved ice sculpture of the subject at a {topic} festival, lit in {colour}.",
+                    prompt: "Transform <image1> into a carved ice sculpture of the subject at a {topic} festival at night, {colour} lights glowing through the ice. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Projection",
+                    group: "Displayed as",
+                    description: "The subject projected at night in {colour} light onto {surface}, e.g. a building, waterfall or cloud.",
+                    prompt: "Transform <image1> into a night-time light projection of the subject in {colour} light onto {surface}, glowing, following its texture and shape, onlookers below. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "3D chalk art",
+                    group: "Displayed as",
+                    description: "A pavement chalk drawing on {surface} that looks 3D from the right spot: the subject stepping out of a chalk-drawn {backdrop}.",
+                    prompt: "Transform <image1> into a trompe-l'oeil 3D chalk drawing on {surface} of the subject stepping out of a chalk-drawn {backdrop}, seen from the viewpoint where it pops out, chalk sticks nearby. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Mural in progress",
+                    group: "Displayed as",
+                    description: "A half-finished mural of the subject in {style}, being painted on {surface}, with scaffolding.",
+                    prompt: "Transform <image1> into a half-finished mural of the subject painted in {style} on {surface}, scaffolding, paint buckets, a painter at work. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Stained-glass window",
+                    group: "Displayed as",
+                    description: "The subject as the patron saint of {topic} in a stained-glass window in a building from {era}.",
+                    prompt: "Transform <image1> into a stained-glass window of the subject as the patron saint of {topic}, set in a building from {era}, sunlight streaming through onto the floor. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Tapestry hall",
+                    group: "Displayed as",
+                    description: "A woven tapestry of the subject {action}, hanging in a hall from {era}.",
+                    prompt: "Transform <image1> into a woven tapestry telling the story of the subject {action}, hanging in a great hall from {era}, visible weave, candlelight. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Carved into",
+                    group: "Displayed as",
+                    description: "The subject carved into {surface}, e.g. tree bark, a cliff face or jade, an ancient carving from {era}.",
+                    prompt: "Transform <image1> into a relief of the subject carved into {surface}, an ancient carving from {era}, chisel marks, weathering and natural texture. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Figure on a desk",
+                    group: "Displayed as",
+                    description: "A collectible figure of the subject with {objects} as accessories, standing on a {surface} desk.",
+                    prompt: "Transform <image1> into a painted collectible figure of the subject on a base with {objects} as accessories, standing on a {surface} desk, product photography. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Double exposure",
+                    group: "Photo, colour & light",
+                    description: "Two photos overlaid: the subject's silhouette filled with a {backdrop}, tinted {colour}.",
+                    prompt: "Convert <image1> into a double exposure photograph, the subject's silhouette blended with {backdrop}, tinted {colour}. Keep the composition, pose and identity unchanged."
+                },
+                PromptPreset {
+                    name: "Duotone",
+                    group: "Photo, colour & light",
+                    description: "Printed in just two inks: {colour} and {colour2}.",
+                    prompt: "Transform <image1> into a bold duotone image in {colour} and {colour2} only, graphic contrast, poster print feel. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Palette stolen from",
+                    group: "Photo, colour & light",
+                    description: "Recoloured with the colours of {topic}, e.g. a peacock or a rusted ship, painted in {style}.",
+                    prompt: "Transform <image1> into a painting in {style} using only the colour palette of {topic}, applied across the subject and scene. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Pattern-filled",
+                    group: "Photo, colour & light",
+                    description: "The subject's shape filled with {pattern}, e.g. paisley or circuit board, in {colour} on black.",
+                    prompt: "Transform <image1> so the subject is filled with an intricate {pattern} pattern in {colour} on black, the pattern following its form and shading. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Lit by an element",
+                    group: "Photo, colour & light",
+                    description: "The scene in {place} lit only by {element}, e.g. bioluminescence, candlelight or lava glow.",
+                    prompt: "Transform <image1> so the subject is in {place} and the only light comes from {element}, deep shadows elsewhere, atmospheric. Keep the subject recognisable."
+                },
+                PromptPreset {
+                    name: "Neon outline",
+                    group: "Photo, colour & light",
+                    description: "The subject traced in glowing {colour} neon tubes mounted on {surface}.",
+                    prompt: "Transform <image1> into the subject's outline traced in glowing {colour} neon tubes mounted on {surface}, light spill and reflections, at night. Keep the subject recognisable."
+                }
+            ]
+        },
+        PromptTask {
+            name: "Effortful Modify Style — Text",
+            description: "Turn a reference image into a poster, label, card or sign carrying text you fill in.",
+            presets: [
+                PromptPreset {
+                    name: "Movie poster",
+                    group: "Printed matter",
+                    description: "A {genre} movie poster starring the subject: the title {title} and the tagline {slogan}.",
+                    prompt: "Transform <image1> into a dramatic {genre} movie poster starring the subject, the title \"{title}\" in bold display type, the tagline \"{slogan}\", credits block at the bottom. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Book cover",
+                    group: "Printed matter",
+                    description: "A {genre} novel's cover with the subject as the art, the title {title} and the author {name}.",
+                    prompt: "Transform <image1> into a printed {genre} novel cover with the subject as the cover art, the title \"{title}\" and the author's name \"{name}\", designed typography. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Album cover",
+                    group: "Printed matter",
+                    description: "A {music} album's sleeve, e.g. synthwave or delta blues, featuring the subject, titled {title}.",
+                    prompt: "Transform <image1> into a {music} vinyl album cover featuring the subject, the album title \"{title}\", photographed as a slightly worn record sleeve. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Magazine cover",
+                    group: "Printed matter",
+                    description: "A {topic} magazine with the subject as the cover star, the masthead {title}.",
+                    prompt: "Transform <image1> into a glossy {topic} magazine cover with the subject as the cover star, the masthead \"{title}\", cover lines around the edges. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Newspaper front page",
+                    group: "Printed matter",
+                    description: "A newspaper from {era} with the subject as the lead photo under the headline {title}.",
+                    prompt: "Transform <image1> into a newspaper front page from {era} with the subject as the lead photo under the headline \"{title}\", columns of text, period printing. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Propaganda poster",
+                    group: "Printed matter",
+                    description: "A poster from {era} with the subject and the slogan {slogan}.",
+                    prompt: "Transform <image1> into a propaganda poster from {era} featuring the subject heroically, with the slogan \"{slogan}\" in period lettering. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Vintage advert",
+                    group: "Printed matter",
+                    description: "A printed advertisement from {era} with the subject promoting {name}.",
+                    prompt: "Transform <image1> into a printed advertisement from {era} with the subject promoting \"{name}\", period typography, cheerful copy, aged paper. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Wanted poster",
+                    group: "Printed matter",
+                    description: "A wild west wanted poster: the subject, the name {name}, a reward of {amount}, e.g. $5,000.",
+                    prompt: "Transform <image1> into a weathered wild west wanted poster with the subject's portrait, \"WANTED\", the name \"{name}\" and a reward of {amount}, nailed to wood. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Postage stamp",
+                    group: "Objects & labels",
+                    description: "An engraved stamp of the subject from the country {name}, worth {amount}.",
+                    prompt: "Transform <image1> into an engraved postage stamp featuring the subject, perforated edges, the country name \"{name}\" and the value {amount}. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Banknote",
+                    group: "Objects & labels",
+                    description: "A banknote with the subject's engraved portrait, issued by {name}, worth {amount}.",
+                    prompt: "Transform <image1> into a banknote with the subject as an engraved portrait, guilloche patterns, the issuer \"{name}\" and the denomination {amount}. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Wine label",
+                    group: "Objects & labels",
+                    description: "A wine label illustrated with the subject, the wine {name}, with notes of {flavour}, e.g. smoky plum.",
+                    prompt: "Transform <image1> into an elegant wine bottle label illustrated with the subject, the wine's name \"{name}\" and tasting notes of {flavour}, on a bottle. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Matchbox label",
+                    group: "Objects & labels",
+                    description: "A vintage souvenir matchbox from {place}, illustrated with the subject and the words {name}.",
+                    prompt: "Transform <image1> into a vintage souvenir matchbox label from {place} with a simple printed illustration of the subject and the words \"{name}\", on a worn matchbox. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Cereal box",
+                    group: "Objects & labels",
+                    description: "A {flavour} cereal box with the subject as the mascot, the cereal's name {name}.",
+                    prompt: "Transform <image1> into a {flavour} cereal box with the subject as the cartoon mascot, the cereal's name \"{name}\" in bubbly letters, a bowl shot. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Embroidered patch",
+                    group: "Objects & labels",
+                    description: "A {topic} club's embroidered patch of the subject with the words {slogan} around it.",
+                    prompt: "Transform <image1> into an embroidered {topic} club patch with the subject stitched in thread and the words \"{slogan}\" around the border, merrowed edge. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Coat of arms",
+                    group: "Objects & labels",
+                    description: "The subject on a coat of arms, two {animal}s holding the shield, the motto {slogan}.",
+                    prompt: "Transform <image1> into a heraldic coat of arms with the subject as the central charge, two {animal}s as supporters holding the shield, a ribbon with the motto \"{slogan}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Tarot card",
+                    group: "Cards & games",
+                    description: "A tarot card of the subject with a symbolic {creature}, the card's name {name}.",
+                    prompt: "Transform <image1> into an ornate tarot card with the subject as the figure beside a symbolic {creature}, decorated border, the card's name \"{name}\" at the bottom. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Trading card",
+                    group: "Cards & games",
+                    description: "A trading card of the subject: an {element}-type card, the name {name}, made-up stats.",
+                    prompt: "Transform <image1> into a collectible {element}-type trading card of the subject, foil border, {element} effects, the name \"{name}\", made-up stats and abilities. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Boxed action figure",
+                    group: "Cards & games",
+                    description: "An action figure of the subject in a blister pack with {objects}, labelled {name}.",
+                    prompt: "Transform <image1> into an action figure of the subject sealed in a blister pack with {objects} as accessories, the package labelled \"{name}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Game title screen",
+                    group: "Cards & games",
+                    description: "A {genre} video game title screen with the subject as the hero, the title {title}.",
+                    prompt: "Transform <image1> into a {genre} video game title screen with the subject as the hero, the game title \"{title}\" in a logo, and \"PRESS START\" below. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Arcade cabinet",
+                    group: "Cards & games",
+                    description: "An arcade cabinet with the subject in {colour} airbrushed side art, the game {title}.",
+                    prompt: "Transform <image1> into an arcade cabinet with the subject in bold {colour} airbrushed side art and the game name \"{title}\" on the marquee. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Neon sign",
+                    group: "Text in the world",
+                    description: "A neon sign spelling {slogan} outside a bar in {place}, the subject beneath it.",
+                    prompt: "Transform <image1> so a glowing neon sign spelling \"{slogan}\" hangs outside a bar in {place} behind the subject, coloured light spilling over them, night mood. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Graffiti wall",
+                    group: "Text in the world",
+                    description: "A graffiti piece of the subject on a wall in {place}, with the tag {name}.",
+                    prompt: "Transform <image1> into a spray-painted graffiti piece of the subject on a wall in {place}, with the tag \"{name}\" in wildstyle letters. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Skywriting",
+                    group: "Text in the world",
+                    description: "The words {slogan} skywritten in smoke above the subject in a {weather} sky.",
+                    prompt: "Transform <image1> so the words \"{slogan}\" are skywritten in white smoke across a {weather} sky above the subject, a small plane finishing the last letter. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Elemental letters",
+                    group: "Text in the world",
+                    description: "The words {slogan} formed from {element}, e.g. fire, smoke or holographic light, beside the subject.",
+                    prompt: "Transform <image1> so the words \"{slogan}\" are formed from {element}, floating beside the subject and lighting the scene. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Iced cake",
+                    group: "Text in the world",
+                    description: "A {topic}-themed cake with the subject's portrait in icing and {slogan} piped on it.",
+                    prompt: "Transform <image1> into a decorated {topic}-themed cake with the subject's portrait in icing and \"{slogan}\" piped across it, on a cake stand. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Tattoo with banner",
+                    group: "Text in the world",
+                    description: "A {style} tattoo of the subject on someone's arm, with a banner reading {slogan}.",
+                    prompt: "Transform <image1> into a fresh tattoo of the subject in {style} on someone's arm, with a scroll banner reading \"{slogan}\", skin texture visible. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Shop sign",
+                    group: "Text in the world",
+                    description: "The subject on a hanging sign for a shop called {name}, selling {objects}.",
+                    prompt: "Transform <image1> into a painted hanging shop sign above a storefront selling {objects}, the subject as the emblem and the shop's name \"{name}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Billboard",
+                    group: "Text in a scene",
+                    description: "A towering billboard over {place} with the subject's face and {slogan}.",
+                    prompt: "Transform <image1> into a towering billboard over {place}, the subject's face filling it beside the words \"{slogan}\" in huge type, the street and people small below. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Hologram broadcast",
+                    group: "Text in a scene",
+                    description: "A giant flickering hologram of the subject above {place}, {slogan} glowing beneath.",
+                    prompt: "Transform <image1> into a giant flickering hologram of the subject projected above {place}, scan lines and glow, the words \"{slogan}\" shining beneath it. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Propaganda city",
+                    group: "Text in a scene",
+                    description: "A street in {era} covered in posters, banners and screens, all of the subject and repeating {slogan}.",
+                    prompt: "Transform <image1> into a street in {era} covered in propaganda: posters, banners and screens everywhere showing the subject and repeating the slogan \"{slogan}\", passers-by below. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Screens everywhere",
+                    group: "Text in a scene",
+                    description: "Every screen in {place} taken over by the subject and {slogan}: shop windows, phones, giant displays.",
+                    prompt: "Transform <image1> so every screen in {place}, from phones to shop windows to giant displays, is taken over by the subject and the words \"{slogan}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Rally banners",
+                    group: "Text in a scene",
+                    description: "A crowd in {place} holding banners and placards of the subject reading {slogan}.",
+                    prompt: "Transform <image1> into a crowd rallying in {place}, holding up banners and placards with the subject's portrait and the words \"{slogan}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Drone light show",
+                    group: "Text in a scene",
+                    description: "Hundreds of lit drones in the night sky over {place}, forming the subject's face and {slogan}.",
+                    prompt: "Transform <image1> into a night-time drone light show over {place}, hundreds of glowing drones forming the subject's face and the words \"{slogan}\" in the sky. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Projected on a building",
+                    group: "Text in a scene",
+                    description: "The subject and {slogan} projected in light onto a building in {place}.",
+                    prompt: "Transform <image1> into a night-time light projection of the subject and the words \"{slogan}\" onto a building in {place}, following its windows and ledges, onlookers below. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Comic speech bubble",
+                    group: "Comics & manga",
+                    description: "A comic panel of the subject in {place} saying {dialogue}.",
+                    prompt: "Transform <image1> into a comic book panel of the subject speaking in {place}, with a speech bubble saying \"{dialogue}\" in hand lettering. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Manga page",
+                    group: "Comics & manga",
+                    description: "A black-and-white Japanese comic page of the subject {action} in {place}: screentone shading (printed dot patterns), speed lines, a speech balloon saying {dialogue}.",
+                    prompt: "Transform <image1> into a black-and-white manga page of the subject {action} in {place}, several dynamic panels, screentone shading, speed lines, a speech balloon saying \"{dialogue}\" in hand lettering. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Comic book cover",
+                    group: "Comics & manga",
+                    description: "A vintage superhero comic cover: the subject as the hero in {place}, the title {title} as the masthead, issue number and price box.",
+                    prompt: "Transform <image1> into a vintage superhero comic book cover with the subject as the hero in a dramatic pose in {place}, the title \"{title}\" as a bold masthead, issue number and price box, halftone print texture. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Sound effect splash",
+                    group: "Comics & manga",
+                    description: "An action panel of the subject {action}, a giant hand-drawn sound effect {sound} bursting across it.",
+                    prompt: "Transform <image1> into a full-colour comic action panel of the subject {action}, motion lines and impact bursts, the giant hand-drawn sound effect \"{sound}\" exploding across the panel. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Four-panel strip",
+                    group: "Comics & manga",
+                    description: "A four-panel newspaper or manga gag strip of the subject {action}, the last panel's punchline {dialogue}.",
+                    prompt: "Transform <image1> into a four-panel comic strip of the subject {action}, a simple setup building panel by panel to a punchline, the last panel's speech balloon saying \"{dialogue}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Scrolling web comic",
+                    group: "Comics & manga",
+                    description: "A tall, vertical-scroll phone comic: full-colour panels of the subject in {place}, dialogue {dialogue}.",
+                    prompt: "Transform <image1> into a tall vertical-scroll web comic strip in soft full colour, stacked panels of the subject in {place} with white space between, a speech balloon saying \"{dialogue}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Noir narration",
+                    group: "Comics & manga",
+                    description: "A hard-boiled crime comic panel: the subject in {place} at night, inky shadows, a caption box narrating {caption}.",
+                    prompt: "Transform <image1> into a noir crime comic panel of the subject in {place} at night, heavy black ink shadows, rain and neon, a rectangular narration caption box reading \"{caption}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Battle cry",
+                    group: "Comics & manga",
+                    description: "A shōnen (action manga for teens) climax: the subject shouting {dialogue} mid-attack, an aura of {element}.",
+                    prompt: "Transform <image1> into a climactic action manga panel of the subject shouting \"{dialogue}\" mid-attack, an aura of {element} blazing around them, extreme perspective and speed lines. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Chapter title page",
+                    group: "Comics & manga",
+                    description: "A manga chapter's colour opening page: the subject in {place}, the chapter title {title} as a designed logo.",
+                    prompt: "Transform <image1> into a full-colour manga chapter title page, the subject posed in {place}, the chapter title \"{title}\" as a stylised logo, small credits and chapter number. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Editorial cartoon",
+                    group: "Comics & manga",
+                    description: "A newspaper political cartoon: the subject caricatured in {place}, the caption {caption} below.",
+                    prompt: "Transform <image1> into a pen-and-ink newspaper editorial cartoon caricaturing the subject in {place}, cross-hatching, labels on symbolic objects, the caption \"{caption}\" beneath. Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Thought bubble",
+                    group: "Comics & manga",
+                    description: "The subject in {place}, a cloud-shaped thought bubble above them thinking {dialogue}.",
+                    prompt: "Transform <image1> into a comic panel of the subject in {place}, lost in thought, a cloud-shaped thought bubble with little trailing circles reading \"{dialogue}\". Keep the subject recognisable and the text spelt exactly."
+                },
+                PromptPreset {
+                    name: "Genre comic page",
+                    group: "Comics & manga",
+                    description: "A comic page in the {genre} genre, e.g. horror, romance or space opera, the subject as the lead, the title {title}.",
+                    prompt: "Transform <image1> into a comic page in the {genre} genre, the subject as the lead character, panels, lettering and colouring true to the genre, the story's title \"{title}\" in the first panel. Keep the subject recognisable and the text spelt exactly."
+                }
+            ]
+        },
+
         PromptTask {
             name: "Remove background",
             description: "Keep the subject, take away or change what is behind it.",

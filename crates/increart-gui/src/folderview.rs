@@ -162,12 +162,13 @@ fn keys(ui: &egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
         if i.key_pressed(Key::Backspace) || (i.modifiers.alt && i.key_pressed(Key::ArrowUp)) {
             out.push(Msg::FvUp);
         }
+        // past the folder's own history: the app's (the tab before, …)
         if (i.modifiers.alt && i.key_pressed(Key::ArrowLeft)) || i.pointer.button_pressed(egui::PointerButton::Extra1) {
-            out.push(Msg::FvBack);
+            out.push(if fv.back.is_empty() { Msg::NavBack } else { Msg::FvBack });
         }
         if (i.modifiers.alt && i.key_pressed(Key::ArrowRight)) || i.pointer.button_pressed(egui::PointerButton::Extra2)
         {
-            out.push(Msg::FvForward);
+            out.push(if fv.forward.is_empty() { Msg::NavForward } else { Msg::FvForward });
         }
         if i.key_pressed(Key::Enter)
             && fv.selected.len() == 1
@@ -344,7 +345,7 @@ fn entry_menu(ui: &mut egui::Ui, st: &AppState, e: &FvEntry, out: &mut Vec<Msg>)
     };
     item(ui, out, ic(ph::ARROW_SQUARE_OUT, "Open"), Msg::FvOpen(e.name.clone()));
     if let (EntryKind::Image(img), Some(root)) = (&e.kind, &st.library) {
-        crate::widgets::copy_image_item(ui, root, img, out);
+        crate::widgets::image_menu_items(ui, root, img, out);
     }
     // on disk: the entry itself; a smart folder's image: its store file
     let on_disk = match &e.kind {

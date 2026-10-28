@@ -8,12 +8,15 @@ mod app;
 mod folderview;
 mod history;
 mod ideas;
+mod pe_settings;
 mod presets;
 mod projects;
 mod refpicker;
 mod review;
+mod rewrite;
 mod settings;
 mod startup;
+mod styles;
 mod textures;
 mod tiles;
 mod tour;
@@ -99,12 +102,39 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             add_icon_font(&cc.egui_ctx);
+            close_on_signals(&cc.egui_ctx);
             Ok(Box::new(app::App::new(cc, config, config_path, warnings, startup)))
         }),
     )
 }
 
-/// Registers Phosphor as a fallback after the text font. egui-phosphor's own
+static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    SIGNALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// SIGTERM, SIGINT and SIGHUP close the window as its close button does,
+/// so drafts are saved and the servers the app started are stopped.
+fn close_on_signals(ctx: &egui::Context) {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+    }
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        while !SIGNALLED.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
+    });
+}
+
+/// Noto Sans CJK SC (SIL OFL 1.1, `assets/fonts/OFL.txt`).
+static CJK_FONT: &[u8] = include_bytes!("../assets/fonts/NotoSansCJKsc-Regular.otf");
+
+/// Registers Phosphor as a fallback after the text font, and a CJK font last. egui-phosphor's own
 /// `add_to_fonts` targets egui 0.36, so only its font bytes and constants are used.
 fn add_icon_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -119,5 +149,10 @@ fn add_icon_font(ctx: &egui::Context) {
         .font_data
         .insert("phosphor-fill".into(), egui::FontData::from_static(egui_phosphor::Variant::Fill.font_bytes()).into());
     fonts.families.insert(egui::FontFamily::Name(widgets::ICON_FILL.into()), vec!["phosphor-fill".into()]);
+    // Last in both families: Chinese, Japanese and Korean, as PE sometimes answers in them.
+    fonts.font_data.insert("cjk".into(), egui::FontData::from_static(CJK_FONT).into());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("cjk".into());
+    }
     ctx.set_fonts(fonts);
 }

@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
+use increart_core::config::SheetRows;
 use increart_core::{ImageRef, Tree};
 use increart_gui_core::{
     AppState, IdeaDraft, InboxTab, LibraryDialog, LibraryWizard, Msg, OutputSource, OutputTab, Phase, ProjectsTab,
@@ -22,6 +23,7 @@ const SCENES: &[&str] = &[
     "53-library-wizard",
     "55-library-open-wizard",
     "02-server-dialog",
+    "02b-pe-settings",
     "54-server-wizard",
     "03-idea-inbox-grid",
     "04-idea-inbox-new-idea",
@@ -117,7 +119,21 @@ const EXTRA_SCENES: &[&str] = &[
     "89-review-preview",
     "90-preview-keys",
     "91-sweep-tick-all",
+    "91b-sweep-blanks",
+    "91b1-sweep-random",
+    "91b2-sweep-random-again",
+    "91c0-sweep-suggesting",
+    "91c-sweep-suggest",
+    "91c1-suggest-dialog",
+    "91c1a-batch-suggest",
+    "91c1b-style-prompts",
+    "91c1c-enhance-dialog",
+    "91c1d-jobs-enhancing",
+    "91c2-rewrite-writing",
+    "91d-rewrite-prompt",
+    "91e-describe-image",
     "92-check-sheet-arrows",
+    "92b-check-sheet-arrows-folded",
     "93-check-sheet-arrows-click",
     "94-check-sheet-arrows-slider",
     "95-check-sheet-preview-arrows",
@@ -140,6 +156,7 @@ const EXTRA_SCENES: &[&str] = &[
     "98d-output-project-search",
     "98e-check-show-outputs-reveal",
     "98f-show-outputs-reveal",
+    "98g-presets-group",
     "99-quit-with-unsaved-draft",
 ];
 
@@ -252,8 +269,23 @@ impl Tour {
                 v.extend([
                     Msg::PresetsPanel(true),
                     Msg::PresetsShow(increart_gui_core::PresetsView::Task(0)),
-                    Msg::ApplyPreset { task: 1, preset: 2, insert_at: None },
+                    Msg::ApplyPreset { task: 3, preset: 2, insert_at: None },
                 ]);
+                v
+            }
+            // the Presets window on one group of the first task (its folder open)
+            "98g-presets-group" => {
+                let mut groups = st.prompt_presets.tasks[0].presets.iter().map(|p| &p.group).filter(|g| !g.is_empty());
+                let mut v = vec![
+                    Msg::ContinueWithoutServers,
+                    Msg::Tab(Tab::Projects),
+                    Msg::ProjectsTab(ProjectsTab::Generate),
+                    Msg::PresetsSearch(String::new()),
+                    Msg::PresetsPanel(true),
+                ];
+                v.extend(
+                    groups.next_back().map(|g| Msg::PresetsShow(increart_gui_core::PresetsView::Group(0, g.clone()))),
+                );
                 v
             }
             "65-prompt-presets-search" => vec![Msg::PresetsSearch("clay".into())],
@@ -270,7 +302,7 @@ impl Tour {
                 f.seeds = 4;
                 f.label = "r03".into();
                 f.sweep.on = true;
-                f.sweep.source = increart_core::prompts::SweepSource::Task("Modify style".into());
+                f.sweep.source = increart_core::prompts::SweepSource::Task(increart_core::prompts::LAZY_STYLE.into());
                 f.sweep.random = 8;
                 f.sweep.random_seed = 7;
                 v.push(Msg::Generate(f));
@@ -290,18 +322,179 @@ impl Tour {
                 f.prompt = "cute robot mascot sticker, {preset}".into();
                 f.sweep.on = true;
                 v.push(Msg::Generate(f));
-                v.push(Msg::PresetsPanel(true));
-                v.push(Msg::PresetsShow(increart_gui_core::PresetsView::Task(0)));
+                v.push(Msg::StylesOpen);
+                v.push(Msg::StylesShow(increart_gui_core::StyleView::Task(st.prompt_presets.tasks[0].name.clone())));
                 v.push(Msg::SweepTicks((0..4).map(|p| (0, p)).collect(), true));
+                v
+            }
+            "91c0-sweep-suggesting" | "91c-sweep-suggest" => {
+                // PE's values for the first empty shared blanks (the tour
+                // waits for the answers)
+                let f = &st.generate;
+                let chosen = increart_core::prompts::sweep_presets(&st.prompt_presets, &f.sweep);
+                let texts = std::iter::once(f.prompt.as_str()).chain(chosen.iter().map(|(_, p)| p.prompt.as_str()));
+                let keys: Vec<_> = increart_core::prompts::slot_names(texts)
+                    .into_iter()
+                    .take(3)
+                    .map(|slot| increart_gui_core::BlankKey { style: None, slot })
+                    .collect();
+                vec![Msg::PeSuggest(keys)]
+            }
+            "91c1-suggest-dialog" => {
+                // Suggest… on the first shared blank: more values, stranger
+                // (the tour waits for the answer)
+                let f = &st.generate;
+                let chosen = increart_core::prompts::sweep_presets(&st.prompt_presets, &f.sweep);
+                let texts = std::iter::once(f.prompt.as_str()).chain(chosen.iter().map(|(_, p)| p.prompt.as_str()));
+                let Some(slot) = increart_core::prompts::slot_names(texts).into_iter().next() else { return vec![] };
+                let key = increart_gui_core::BlankKey { style: None, slot };
+                let mut v = vec![Msg::PeSuggestOpen(key.clone())];
+                if let Some(server) = st.pe.server.as_ref() {
+                    let mut sampling = st.config.pe.sampling(increart_core::pe::FILL_BLANKS);
+                    sampling.temperature = 1.3;
+                    v.push(Msg::PeSuggestDialog(Some(increart_gui_core::SuggestDialog {
+                        key,
+                        form: increart_gui_core::SuggestForm {
+                            how: "stranger, from nature".into(),
+                            count: 8,
+                            sampling,
+                            images: server.vision(),
+                            avoid: true,
+                            replace: false,
+                        },
+                    })));
+                    v.push(Msg::PeSuggestAsk);
+                }
+                v
+            }
+            "91c1a-batch-suggest" => {
+                // Suggest for blanks…: three of them ticked, with instructions
+                let f = &st.generate;
+                let chosen = increart_core::prompts::sweep_presets(&st.prompt_presets, &f.sweep);
+                let texts = std::iter::once(f.prompt.as_str()).chain(chosen.iter().map(|(_, p)| p.prompt.as_str()));
+                let names = increart_core::prompts::slot_names(texts);
+                let mut v = vec![Msg::PeSuggestDialog(None), Msg::PeBatchSuggestOpen(names.clone())];
+                if st.pe.server.is_some() {
+                    let mut form = increart_gui_core::SuggestForm::from_ask(
+                        &Default::default(),
+                        st.config.pe.sampling(increart_core::pe::FILL_BLANKS),
+                    );
+                    (form.how, form.count) = ("cosy, autumnal".into(), 8);
+                    let blanks = names.into_iter().skip(1).take(3).collect();
+                    v.push(Msg::PeBatchSuggestDialog(Some(increart_gui_core::BatchSuggest { blanks, form })));
+                }
+                v
+            }
+            "91c1b-style-prompts" => {
+                // every style's prompt improved, one value picked first; one
+                // edited by hand (the tour waits for the answers)
+                let mut f = st.generate.clone();
+                let first = f.sweep.suggestions.iter().find(|v| v.style.is_none() && !v.shown.is_empty());
+                if let Some(v) = first.cloned() {
+                    f.sweep.slots.insert(v.slot.clone(), v.shown[0].clone());
+                }
+                f.sweep.style_prompts.clear();
+                let styles = increart_gui_core::update::running_styles(st).into_iter().map(|(k, _)| k).collect();
+                let a = increart_core::prompts::EnhanceAsk {
+                    how: "moody, cinematic lighting".into(),
+                    styles,
+                    ..Default::default()
+                };
+                let mut v = vec![Msg::PeBatchSuggestDialog(None), Msg::Generate(f)];
+                // the chips out of the way: the styles' prompts in the shot
+                for b in &st.generate.sweep.suggestions {
+                    v.push(Msg::PeClearSuggestions(increart_gui_core::BlankKey {
+                        style: b.style.clone(),
+                        slot: b.slot.clone(),
+                    }));
+                }
+                v.extend([Msg::PeStyleDialog(Some(a)), Msg::PeStyleAsk]);
+                v
+            }
+            "91c1c-enhance-dialog" => {
+                // reopened as left: the instructions kept, every style ticked
+                vec![Msg::PeStyleOpen]
+            }
+            "91c1d-jobs-enhancing" => {
+                // every style asked again; shot in Jobs once the first is in
+                let all = increart_gui_core::update::running_styles(st).into_iter().map(|(k, _)| k).collect();
+                vec![Msg::PeStyleDialog(None), Msg::PeStyleEnhance(all), Msg::ProjectsTab(ProjectsTab::Jobs)]
+            }
+            "91c2-rewrite-writing" => {
+                // shot while the answer is written (91d's ask stops it)
+                let mut f = st.generate.clone();
+                f.sweep.on = false;
+                f.prompt = "cute robot mascot sticker waving, like <image1>".into();
+                vec![
+                    Msg::PeStop(st.pe.jobs.iter().map(|j| j.id).collect()),
+                    Msg::ProjectsTab(ProjectsTab::Generate),
+                    Msg::PeStyleDialog(None),
+                    Msg::PeSuggestDialog(None),
+                    Msg::Generate(f),
+                    Msg::PeRewrite(increart_gui_core::PeTarget::Prompt),
+                ]
+            }
+            "91d-rewrite-prompt" => {
+                // PE's rewrite of a prompt using its reference image (the
+                // tour waits for the answer)
+                let mut f = st.generate.clone();
+                f.sweep.on = false;
+                f.prompt = "cute robot mascot sticker waving, like <image1>".into();
+                vec![Msg::Generate(f), Msg::PeRewrite(increart_gui_core::PeTarget::Prompt)]
+            }
+            "91e-describe-image" => {
+                let mut v = vec![Msg::PeTextClose(increart_gui_core::PeUse::Discard)];
+                if let Some(img) = st.generate.refs().first() {
+                    v.push(Msg::PeRewrite(increart_gui_core::PeTarget::Describe(img.clone())));
+                }
+                v
+            }
+            "91b1-sweep-random" | "91b2-sweep-random-again" => {
+                // a random 6 of every Effortful Modify style; again with
+                // another pick
+                let mut f = st.generate.clone();
+                f.sweep.random = 6;
+                f.sweep.random_seed = if name == "91b1-sweep-random" { 1 } else { 99 };
+                // the form first: the ticks change it after
+                let mut v = vec![Msg::Generate(f)];
+                if let Some(t) = st.prompt_presets.tasks.iter().position(|t| t.name.starts_with("Effortful Modify")) {
+                    let n = st.prompt_presets.tasks[t].presets.len();
+                    v.push(Msg::SweepTicks((0..n).map(|p| (t, p)).collect(), true));
+                }
+                v
+            }
+            "91b-sweep-blanks" => {
+                // a few Effortful styles ticked, each with its blanks
+                let mut v = vec![Msg::StylesClose(true)];
+                // one of the project's images as the reference they need
+                if let Some(o) = st.project_entry().and_then(|p| p.outputs.first()) {
+                    v.push(Msg::AddRefs(vec![o.image.clone()]));
+                }
+                let effortful = st.prompt_presets.tasks.iter().position(|t| t.name.starts_with("Effortful"));
+                if let Some(t) = effortful {
+                    let p = st.prompt_presets.tasks[t].presets.len().min(12);
+                    v.push(Msg::SweepClearTicks);
+                    v.push(Msg::SweepTicks((0..p).map(|p| (t, p)).collect(), true));
+                }
                 v
             }
             "70-contact-sheet"
             | "92-check-sheet-arrows"
+            | "92b-check-sheet-arrows-folded"
             | "93-check-sheet-arrows-click"
             | "94-check-sheet-arrows-slider" => {
-                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review)];
+                // the checks' positions are those of one row per line at the
+                // default size (92b: Auto, the rows fold, two side by side)
+                let rows = if name == "92b-check-sheet-arrows-folded" { SheetRows::Auto } else { SheetRows::Full };
+                let mut v = vec![
+                    Msg::ContinueWithoutServers,
+                    Msg::Tab(Tab::Review),
+                    Msg::SheetRows(rows),
+                    Msg::SheetZoom { size: increart_gui_core::SHEET_CELL_DEFAULT, save: false },
+                ];
                 if let Some(p) = st.index.projects.iter().find(|p| p.name() == "stickers") {
                     v.push(Msg::ReviewSweep(p.project.id.clone(), "r02".into()));
+                    v.push(Msg::SheetFilter(String::new()));
                     v.push(Msg::SheetCell(0, 2));
                 }
                 v
@@ -365,7 +558,7 @@ impl Tour {
                 v
             }
             "95-check-sheet-preview-arrows" => {
-                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review)];
+                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review), Msg::SheetRows(SheetRows::Full)];
                 if let Some(p) = st.index.projects.iter().find(|p| p.name() == "stickers") {
                     v.push(Msg::ReviewSweep(p.project.id.clone(), "r02".into()));
                     v.push(Msg::SheetFilter(String::new()));
@@ -381,7 +574,14 @@ impl Tour {
             | "97c-tile-menu"
             | "97d-tile-cell-menu"
             | "97e-tile-text-title" => {
-                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review)];
+                // the drags' positions are those of one row per line at the
+                // default size
+                let mut v = vec![
+                    Msg::ContinueWithoutServers,
+                    Msg::Tab(Tab::Review),
+                    Msg::SheetRows(SheetRows::Full),
+                    Msg::SheetZoom { size: increart_gui_core::SHEET_CELL_DEFAULT, save: false },
+                ];
                 if let Some(p) = st.index.projects.iter().find(|p| p.name() == "stickers") {
                     v.push(Msg::ReviewSweep(p.project.id.clone(), "r02".into()));
                     let in_sweep = |o: &&increart_core::scan::OutputLink| {
@@ -451,7 +651,7 @@ impl Tour {
                 ]
             }
             "79-contact-sheet-filter-zoom" => {
-                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review)];
+                let mut v = vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::Review), Msg::SheetRows(SheetRows::Full)];
                 if let Some(p) = st.index.projects.iter().find(|p| p.name() == "stickers") {
                     v.push(Msg::ReviewSweep(p.project.id.clone(), "r02".into()));
                     v.push(Msg::SheetFilter("o".into()));
@@ -544,13 +744,32 @@ impl Tour {
             "02-server-dialog" => {
                 vec![Msg::LibraryWizard(None), Msg::SetLibraryPath(self.library.clone()), Msg::OpenLibrary]
             }
+            "02b-pe-settings" => {
+                // Settings… on the first preset's chat server
+                let at = st.config.server_presets.iter().enumerate().find_map(|(i, p)| {
+                    p.servers.iter().position(increart_core::config::ServerConfig::is_chat).map(|j| (i, j))
+                });
+                match at {
+                    Some((i, j)) => vec![Msg::EditPreset(i), Msg::PeEditorOpen(Some(j))],
+                    None => vec![],
+                }
+            }
             "54-server-wizard" => {
                 let mut c = st.config.sdserver.clone();
                 c.binary = self.stand_in().to_string_lossy().into();
-                vec![Msg::SetSdServer(c), Msg::ServerWizard(true)]
+                vec![Msg::PeEditorClose, Msg::SetSdServer(c), Msg::ServerWizard(true)]
             }
             "03-idea-inbox-grid" => {
-                vec![Msg::ContinueWithoutServers, Msg::Tab(Tab::IdeaInbox), Msg::InboxTab(InboxTab::Grid)]
+                // the presets' first chat server, for the prompt-enhance scenes
+                let chat = st.config.chat_servers().first().map(|s| (*s).clone());
+                vec![
+                    Msg::PeEditorClose,
+                    Msg::CancelEdit,
+                    Msg::WithoutDialog(Some(increart_gui_core::Without { chat })),
+                    Msg::ContinueWithoutServers,
+                    Msg::Tab(Tab::IdeaInbox),
+                    Msg::InboxTab(InboxTab::Grid),
+                ]
             }
             "04-idea-inbox-new-idea" => vec![
                 Msg::InboxTab(InboxTab::NewIdea),
@@ -970,6 +1189,7 @@ impl Tour {
             _ => return None,
         };
         let gpu = |device: &str, state: &str| increart_gui_core::ServerStatus {
+            config: None,
             name: format!("gpu{}", &device[4..]),
             device: device.into(),
             state: state.into(),
@@ -1052,6 +1272,19 @@ impl Tour {
         }
         let opening_ok = name == "16-servers-opening"; // shot while opening
         let waiting = st.busy > 0
+            || (!matches!(name, "91c2-rewrite-writing" | "91c0-sweep-suggesting" | "91c1d-jobs-enhancing")
+                && !st.pe.jobs.is_empty())
+            || (name == "91c1d-jobs-enhancing"
+                && !(st.pe.styles_waiting() > 0 && st.pe.style_batch > st.pe.styles_waiting()))
+            // shot once the first answer is in, the rest still asked
+            || (name == "91c0-sweep-suggesting"
+                && !(st.pe.blanks_waiting() > 0 && st.pe.blank_batch > st.pe.blanks_waiting()))
+            || (name == "91c2-rewrite-writing"
+                && !st
+                    .pe
+                    .jobs
+                    .iter()
+                    .any(|j| matches!(&j.step, increart_gui_core::PeStep::Writing { pieces, .. } if *pieces > 12)))
             || tex.busy()
             || matches!(st.phase, Phase::Library(LibraryDialog { busy: true, .. }))
             || (!opening_ok && matches!(st.phase, Phase::Servers(ServerDialog { opening: true, .. })))
@@ -1271,7 +1504,10 @@ impl Tour {
         let step = match name {
             "82-preview-zoom" if (5..8).contains(&self.settled) => Some(egui::Key::Plus),
             "83-preview-next" if self.settled == 5 => Some(egui::Key::ArrowRight),
-            "92-check-sheet-arrows" if self.settled == 5 => Some(egui::Key::ArrowDown),
+            "92-check-sheet-arrows" | "92b-check-sheet-arrows-folded" if self.settled == 5 => {
+                Some(egui::Key::ArrowDown)
+            }
+            "92b-check-sheet-arrows-folded" if self.settled == 8 => Some(egui::Key::ArrowRight),
             "93-check-sheet-arrows-click" | "94-check-sheet-arrows-slider" if self.settled == 10 => {
                 Some(egui::Key::ArrowDown)
             }
@@ -1289,6 +1525,17 @@ impl Tour {
         if name == "92-check-sheet-arrows" && self.settled == 12 {
             let ok = st.sheet_cell == (1, 2);
             eprintln!("CHECK {name}: {} (cell {:?})", if ok { "ok" } else { "FAILED" }, st.sheet_cell);
+        }
+        // two rows side by side: ↓ is two rows on, → past a row's last seed
+        // the next row's first
+        if name == "92b-check-sheet-arrows-folded" && self.settled == 12 {
+            let ok = st.sheet_bands == 2 && st.sheet_cell == (3, 0);
+            eprintln!(
+                "CHECK {name}: {} ({} bands, cell {:?})",
+                if ok { "ok" } else { "FAILED" },
+                st.sheet_bands,
+                st.sheet_cell
+            );
         }
         // in the large preview opened from the sheet, ↓ goes a style down
         // (the same seed) and ↑ back

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use increart_core::config::{Config, ServerConfig, ServerPreset};
+use increart_core::config::{Config, ReviewOrder, ServerConfig, ServerPreset, TreeOrder};
 use increart_core::{IdeaLoc, Verdict};
 use increart_gui_core::*;
 
@@ -198,6 +198,22 @@ fn details_panels_start_shown_and_hide_for_the_session() {
     assert!(h.state.info_hidden.contains(&InfoPanel::Output));
     h.send(Msg::ShowInfo(InfoPanel::Output, true));
     assert!(h.state.info_hidden.is_empty());
+    h.send(Msg::ShowInfo(InfoPanel::Review, false));
+    assert!(h.state.info_hidden.contains(&InfoPanel::Review));
+}
+
+#[test]
+fn grids_zoom_each_on_its_own_within_the_thumbnails_size() {
+    let mut h = Harness::new();
+    assert_eq!(h.state.grid_cell_size(ZoomGrid::Review), 200, "the default");
+    assert_eq!(h.state.grid_cell_size(ZoomGrid::Output), 180);
+    h.send(Msg::GridZoom { grid: ZoomGrid::Review, size: 250, save: true });
+    assert_eq!((h.state.grid_cell_size(ZoomGrid::Review), h.state.config.review_grid_cell), (250, 250));
+    assert_eq!(h.state.grid_cell_size(ZoomGrid::Output), 180, "the other grid keeps its size");
+    h.send(Msg::GridZoom { grid: ZoomGrid::Output, size: 10_000, save: false });
+    assert_eq!(h.state.grid_cell_size(ZoomGrid::Output), GRID_CELL_MAX, "no larger than the thumbnails");
+    h.send(Msg::GridZoom { grid: ZoomGrid::Output, size: 1, save: true });
+    assert_eq!(h.state.grid_cell_size(ZoomGrid::Output), GRID_CELL_MIN);
 }
 
 #[test]
@@ -309,6 +325,53 @@ fn review_and_undo() {
     assert_eq!(h.state.review_queue().len(), 2, "undone");
     assert!(h.state.review_undo.is_empty());
     assert_eq!(h.state.index.project(&project).unwrap().runs[0].id, run);
+}
+
+#[test]
+fn review_tree_sorts_and_hides_reviewed() {
+    let mut h = Harness::new();
+    let promote = |h: &mut Harness, name: &str, folder: Option<&str>| {
+        h.send(Msg::Draft(IdeaDraft { title: name.into(), text: "x".into(), ..Default::default() }));
+        h.send(Msg::AddIdea(AddIdea::Promote));
+        h.send(Msg::PromoteParent(PathBuf::new()));
+        h.send(Msg::PromoteNewFolder(folder.map(String::from)));
+        h.send(Msg::ConfirmPromote);
+        h.settle();
+        h.state.project.clone().unwrap()
+    };
+    let zeta = promote(&mut h, "Zeta", Some("Zfold"));
+    let mid = promote(&mut h, "Mid", Some("Mfold"));
+    let alpha = promote(&mut h, "Alpha", None);
+    let beta = promote(&mut h, "Beta", None);
+    for p in [&zeta, &mid, &beta] {
+        Library_::steal(&h.root).write_two(p);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let tree = |h: &Harness| {
+        let (f, p) = h.state.review_tree_children(Path::new(""));
+        let f: Vec<String> = f.iter().map(|f| f.display().to_string()).collect();
+        (f, p.iter().map(|p| p.name()).collect::<Vec<_>>())
+    };
+    // A–Z, hiding what has nothing to review (Alpha)
+    assert_eq!(tree(&h), (vec!["Mfold".into(), "Zfold".into()], vec!["Beta".to_string()]));
+    // a folder by the oldest project in it with images to review
+    h.send(Msg::ReviewOrder(ReviewOrder::OldestToReview));
+    assert_eq!(h.state.config.review_order, ReviewOrder::OldestToReview);
+    assert_eq!(tree(&h).0, ["Zfold", "Mfold"]);
+    // shown again: those with nothing to review last
+    h.send(Msg::ReviewHideReviewed(false));
+    assert!(h.state.config.review_show_reviewed);
+    assert_eq!(tree(&h).1, ["Beta", "Alpha"]);
+    // newest created first, as the project tree can
+    h.send(Msg::ReviewOrder(ReviewOrder::Created));
+    assert_eq!(tree(&h), (vec!["Mfold".into(), "Zfold".into()], vec!["Beta".to_string(), "Alpha".into()]));
+    h.send(Msg::ReviewOrder(ReviewOrder::Name));
+    assert_eq!(tree(&h).1, ["Alpha", "Beta"]);
+    // hidden, except the selected one
+    h.send(Msg::ReviewHideReviewed(true));
+    h.send(Msg::ReviewScope(Some(alpha)));
+    assert_eq!(tree(&h).1, ["Alpha", "Beta"]);
 }
 
 /// Writes outputs without the lock: only for setting up `review_and_undo`.
@@ -479,7 +542,7 @@ fn server_dialog_click_opens_a_preset() {
     let mut s = dialog_state(vec![a, b.clone()], Some("A"));
     assert_eq!(dialog(&s).editing, None, "nothing is edited until asked");
     let fx = update(&mut s, Msg::OpenPreset(1));
-    assert_eq!(fx[0], Effect::StopServers, "no servers yet: opens without asking");
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { .. })), "no servers yet: opens without asking");
     assert!(s.confirm.is_none());
     assert!(dialog(&s).opening);
     assert_eq!(dialog(&s).draft, b);
@@ -491,11 +554,21 @@ fn server_dialog_asks_before_replacing_servers_in_use() {
     let p = ServerPreset { name: "One".into(), servers: vec![start("gpu0", 1234)] };
     let mut s = dialog_state(vec![p], None);
     s.engine_running = true;
+    let other = start("gpu1", 1235).with_device("ROCm1");
+    s.servers = vec![ServerStatus {
+        config: Some(other),
+        name: "gpu1".into(),
+        device: "ROCm1".into(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    }];
     assert!(update(&mut s, Msg::OpenPreset(0)).is_empty(), "asks first");
     assert!(s.confirm.as_ref().unwrap().text.contains("open One"));
     assert!(!dialog(&s).opening);
     let fx = update(&mut s, Msg::ConfirmYes);
-    assert_eq!(fx[0], Effect::StopServers);
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { .. })));
     assert!(dialog(&s).opening);
 }
 
@@ -566,7 +639,6 @@ fn server_dialog_save_and_open_then_partial_failure() {
     update(&mut s, Msg::SetPresetName("Both GPUs".into()));
     let fx = update(&mut s, Msg::SaveAndOpen);
     assert!(matches!(fx[0], Effect::SaveConfig(..)));
-    assert!(fx.contains(&Effect::StopServers));
     assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 2));
     assert_eq!(s.config.server_presets.len(), 1);
     assert_eq!(s.config.last_preset.as_deref(), Some("Both GPUs"));
@@ -667,8 +739,11 @@ fn server_dialog_from_main_can_be_closed_and_status_shows() {
     let mut s = dialog_state(vec![], None);
     update(&mut s, Msg::AskContinueWithoutServers);
     assert!(matches!(s.phase, Phase::Servers(_)), "asks first");
-    assert!(s.confirm.as_ref().is_some_and(|c| c.text.starts_with("Continue without servers?")));
-    update(&mut s, Msg::ConfirmYes);
+    assert_eq!(dialog(&s).without.as_deref(), Some(&Without { chat: None }));
+    update(&mut s, Msg::WithoutDialog(None));
+    assert!(dialog(&s).without.is_none(), "Cancel");
+    update(&mut s, Msg::AskContinueWithoutServers);
+    update(&mut s, Msg::ContinueWithoutServers);
     assert_eq!(s.phase, Phase::Main);
     update(&mut s, Msg::ServerStatus(true));
     assert!(s.server_status);
@@ -844,6 +919,22 @@ fn back_and_forward_retrace_the_places() {
     assert!(h.state.nav.forward.is_empty(), "a new step drops the forward ones");
     h.send(Msg::NavBack);
     assert_eq!(h.state.tab, Tab::OutputLibrary);
+
+    // subtabs are steps too, Review's view among them
+    h.send(Msg::Tab(Tab::IdeaInbox));
+    h.send(Msg::InboxTab(InboxTab::Grid));
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::ReviewView(ReviewView::Grid));
+    h.send(Msg::NavBack);
+    assert_eq!((h.state.tab, h.state.review_view), (Tab::Review, ReviewView::Single));
+    h.send(Msg::NavBack);
+    assert_eq!((h.state.tab, h.state.inbox_tab), (Tab::IdeaInbox, InboxTab::Grid));
+    h.send(Msg::NavBack);
+    assert_eq!(h.state.inbox_tab, InboxTab::NewIdea);
+    h.send(Msg::NavForward);
+    h.send(Msg::NavForward);
+    h.send(Msg::NavForward);
+    assert_eq!((h.state.tab, h.state.review_view), (Tab::Review, ReviewView::Grid));
 }
 
 #[test]
@@ -2017,7 +2108,7 @@ fn prompt_presets_apply_insert_save_and_edit() {
     let tasks = &h.state.prompt_presets.tasks;
     let (cel, solid) = (
         tasks[0].presets.iter().position(|x| x.name == "Anime cel-shaded").unwrap(),
-        tasks[1].presets.iter().position(|x| x.name == "Solid colour background").unwrap(),
+        tasks[3].presets.iter().position(|x| x.name == "Solid colour background").unwrap(),
     );
 
     // a click replaces the prompt; the old one goes to the history
@@ -2039,7 +2130,7 @@ fn prompt_presets_apply_insert_save_and_edit() {
     let mut f = h.state.generate.clone();
     f.prompt = "ab".into();
     h.send(Msg::Generate(f));
-    h.send(Msg::ApplyPreset { task: 1, preset: solid, insert_at: Some(1) });
+    h.send(Msg::ApplyPreset { task: 3, preset: solid, insert_at: Some(1) });
     let prompt = h.state.generate.prompt.clone();
     assert!(prompt.starts_with("a Replace the background") && prompt.ends_with("clean edges. b"), "{prompt}");
     let sel = h.state.prompt_select.clone().unwrap();
@@ -2053,37 +2144,48 @@ fn prompt_presets_apply_insert_save_and_edit() {
     assert!(h.send(Msg::PresetFavourite(0, cel)).is_empty());
     let folder = h.root.join("prompt-presets");
     h.state.presets_path = Some(folder.clone());
-    let fx = h.send(Msg::PresetFavourite(1, solid));
+    let fx = h.send(Msg::PresetFavourite(3, solid));
     assert!(matches!(&fx[..], [Effect::SavePresets(..)]));
     h.settle();
     let load = || increart_core::prompts::PromptPresets::load_dir(&folder).unwrap().0;
     assert_eq!(load(), h.state.prompt_presets);
 
     // Save as preset: a name taken in the task is refused, then saved
-    h.send(Msg::PresetsShow(PresetsView::Task(1)));
+    h.send(Msg::PresetsShow(PresetsView::Task(3)));
     h.send(Msg::OpenSavePreset);
     let mut d = h.state.save_preset.clone().unwrap();
-    assert_eq!((d.task, d.preset.prompt.as_str()), (1, prompt.as_str()));
+    assert_eq!((d.task, d.preset.prompt.as_str()), (3, prompt.as_str()));
     d.preset.name = "solid colour BACKGROUND".into();
     h.send(Msg::EditSavePreset(d.clone()));
     h.send(Msg::ConfirmSavePreset);
     assert!(h.state.save_preset.as_ref().unwrap().error.as_ref().unwrap().contains("already has"));
     d.preset.name = "  Mine ".into();
+    // a {slot} isn't allowed in Lazy Modify Style
+    h.send(Msg::EditSavePreset(SavePresetDialog { task: 0, ..d.clone() }));
+    h.send(Msg::ConfirmSavePreset);
+    assert!(h.state.save_preset.as_ref().unwrap().error.as_ref().unwrap().contains("can't have a {slot}"));
     h.send(Msg::EditSavePreset(d));
     h.send(Msg::ConfirmSavePreset);
     assert!(h.state.save_preset.is_none());
-    assert_eq!(h.state.prompt_presets.tasks[1].presets.last().unwrap().name, "Mine");
+    assert_eq!(h.state.prompt_presets.tasks[3].presets.last().unwrap().name, "Mine");
     h.settle();
     assert!(folder.join("Remove background/Mine.rsn").is_file());
     assert_eq!(load(), h.state.prompt_presets);
 
     // the editor: checked on Save, dropped on Close, defaults restorable
-    h.send(Msg::OpenPresetEditor(1, None));
+    h.send(Msg::OpenPresetEditor(3, None));
     let mut e = h.state.presets_editor.clone().unwrap();
     e.list.tasks[2].name = " ".into();
     h.send(Msg::EditPresetEditor(e.clone()));
     h.send(Msg::SavePresetEditor);
     assert_eq!(h.state.presets_editor.as_ref().unwrap().error.as_deref(), Some("A task has no name"));
+    let mut plain = e.clone();
+    plain.list.tasks[2].name = increart_core::prompts::TEXT_STYLE.into();
+    plain.list.tasks[1].presets[0].prompt = "Transform <image1> into a fox.".into();
+    h.send(Msg::EditPresetEditor(plain));
+    h.send(Msg::SavePresetEditor);
+    let err = h.state.presets_editor.as_ref().unwrap().error.clone().unwrap();
+    assert!(err.ends_with("needs a {slot} for the user to fill in"), "{err}");
     e.list.tasks.truncate(2);
     h.send(Msg::EditPresetEditor(e));
     h.send(Msg::SavePresetEditor);
@@ -2106,6 +2208,7 @@ fn switching_libraries_keeps_the_servers_and_can_go_back() {
     h.settle();
     assert_eq!(h.state.index.projects.len(), 1);
     h.state.servers = vec![ServerStatus {
+        config: None,
         name: "box".into(),
         device: String::new(),
         state: "ready".into(),
@@ -2189,15 +2292,20 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert!(h.state.generate.sweep.selected.is_empty());
     h.send(Msg::SweepTicks(vec![(0, 0), (0, 1), (0, 2)], true));
 
-    // the window opens on the Ticked view, which keeps an unticked one
-    // listed; a tick whose preset is gone can be unticked by its key
-    h.send(Msg::PresetsPanel(true));
+    // Choose styles opens on the ticks; Cancel puts them back, OK keeps them
     let all = h.state.generate.sweep.selected.clone();
-    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(all.clone()));
+    h.send(Msg::StylesOpen);
+    assert_eq!(h.state.styles.as_ref().unwrap().view, StyleView::Ticked);
     h.send(Msg::SweepToggle(0, 1));
-    assert_eq!(h.state.generate.sweep.selected.len(), 2);
-    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(all.clone()), "still listed");
+    h.send(Msg::StylesClose(false));
+    assert!(h.state.styles.is_none());
+    assert_eq!(h.state.generate.sweep.selected, all, "cancelled");
+    h.send(Msg::StylesOpen);
     h.send(Msg::SweepToggle(0, 1));
+    h.send(Msg::StylesClose(true));
+    assert_eq!(h.state.generate.sweep.selected.len(), 2, "kept");
+    h.send(Msg::SweepToggle(0, 1));
+    // a tick whose preset is gone can be unticked by its key
     let gone = increart_core::prompts::PresetKey { task: "Looks".into(), name: "Old".into() };
     h.state.generate.sweep.selected.push(gone.clone());
     h.send(Msg::SweepToggleKey(gone));
@@ -2205,14 +2313,37 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
         v.sort();
         v
     };
-    assert_eq!(sorted(h.state.generate.sweep.selected.clone()), sorted(all));
-    h.send(Msg::PresetsShow(PresetsView::Task(0)));
-    h.send(Msg::SweepToggle(0, 1));
-    h.send(Msg::PresetsShow(PresetsView::Ticked(vec![])));
-    let now = h.state.generate.sweep.selected.clone();
-    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Ticked(now), "listed afresh");
-    h.send(Msg::SweepToggle(0, 1));
-    h.send(Msg::PresetsPanel(false));
+    assert_eq!(sorted(h.state.generate.sweep.selected.clone()), sorted(all.clone()));
+    // search, filters and sort narrow and order what it lists
+    h.send(Msg::StylesOpen);
+    let rows = |h: &Harness| h.state.style_rows(h.state.styles.as_ref().unwrap());
+    h.send(Msg::StylesShow(StyleView::All));
+    assert_eq!(rows(&h), [(0, 0), (0, 1), (0, 2)]);
+    h.send(Msg::StylesSearch("MOOD".into()));
+    assert_eq!(rows(&h), [(0, 1)], "searches the prompts");
+    h.send(Msg::StylesSearch(String::new()));
+    h.send(Msg::StylesFilter(StyleFilter { usable: true, ..Default::default() }));
+    assert_eq!(rows(&h), [(0, 0), (0, 1)], "Restyle needs a reference image");
+    h.send(Msg::StylesFilter(StyleFilter::default()));
+    h.send(Msg::StylesSort(increart_core::config::StyleSort::Name));
+    h.send(Msg::StylesShow(StyleView::Task("Looks".into())));
+    assert_eq!(rows(&h), [(0, 0), (0, 1), (0, 2)]);
+    h.state.prompt_presets.tasks[0].presets[0].name = "Zinc".into();
+    assert_eq!(rows(&h), [(0, 1), (0, 2), (0, 0)], "A–Z");
+    h.state.prompt_presets.tasks[0].presets[0].name = "Clay".into();
+    h.send(Msg::StylesSort(increart_core::config::StyleSort::Listed));
+    h.send(Msg::StylesClose(true));
+    // a draft from before chose a whole task: opening ticks its presets,
+    // and Cancel puts the task back
+    let ticks = h.state.generate.sweep.selected.clone();
+    h.state.generate.sweep.source = SweepSource::Task("Looks".into());
+    h.send(Msg::StylesOpen);
+    assert_eq!(h.state.generate.sweep.source, SweepSource::Selected);
+    assert_eq!(h.state.generate.sweep.selected.len(), 3);
+    h.send(Msg::StylesClose(false));
+    assert_eq!(h.state.generate.sweep.source, SweepSource::Task("Looks".into()));
+    h.state.generate.sweep.source = SweepSource::Selected;
+    h.state.generate.sweep.selected = ticks;
     // the one needing a reference image is left out; {mood} asked once
     let err = update::sweep_runs(&h.state).unwrap_err();
     assert!(err.contains("Fill in {mood}"), "{err}");
@@ -2230,7 +2361,7 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
             (format!("{label} · Ink"), "a fox, ink in a gloomy mood".to_string()),
         ]
     );
-    // one at a time: asks to spread the sweep instead; Cancel queues nothing
+    // one at a time: asks to go sweep by sweep instead; Cancel queues nothing
     h.send(Msg::JobOrder(increart_core::scheduler::Order::Sequential));
     h.send(Msg::QueueGenerate);
     assert_eq!(h.state.sweep_order_ask, Some(false));
@@ -2239,8 +2370,8 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert!(h.state.project_entry().unwrap().runs.is_empty(), "cancelled");
     h.send(Msg::QueueGenerate);
     let fx = h.send(Msg::SweepOrderAnswer(Some(true)));
-    assert!(fx.iter().any(|f| matches!(f, Effect::SetJobOrder(increart_core::scheduler::Order::Spread))));
-    assert_eq!(h.state.config.job_order, increart_core::scheduler::Order::Spread);
+    assert!(fx.iter().any(|f| matches!(f, Effect::SetJobOrder(increart_core::scheduler::Order::BySweep))));
+    assert_eq!(h.state.config.job_order, increart_core::scheduler::Order::BySweep);
     assert!(h.state.sweep_order_ask.is_none() && !h.state.sweep_order_asked);
     h.settle();
     let p = h.state.project_entry().unwrap();
@@ -2279,6 +2410,15 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     Library_::steal(&h.root).write_seeds(&ids[1], &seeds[..1]);
     h.rt.run(Effect::Rescan);
     h.settle();
+    // Choose styles says what each style has made
+    h.send(Msg::StylesOpen);
+    let stats = &h.state.styles.as_ref().unwrap().stats;
+    let key = |name: &str| increart_core::prompts::PresetKey { task: "Looks".into(), name: name.into() };
+    let ink = &stats[&key("Ink")];
+    assert_eq!((ink.unrated, ink.here, ink.sample.is_some()), (1, 1, true));
+    assert_eq!(ink.last.as_ref(), Some(&ids[1]));
+    assert!(!stats.contains_key(&key("Restyle")), "never used");
+    h.send(Msg::StylesClose(false));
     // from an image in Review, its sheet opens with that image selected
     h.send(Msg::ReviewScope(Some(project.clone())));
     let at = h.state.review_queue().iter().position(|o| o.name.run == ids[1]).unwrap();
@@ -2326,6 +2466,27 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert_eq!(v, [Some(Verdict::Good), Some(Verdict::Bad)], "the reviewed one kept its verdict");
     h.send(Msg::SheetMove(5, 5));
     assert_eq!(h.state.sheet_cell, (1, 1));
+    // rating the row's last seed goes on to the next row's first
+    h.send(Msg::SheetCell(0, 1));
+    h.send(Msg::SheetRate(Verdict::Bad));
+    h.settle();
+    assert_eq!(h.state.sheet_cell, (1, 0));
+    // both rows side by side: the arrows move as shown, Tile places as shown
+    h.send(Msg::SheetBands(2));
+    h.send(Msg::SheetMove(0, -1));
+    assert_eq!(h.state.sheet_cell, (0, 1), "back into the first band");
+    h.send(Msg::SheetMove(1, 0));
+    assert_eq!(h.state.sheet_cell, (0, 1), "one line only");
+    h.send(Msg::SheetMove(0, 5));
+    assert_eq!(h.state.sheet_cell, (1, 1));
+    let row1 = match &h.state.sheet().unwrap().rows[1].cells[0] {
+        SheetCell::Image(o) => o.image.clone(),
+        c => panic!("{c:?}"),
+    };
+    assert_eq!(h.state.sheet_cells()[&row1], (2, 0));
+    h.send(Msg::SheetBands(1));
+    assert_eq!(h.state.sheet_cells()[&row1], (0, 1));
+    h.send(Msg::SheetMove(5, 5));
 
     // the large preview steps through the sheet's images row by row,
     // skipping the pending cell, and the selected cell follows
@@ -2375,6 +2536,14 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert_eq!(h.state.generate.prompt, "a fox, ink in a gloomy mood");
     assert!(!h.state.generate.sweep.on);
     assert_eq!(h.state.generate.sweep.source, SweepSource::Selected);
+
+    // "Same recipe & seed": that image's run settings, its seed alone
+    let o = row0[1].clone();
+    let seed = h.state.output_link(&o).unwrap().name.seed;
+    h.send(Msg::RecipeInGenerate(o));
+    assert_eq!(h.state.generate.prompt, "a fox, claymation", "row 0's style");
+    assert_eq!((h.state.generate.seeds, h.state.generate.first_seed), (1, seed));
+    assert!(!h.state.generate.sweep.on);
 
     // leaving the scope drops the sheet
     h.send(Msg::ReviewScope(None));
@@ -2466,11 +2635,22 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert_eq!(tiled.idea.images.len(), 1);
     h.send(Msg::CloseTile);
 
-    // rated together; the sheet keeps them picked, another tab drops them
-    h.send(Msg::RatePicked(Verdict::Bad));
+    // rated together, in one op; the sheet keeps them picked, another tab drops them
+    let before: Vec<_> = all.iter().map(|i| h.state.output_link(i).unwrap().verdict).collect();
+    let undos = h.state.review_undo.len();
+    let fx = h.send(Msg::RatePicked(Verdict::Bad));
+    assert_eq!(fx.iter().filter(|f| matches!(f, Effect::Lib(_))).count(), 1, "one op for all");
     h.settle();
     assert!(all.iter().all(|i| h.state.output_link(i).unwrap().verdict == Some(Verdict::Bad)));
     assert_eq!(h.state.picked.len(), 3);
+    // one undo takes back the whole rating
+    h.send(Msg::UndoReview);
+    h.settle();
+    let after: Vec<_> = all.iter().map(|i| h.state.output_link(i).unwrap().verdict).collect();
+    assert_eq!(after, before, "each back to its own verdict");
+    assert_eq!(h.state.review_undo.len(), undos, "one step");
+    h.send(Msg::RatePicked(Verdict::Bad));
+    h.settle();
     h.send(Msg::Tab(Tab::Projects));
     assert!(h.state.picked.is_empty());
 
@@ -2650,6 +2830,50 @@ fn idle_server(s: &mut AppState, i: usize, idle: bool) {
 }
 
 #[test]
+fn prompt_enhance_asking_holds_the_gpu_idle_alert() {
+    let mut s = dialog_state(vec![], None);
+    let mut n = s.config.notifications.clone();
+    assert!(n.pe_counts_as_work, "on by default");
+    n.gpu_idle.on = true;
+    n.gpu_idle.threshold = 5;
+    n.player = "true {file}".into();
+    update(&mut s, Msg::SetNotifications(n));
+    s.servers = vec![ServerStatus {
+        config: None,
+        name: "a".into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    }];
+    s.engine_running = true;
+    let at = |s: &mut AppState, min: f64| plays(&update(s, Msg::Tick(min * 60.0)));
+    idle_server(&mut s, 0, true);
+    assert_eq!(at(&mut s, 2.0), 0);
+
+    // asking from 2 to 8 min: not idle then, and idle again from 8
+    let key = PeKey::Text(1);
+    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 120.0, since: 120.0, rate: None });
+    assert_eq!(at(&mut s, 6.0), 0);
+    assert_eq!(at(&mut s, 8.0), 0);
+    s.pe.jobs.clear();
+    assert_eq!(at(&mut s, 12.0), 0, "4 min since the last ask");
+    assert_eq!(at(&mut s, 13.0), 1);
+
+    // off: the GPU's own idle time only
+    let mut s2 = s.clone();
+    let mut n = s2.config.notifications.clone();
+    n.pe_counts_as_work = false;
+    update(&mut s2, Msg::SetNotifications(n));
+    idle_server(&mut s2, 0, false);
+    idle_server(&mut s2, 0, true);
+    let key = PeKey::Text(2);
+    s2.pe.jobs.push(PeJobState { id: 2, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None });
+    assert_eq!(at(&mut s2, 18.0), 1, "sounds while asking");
+}
+
+#[test]
 fn gpu_idle_alert_repeats_while_it_lasts() {
     let mut s = dialog_state(vec![], None);
     let mut n = s.config.notifications.clone();
@@ -2659,6 +2883,7 @@ fn gpu_idle_alert_repeats_while_it_lasts() {
     n.player = "true {file}".into();
     update(&mut s, Msg::SetNotifications(n));
     let gpu = |name: &str| ServerStatus {
+        config: None,
         name: name.into(),
         device: String::new(),
         state: "ready".into(),
@@ -2732,6 +2957,7 @@ fn queue_cleared_alert_sounds_once_when_a_gpu_finishes() {
     n.player = "true {file}".into();
     update(&mut s, Msg::SetNotifications(n));
     let gpu = |name: &str| ServerStatus {
+        config: None,
         name: name.into(),
         device: String::new(),
         state: "ready".into(),
@@ -3074,13 +3300,38 @@ fn selecting_a_project_narrows_the_grid_only_to_a_folder_with_others() {
     assert_eq!(scope(&mut h, &deer), (PathBuf::new(), 5));
     h.send(Msg::NarrowToSiblings(true));
 
-    // newest first, or A–Z (any case), a config setting
+    // newest created first, or A–Z (any case), a config setting
     h.send(Msg::SelectProjectFolder(Some(PathBuf::new())));
     let names = |h: &Harness| h.state.projects_in_scope().iter().map(|p| p.name()).collect::<Vec<_>>();
     assert_eq!(names(&h), ["Top", "deer river", "deer tail", "Owl", "Fox"]);
-    h.send(Msg::ProjectsByName(true));
-    assert!(h.state.config.projects_by_name);
+    h.send(Msg::ProjectOrder(TreeOrder::Name));
+    assert_eq!(h.state.config.project_order, TreeOrder::Name);
     assert_eq!(names(&h), ["deer river", "deer tail", "Fox", "Owl", "Top"]);
+
+    // folders A–Z, or newest created first by the newest project in them
+    let folders = |h: &Harness| {
+        h.state.project_folder_children(Path::new("")).iter().map(|f| f.display().to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(folders(&h), ["Deer", "Fox", "Owl"]);
+    h.send(Msg::FolderOrder(TreeOrder::Created));
+    assert_eq!(h.state.config.folder_order.0, TreeOrder::Created);
+    assert_eq!(folders(&h), ["Deer", "Owl", "Fox"]);
+
+    // or last run first (never run: by when made), projects and folders alike
+    let owl = h.state.index.projects.iter().find(|p| p.name() == "Owl").unwrap().project.id.clone();
+    h.send(Msg::SelectProject(owl));
+    h.send(Msg::Generate(h.state.generate.clone()));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    // queued after the others were made (timestamps are whole seconds)
+    let p = h.state.index.projects.iter_mut().find(|p| p.name() == "Owl").unwrap();
+    p.runs[0].revisions[0].created += chrono::TimeDelta::seconds(1);
+    h.send(Msg::SelectProjectFolder(Some(PathBuf::new())));
+    h.send(Msg::ProjectOrder(TreeOrder::LastRun));
+    assert_eq!(names(&h), ["Owl", "Top", "deer river", "deer tail", "Fox"]);
+    h.send(Msg::FolderOrder(TreeOrder::LastRun));
+    assert_eq!(folders(&h), ["Owl", "Deer", "Fox"]);
 }
 
 #[test]
@@ -3173,12 +3424,12 @@ fn interface_zoom_steps_and_stays_in_range() {
     let mut h = Harness::new();
     assert_eq!(h.state.ui_zoom(), 100);
     h.send(Msg::UiZoomStep(true));
-    assert_eq!((h.state.ui_zoom(), h.state.config.ui_zoom), (110, 110));
-    // a typed value steps to the next 10% either way
-    h.send(Msg::UiZoom { percent: 125, save: true });
+    assert_eq!((h.state.ui_zoom(), h.state.config.ui_zoom), (105, 105));
+    // a typed value steps to the next 5% either way
+    h.send(Msg::UiZoom { percent: 123, save: true });
     h.send(Msg::UiZoomStep(true));
-    assert_eq!(h.state.ui_zoom(), 130);
-    h.send(Msg::UiZoom { percent: 125, save: true });
+    assert_eq!(h.state.ui_zoom(), 125);
+    h.send(Msg::UiZoom { percent: 123, save: true });
     h.send(Msg::UiZoomStep(false));
     assert_eq!(h.state.ui_zoom(), 120);
     // 70% to 300%
@@ -3319,4 +3570,1265 @@ fn status_messages_are_dismissed_one_by_one_or_cleared() {
     assert_eq!(texts(&h), ["one", "three"]);
     h.send(Msg::ClearMessages);
     assert!(h.state.messages.is_empty());
+}
+
+#[test]
+fn prompt_enhance_suggests_values_for_a_sweeps_blanks_looking_at_its_images() {
+    use increart_core::pe::{PeRun, PeServer};
+    use increart_core::prompts::{PresetKey, PromptPreset, PromptPresets, PromptTask};
+    use std::sync::{Arc, Mutex};
+    // a chat server that answers with two values (marble and ice, then
+    // stone<n> and Marble), keeping what it was asked
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let asked: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut req in server.incoming_requests() {
+            let answer = if req.url().ends_with("/v1/models") {
+                r#"{"data": []}"#.to_string()
+            } else {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let mut seen = seen.lock().unwrap();
+                seen.push(serde_json::from_str(&body).unwrap());
+                let values = match seen.len() - 1 {
+                    0 => serde_json::json!(["marble", "ice"]),
+                    n => serde_json::json!([format!("stone{n}"), "Marble"]),
+                };
+                serde_json::json!({"choices": [{"message": {"content": format!("Here: {values}")}}]}).to_string()
+            };
+            let _ = req.respond(tiny_http::Response::from_string(answer));
+        }
+    });
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let img = h.state.review_queue()[0].image.clone();
+    h.send(Msg::AddRefs(vec![img]));
+    let preset =
+        |name: &str, prompt: &str| PromptPreset { name: name.into(), prompt: prompt.into(), ..Default::default() };
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Becomes".into(),
+            description: String::new(),
+            presets: vec![
+                preset("Sculpted", "<image1> sculpted from {material}"),
+                preset("Melting", "<image1> melting, made of {material}, in the {era}"),
+            ],
+        }],
+    };
+    let mut f = h.state.generate.clone();
+    f.prompt = "{preset}".into();
+    f.sweep.on = true;
+    h.send(Msg::Generate(f));
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1)], true));
+
+    // no server set up: says where to add one
+    let shared = BlankKey { style: None, slot: "material".into() };
+    assert!(h.send(Msg::PeSuggest(vec![shared.clone()])).is_empty());
+    assert!(h.errors().last().unwrap().contains("Servers…"), "{:?}", h.errors());
+
+    // the shared {material}: one request naming both styles, with the image
+    let fake = PeServer { name: "fake".into(), run: PeRun::Connect { url }, ..Default::default() };
+    h.state.pe.server = Some(fake);
+    h.send(Msg::PeSuggest(vec![shared.clone()]));
+    assert!(h.state.pe.blank_job(&shared).is_some());
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !h.state.pe.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        for m in h.rt.wait(Duration::from_millis(100)) {
+            h.send(m);
+        }
+    }
+    assert_eq!(h.state.pe.status, PeStatus::Ready);
+    assert_eq!(h.state.blank_shown(&shared).unwrap()[..], ["marble", "ice"]);
+    let req = asked.lock().unwrap()[0].clone();
+    let system = req["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(system, increart_core::pe::DEFAULT_FILL_BLANKS, "the built-in system prompt");
+    let parts = req["messages"][1]["content"].as_array().unwrap();
+    // the image first: asks for other blanks start the same
+    let text = parts[1]["text"].as_str().unwrap();
+    assert!(text.contains("all 2 of these styles") && text.contains("Suggest 6 values for {material}"), "{text}");
+    assert!(parts[0]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"), "the image");
+    assert!(text.starts_with("The reference image <image1> is attached.\n\nSubject (template): "), "{text}");
+    assert!(!text.contains("Already suggested"), "{text}");
+    // livelier than rewrites, kept sensible
+    assert_eq!((req["temperature"].as_f64(), req["min_p"].as_f64()), (Some(1.1f32 as f64), Some(0.05f32 as f64)));
+
+    // a style's own {era}, with the server's own system prompt
+    h.send(Msg::PeSystemPrompt { job: "fill_blanks".into(), text: "mine".into() });
+    let melting = PresetKey { task: "Becomes".into(), name: "Melting".into() };
+    let own = BlankKey { style: Some(melting.clone()), slot: "era".into() };
+    h.send(Msg::PeSuggest(vec![own.clone()]));
+    while !h.state.pe.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        for m in h.rt.wait(Duration::from_millis(100)) {
+            h.send(m);
+        }
+    }
+    let req = asked.lock().unwrap()[1].clone();
+    assert_eq!(req["messages"][0]["content"], "mine");
+
+    // stopped while queued: never asked
+    let sculpted = BlankKey {
+        style: Some(PresetKey { task: "Becomes".into(), name: "Sculpted".into() }),
+        slot: "material".into(),
+    };
+    h.send(Msg::PeSuggest(vec![shared.clone(), sculpted.clone()]));
+    let id = h.state.pe.blank_job(&sculpted).unwrap().id;
+    h.send(Msg::PeStop(vec![id]));
+    assert!(h.state.pe.blank_job(&sculpted).is_none());
+    while !h.state.pe.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        for m in h.rt.wait(Duration::from_millis(100)) {
+            h.send(m);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(asked.lock().unwrap().len(), 3, "the stopped one wasn't sent");
+    assert!(h.state.blank_shown(&sculpted).is_none());
+    let text = req["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string();
+    assert!(text.contains("Style \"Melting\"") && !text.contains("Sculpted"), "{text}");
+    let wait = |h: &mut Harness| {
+        while !h.state.pe.jobs.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                h.send(m);
+            }
+        }
+    };
+    let text_of = |i: usize| {
+        asked.lock().unwrap()[i]["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // asked again: told what was offered, and the new values added to them
+    // (not Marble, offered before)
+    let text = text_of(2);
+    assert!(text.contains("not these or close variations of them): marble; ice\n"), "{text}");
+    assert_eq!(h.state.blank_shown(&shared).unwrap()[..], ["marble", "ice", "stone2"]);
+
+    // a reroll replaces them, avoiding every value offered before; one
+    // offered again anyway is dropped
+    h.send(Msg::PeReroll(shared.clone()));
+    wait(&mut h);
+    assert!(text_of(3).contains("): marble; ice; stone2\n"), "{}", text_of(3));
+    assert_eq!(h.state.blank_shown(&shared).unwrap()[..], ["stone3"]);
+    assert!(h.state.pe.rerolls.is_empty() && h.state.pe.avoiding.is_empty());
+
+    // Suggest…: instructions, how many, sampling, no images, not avoiding
+    h.send(Msg::PeSuggestOpen(shared.clone()));
+    let mut d = h.state.pe.suggest.clone().unwrap();
+    assert_eq!((d.form.count, d.form.images, d.form.avoid, d.form.replace), (6, true, true, false));
+    d.form.how = "only stones".into();
+    d.form.count = 3;
+    d.form.sampling.temperature = 1.5;
+    (d.form.images, d.form.avoid) = (false, false);
+    h.send(Msg::PeSuggestDialog(Some(d.clone())));
+    let preview = update::suggest_message(&h.state, &d.key, &d.form).unwrap();
+    h.send(Msg::PeSuggestAsk);
+    wait(&mut h);
+    let req = asked.lock().unwrap()[4].clone();
+    let text = text_of(4);
+    assert_eq!(text, preview, "the dialog shows what's sent");
+    assert!(text.ends_with("Instructions: only stones\n\nSuggest 3 values for {material}."), "{text}");
+    assert!(!text.contains("Already suggested") && !text.contains("is attached"), "{text}");
+    assert_eq!(req["messages"][1]["content"].as_array().unwrap().len(), 1, "no image");
+    assert_eq!(req["temperature"].as_f64(), Some(1.5));
+    // not avoiding: Marble is back
+    assert_eq!(h.state.blank_shown(&shared).unwrap()[..], ["stone3", "stone4", "Marble"]);
+    // the settings are the blank's own, as last set; another's are as by default
+    h.send(Msg::PeSuggestDialog(None));
+    h.send(Msg::PeSuggestOpen(shared.clone()));
+    assert_eq!(h.state.pe.suggest.as_ref().unwrap().form, d.form);
+    h.send(Msg::PeSuggestOpen(own.clone()));
+    assert_eq!(h.state.pe.suggest.as_ref().unwrap().form.how, "");
+    h.send(Msg::PeSuggestDialog(None));
+    let ask = h.state.generate.sweep.blank_values(None, "material").unwrap().ask.clone().unwrap();
+    let hot = increart_core::pe::Sampling { temperature: 1.5, ..h.state.config.pe.sampling("fill_blanks") };
+    assert_eq!((ask.how.as_str(), ask.count, ask.sampling), ("only stones", 3, Some(hot)));
+    // saved with the project: gone in another, back from disk in it again
+    let shown = h.state.blank_shown(&shared).cloned().unwrap();
+    let before = h.state.blank_offered(&shared).to_vec();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert_ne!(h.state.project.as_ref(), Some(&project));
+    assert!(h.state.blank_shown(&shared).is_none() && h.state.pe.suggest.is_none());
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::SelectProject(project.clone()));
+    assert_eq!(h.state.blank_shown(&shared), Some(&shown));
+    assert_eq!(h.state.blank_offered(&shared), before);
+    h.send(Msg::PeSuggestOpen(shared.clone()));
+    assert_eq!(h.state.pe.suggest.as_ref().unwrap().form, d.form, "the settings saved too");
+    h.send(Msg::PeSuggestDialog(None));
+
+    // leaving the project while asks are waiting asks first: Cancel keeps
+    // them; Yes stops them (a folder, another project alike)
+    let other = h.state.index.projects.iter().find(|p| p.project.id != project).unwrap().project.id.clone();
+    h.send(Msg::PeSuggest(vec![shared.clone()]));
+    for leave in [Msg::SelectProjectFolder(None), Msg::SelectProject(other.clone())] {
+        h.send(leave.clone());
+        let text = &h.state.confirm.as_ref().unwrap().text;
+        assert!(text.contains("1 ask(s)") && text.contains("Leaving the project stops them"), "{text}");
+        h.send(Msg::ConfirmNo);
+        assert_eq!(h.state.project.as_ref(), Some(&project), "{leave:?}");
+        assert!(h.state.pe.blank_job(&shared).is_some());
+    }
+    h.send(Msg::SelectProject(other.clone()));
+    h.send(Msg::ConfirmYes);
+    assert_eq!(h.state.project.as_ref(), Some(&other));
+    assert!(h.state.pe.jobs.is_empty() && h.state.confirm.is_none());
+    // nothing waiting: no question
+    h.send(Msg::SelectProject(project.clone()));
+    assert!(h.state.confirm.is_none());
+    assert_eq!(h.state.blank_shown(&shared), Some(&shown));
+    // and kept when the form is cleared
+    let form = h.state.generate.clone();
+    h.send(Msg::ClearGenerate);
+    assert_eq!(h.state.blank_shown(&shared), Some(&shown));
+    h.send(Msg::Generate(form));
+    h.send(Msg::PeSuggestOpen(shared.clone()));
+    h.send(Msg::PeSuggestDialog(Some(d.clone())));
+    // forgotten: asks may offer them again; Clear empties those shown
+    h.send(Msg::PeForgetOffered(shared.clone()));
+    h.send(Msg::PeClearSuggestions(shared.clone()));
+    assert!(h.state.blank_offered(&shared).is_empty() && h.state.blank_shown(&shared).is_none());
+    h.send(Msg::PeSuggestDialog(None));
+    assert!(h.state.pe.suggest.is_none());
+
+    // the server's own sampling for a job, and back to the default
+    let x = increart_core::pe::Sampling { temperature: 0.7, min_p: 0.1 };
+    h.send(Msg::PeSampling { job: "fill_blanks".into(), sampling: Some(x) });
+    assert_eq!(h.state.config.pe.sampling("fill_blanks"), x);
+    h.send(Msg::PeSampling { job: "fill_blanks".into(), sampling: None });
+    assert!(h.state.config.pe.sampling.is_empty());
+
+    // Suggest for blanks…: the empty ones ticked at first, then as last set;
+    // one ask for each blank ticked, with the dialog's settings
+    h.send(Msg::PeBatchSuggestOpen(vec!["material".into(), "era".into()]));
+    let mut b = h.state.pe.batch_suggest.clone().unwrap();
+    assert_eq!(b.blanks, ["material", "era"]);
+    assert_eq!((b.form.how.as_str(), b.form.count, b.form.avoid), ("", 6, true));
+    assert_eq!(b.form.sampling, h.state.config.pe.sampling("fill_blanks"), "the server's");
+    b.blanks = vec!["era".into()];
+    (b.form.how, b.form.count) = ("1920s only".into(), 2);
+    h.send(Msg::PeBatchSuggestDialog(Some(b.clone())));
+    let kept = h.state.generate.sweep.batch_ask.clone().unwrap();
+    assert_eq!((kept.blanks, kept.ask.how, kept.ask.sampling), (vec!["era".to_string()], "1920s only".into(), None));
+    h.send(Msg::PeBatchSuggestAsk);
+    assert!(h.state.pe.batch_suggest.is_none(), "closed");
+    let era = BlankKey { style: None, slot: "era".into() };
+    assert!(h.state.pe.blank_job(&era).is_some() && h.state.pe.blank_job(&shared).is_none());
+    assert_eq!(h.state.pe.jobs.len(), 1, "only the one ticked");
+    wait(&mut h);
+    let last = asked.lock().unwrap().len() - 1;
+    let text = text_of(last);
+    assert!(text.ends_with("Instructions: 1920s only\n\nSuggest 2 values for {era}."), "{text}");
+    assert!(h.state.blank_shown(&era).is_some());
+    // Tick only: fewer suggestions than asked for, no value, failed
+    let names = ["material".to_string(), "era".into()];
+    assert!(h.state.blank_shown(&shared).is_none() && h.state.blank_shown(&era).unwrap().len() < 6);
+    assert_eq!(h.state.batch_picks(&names, 6)[0], names, "none and a few: both");
+    assert_eq!(h.state.batch_picks(&names, 1)[0], ["material"], "only the one with none");
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.insert("era".into(), "1920s".into());
+    h.send(Msg::Generate(f));
+    assert_eq!(h.state.batch_picks(&names, 6)[1], ["material"], "no value");
+    assert!(h.state.batch_picks(&names, 6)[2].is_empty(), "none failed");
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.remove("era");
+    h.send(Msg::Generate(f));
+    h.send(Msg::PeBatchSuggestOpen(vec![]));
+    assert_eq!(h.state.pe.batch_suggest.as_ref().unwrap(), &b, "as last set");
+    h.send(Msg::PeBatchSuggestDialog(None));
+    // the quick ask (Basic suggest, ✨) keeps to the defaults:
+    // neither the batch's settings nor the blank's own
+    h.send(Msg::PeSuggest(vec![era.clone(), shared.clone()]));
+    wait(&mut h);
+    let reqs = asked.lock().unwrap().clone();
+    for req in &reqs[reqs.len() - 2..] {
+        let text = req["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
+        assert!(!text.contains("Instructions") && text.contains("Suggest 6 values for {"), "{text}");
+        assert_eq!(req["temperature"].as_f64(), Some(h.state.config.pe.sampling("fill_blanks").temperature as f64));
+    }
+
+    // a shared value, and a style's own over it: Queue needs every style's
+    // blanks filled one way or the other
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.insert("material".into(), "marble".into());
+    h.send(Msg::Generate(f));
+    let err = update::sweep_runs(&h.state).unwrap_err();
+    assert!(err.contains("{era}"), "{err}");
+    let mut f = h.state.generate.clone();
+    f.sweep.set_own_slot(&melting, "era", "1920s".into());
+    f.sweep.set_own_slot(&melting, "material", "ice".into());
+    h.send(Msg::Generate(f));
+    let (runs, _) = update::sweep_runs(&h.state).unwrap();
+    let prompts: Vec<_> = runs.iter().map(|(f, _)| f.prompt.as_str()).collect();
+    assert_eq!(prompts, ["<image1> sculpted from marble", "<image1> melting, made of ice, in the 1920s"]);
+    // clearing the last own value drops the style's entry
+    let mut f = h.state.generate.clone();
+    f.sweep.set_own_slot(&melting, "era", String::new());
+    f.sweep.set_own_slot(&melting, "material", String::new());
+    assert!(f.sweep.style_slots.is_empty());
+}
+
+#[test]
+fn a_blank_whose_answer_has_nothing_new_is_asked_again_then_marked() {
+    use increart_core::pe::{PeRun, PeServer};
+    use increart_core::prompts::{PromptPreset, PromptPresets, PromptTask};
+    use std::sync::{Arc, Mutex};
+    // a chat server answering from a script, keeping what it was asked
+    let script = [r#"["a", "b"]"#, r#"["a", "b"]"#, r#"["A", "b"]"#, r#"["a"]"#, "[]", r#"["c"]"#];
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let asked: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut req in server.incoming_requests() {
+            let answer = if req.url().ends_with("/v1/models") {
+                r#"{"data": []}"#.to_string()
+            } else {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let mut seen = seen.lock().unwrap();
+                seen.push(serde_json::from_str(&body).unwrap());
+                let values = script[(seen.len() - 1).min(script.len() - 1)];
+                serde_json::json!({"choices": [{"message": {"content": format!("Here: {values}")}}]}).to_string()
+            };
+            let _ = req.respond(tiny_http::Response::from_string(answer));
+        }
+    });
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Becomes".into(),
+            description: String::new(),
+            presets: vec![PromptPreset {
+                name: "Sculpted".into(),
+                prompt: "sculpted from {material}".into(),
+                ..Default::default()
+            }],
+        }],
+    };
+    let mut f = h.state.generate.clone();
+    f.prompt = "{preset}".into();
+    f.sweep.on = true;
+    h.send(Msg::Generate(f));
+    h.send(Msg::SweepTicks(vec![(0, 0)], true));
+    h.state.pe.server = Some(PeServer { name: "fake".into(), run: PeRun::Connect { url }, ..Default::default() });
+    let key = BlankKey { style: None, slot: "material".into() };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let wait = |h: &mut Harness| {
+        while !h.state.pe.jobs.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                h.send(m);
+            }
+        }
+    };
+    let req = |i: usize| asked.lock().unwrap()[i].clone();
+    let text = |r: &serde_json::Value| {
+        r["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string()
+    };
+    h.send(Msg::PeSuggest(vec![key.clone()]));
+    wait(&mut h);
+    assert_eq!(h.state.blank_shown(&key).unwrap()[..], ["a", "b"]);
+
+    // only repeats: asked again twice, each hotter and told so, then marked
+    h.send(Msg::PeSuggest(vec![key.clone()]));
+    wait(&mut h);
+    assert_eq!(asked.lock().unwrap().len(), 4, "the first ask and 2 more");
+    let temps: Vec<_> = (1..4).map(|i| (req(i)["temperature"].as_f64().unwrap() * 100.0).round()).collect();
+    assert_eq!(temps, [110.0, 130.0, 150.0]);
+    assert!(!text(&req(1)).contains("nothing new") && text(&req(3)).contains("nothing new"), "{}", text(&req(3)));
+    assert_eq!(h.state.pe.blank_batch, 3, "the retries in the batch's count");
+    let why = h.state.pe.blank_failed.get(&key).unwrap();
+    assert!(why.contains("only repeated") && why.contains("asked 3 times"), "{why}");
+    let errors = h.errors();
+    assert_eq!(errors.iter().filter(|e| e.contains("{material}")).count(), 1, "one message, at the end: {errors:?}");
+    assert!(h.state.pe.blank_tries.is_empty());
+
+    // nothing at all, then a new value: the mark goes when asked again
+    h.send(Msg::PeSuggest(vec![key.clone()]));
+    assert!(h.state.pe.blank_failed.is_empty());
+    wait(&mut h);
+    assert_eq!(asked.lock().unwrap().len(), 6);
+    assert_eq!(h.state.blank_shown(&key).unwrap()[..], ["a", "b", "c"]);
+    assert!(h.state.pe.blank_failed.is_empty());
+}
+
+#[test]
+fn prompt_enhance_rewrites_prompts_and_ideas_and_describes_images() {
+    use increart_core::HistoryKey;
+    use increart_core::pe::{DEFAULT_DESCRIBE, DEFAULT_REWRITE, PeRun, PeServer};
+    use std::sync::{Arc, Mutex};
+    // rewrites as a fox at golden hour; describes as a beach
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let asked: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut req in server.incoming_requests() {
+            let answer = if req.url().ends_with("/v1/models") {
+                r#"{"data": []}"#.to_string()
+            } else {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let describe = v["messages"][0]["content"] == DEFAULT_DESCRIBE;
+                seen.lock().unwrap().push(v);
+                if !describe {
+                    // streamed, in pieces
+                    let mut sse = String::new();
+                    for p in ["Rewritten prompt: \"a sleek red fox", " like <image1>, golden hour\""] {
+                        let chunk = serde_json::json!({"choices": [{"delta": {"content": p}}]});
+                        sse.push_str(&format!("data: {chunk}\n\n"));
+                    }
+                    sse.push_str("data: [DONE]\n\n");
+                    let h = tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap();
+                    let _ = req.respond(tiny_http::Response::from_string(sse).with_header(h));
+                    continue;
+                }
+                r#"{"choices": [{"message": {"content": "A fox on a beach."}}]}"#.to_string()
+            };
+            let _ = req.respond(tiny_http::Response::from_string(answer));
+        }
+    });
+    // waits for the window's answer, returning the steps it went through
+    let wait = |h: &mut Harness| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut steps = vec![];
+        while h.state.pe.text.as_ref().is_some_and(|t| t.waiting.is_some()) {
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                if let Msg::PeProgress(_, s) = &m {
+                    steps.push(s.clone());
+                }
+                h.send(m);
+            }
+        }
+        steps
+    };
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let img = h.state.review_queue()[0].image.clone();
+    h.send(Msg::AddRefs(vec![img.clone()]));
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox like <image1>".into();
+    h.send(Msg::Generate(f));
+
+    // no server set up
+    assert!(h.send(Msg::PeRewrite(PeTarget::Prompt)).is_empty());
+    assert!(h.state.pe.text.is_none() && h.errors().last().unwrap().contains("Servers…"));
+    let fake = PeServer { name: "fake".into(), run: PeRun::Connect { url }, ..Default::default() };
+    h.state.pe.server = Some(fake);
+
+    // the Generate prompt, with its reference image
+    h.send(Msg::PeRewrite(PeTarget::Prompt));
+    let id = h.state.pe.text.as_ref().unwrap().waiting.unwrap();
+    assert_eq!(h.state.pe.job(id).unwrap().step, PeStep::Queued);
+    let steps = wait(&mut h);
+    assert_eq!(steps[..2], [PeStep::Preparing, PeStep::Reading { images: 1 }]);
+    assert!(
+        matches!(&steps[2], PeStep::Writing { pieces: 1, text } if text == "Rewritten prompt: \"a sleek red fox"),
+        "the answer as it's written: {steps:?}"
+    );
+    assert!(h.state.pe.jobs.is_empty() && h.state.pe.read_times.contains_key(&1));
+    let t = h.state.pe.text.clone().unwrap();
+    assert_eq!((t.text.as_str(), t.images), ("a sleek red fox like <image1>, golden hour", 1), "{:?}", t.error);
+    let req = asked.lock().unwrap()[0].clone();
+    assert_eq!(req["messages"][0]["content"], DEFAULT_REWRITE);
+    let text = req["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string();
+    assert!(text.starts_with("Rewrite this prompt:\n\na fox like <image1>") && text.contains("<image1> is attached"));
+    assert!(req["messages"][1]["content"][0]["image_url"].is_object(), "the reference image, first");
+
+    // again with instructions; an answer to the old ask is dropped
+    h.send(Msg::PeTextEdit { how: "moodier".into(), text: "edited".into() });
+    h.send(Msg::PeTextRetry);
+    h.send(Msg::PeAnswer(id, Ok("stale".into())));
+    assert!(h.state.pe.text.as_ref().unwrap().waiting.is_some());
+    wait(&mut h);
+    assert!(
+        asked.lock().unwrap()[1]["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Instructions: moodier")
+    );
+    h.send(Msg::PeTextClose(PeUse::Use));
+    assert!(h.state.pe.text.is_none());
+    assert_eq!(h.state.generate.prompt, "a sleek red fox like <image1>, golden hour");
+    h.settle();
+    let e = history(&mut h, HistoryKey::Project(project));
+    assert!(
+        e.iter()
+            .any(|e| e.kind == increart_core::history::HistoryKind::BeforeRewrite && e.text == "a fox like <image1>")
+    );
+
+    // an idea's rewrite kept as a variant, then used as its text
+    h.send(Msg::Draft(IdeaDraft { title: "Fox".into(), text: "a fox".into(), ..Default::default() }));
+    h.send(Msg::PeRewrite(PeTarget::NewIdea));
+    wait(&mut h);
+    h.send(Msg::PeTextClose(PeUse::Use));
+    assert_eq!(h.state.draft.text, "a sleek red fox like <image1>, golden hour");
+    h.send(Msg::AddIdea(AddIdea::Inbox));
+    h.settle();
+    let id = h.state.unreviewed_ideas()[0].idea.id.clone();
+    h.send(Msg::OpenIdea(id.clone()));
+    h.send(Msg::PeRewrite(PeTarget::Idea(id.clone())));
+    wait(&mut h);
+    h.send(Msg::PeTextClose(PeUse::Variant));
+    h.settle();
+    let i = &h.state.idea(&id).unwrap().idea;
+    assert_eq!(i.variants.len(), 1);
+    assert!(
+        matches!(&i.variants[0].origin, increart_core::model::VariantOrigin::Rewritten { model, .. } if model == "fake")
+    );
+    h.send(Msg::PeRewrite(PeTarget::Idea(id.clone())));
+    wait(&mut h);
+    h.send(Msg::PeTextEdit { how: String::new(), text: "a fox, by hand".into() });
+    h.send(Msg::PeTextClose(PeUse::Use));
+    assert_eq!(h.state.idea_edit.as_ref().unwrap().text, "a fox, by hand", "the edited answer");
+
+    // an image described becomes the Generate prompt
+    h.send(Msg::PeRewrite(PeTarget::Describe(img)));
+    wait(&mut h);
+    let req = asked.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        req["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"],
+        "Describe the attached image."
+    );
+    h.send(Msg::PeTextClose(PeUse::Use));
+    assert_eq!(h.state.generate.prompt, "A fox on a beach.");
+
+    // Stop: the window keeps the text and says so; asking again stops the
+    // ask before
+    h.send(Msg::PeRewrite(PeTarget::Prompt));
+    let id = h.state.pe.text.as_ref().unwrap().waiting.unwrap();
+    assert_eq!(h.send(Msg::PeStop(vec![id])), [Effect::PeStop(vec![id])]);
+    let t = h.state.pe.text.clone().unwrap();
+    assert!(t.waiting.is_none() && t.error.as_deref() == Some("Stopped") && h.state.pe.jobs.is_empty());
+    h.send(Msg::PeTextRetry);
+    let again = h.state.pe.text.as_ref().unwrap().waiting.unwrap();
+    assert!(h.send(Msg::PeTextRetry).contains(&Effect::PeStop(vec![again])));
+    wait(&mut h);
+    h.send(Msg::PeTextClose(PeUse::Discard));
+
+    // discarding changes nothing
+    h.send(Msg::PeRewrite(PeTarget::Prompt));
+    wait(&mut h);
+    h.send(Msg::PeTextClose(PeUse::Discard));
+    assert_eq!(h.state.generate.prompt, "A fox on a beach.");
+    assert!(h.errors().iter().all(|e| e.contains("Servers…")), "{:?}", h.errors());
+}
+
+#[test]
+fn presets_window_shows_one_group_of_a_task() {
+    let mut h = Harness::new();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    h.send(Msg::Generate(f));
+    h.send(Msg::PresetsPanel(true));
+    let g = h.state.prompt_presets.tasks[0].presets.iter().find(|p| !p.group.is_empty()).unwrap().group.clone();
+    h.send(Msg::PresetsShow(PresetsView::Group(0, g.clone())));
+    let view = &h.state.presets_panel.as_ref().unwrap().view;
+    assert_eq!((view.task(), view.group()), (Some(0), Some(g.as_str())));
+
+    // Save prompt as preset goes into the group shown
+    h.send(Msg::OpenSavePreset);
+    let d = h.state.save_preset.clone().unwrap();
+    assert_eq!((d.task, d.preset.group.as_str()), (0, g.as_str()));
+
+    // the group edited away: its task is shown
+    h.send(Msg::OpenPresetEditor(0, None));
+    let mut e = h.state.presets_editor.clone().unwrap();
+    for p in e.list.tasks[0].presets.iter_mut().filter(|p| p.group == g) {
+        p.group = "Renamed".into();
+    }
+    h.send(Msg::EditPresetEditor(e));
+    h.send(Msg::SavePresetEditor);
+    assert!(h.state.presets_editor.is_none());
+    assert_eq!(h.state.presets_panel.as_ref().unwrap().view, PresetsView::Task(0));
+}
+
+#[test]
+fn chat_servers_go_with_their_preset() {
+    use increart_core::pe::{PeDevice, PeRun, PeServer, PeStart};
+    let kobold = |port| PeRun::KoboldCpp {
+        binary: "/bin/kcpp".into(),
+        model: "/m/a.gguf".into(),
+        mmproj: String::new(),
+        host: "127.0.0.1".into(),
+        port,
+        device: PeDevice::Cpu { threads: 8 },
+        context: 8192,
+        args: vec![],
+    };
+    let a = PeServer { name: "A".into(), run: kobold(1), ..Default::default() };
+    let b = PeServer { name: "B".into(), run: PeRun::Connect { url: "http://x:2".into() }, start: PeStart::AtLaunch };
+    let gpu0 = start("gpu0", 1234);
+    let presets = vec![
+        ServerPreset { name: "GPU + A".into(), servers: vec![gpu0.clone(), ServerConfig::Chat(a.clone())] },
+        ServerPreset { name: "GPU + B".into(), servers: vec![ServerConfig::Chat(b.clone()), gpu0.clone()] },
+        ServerPreset { name: "B only".into(), servers: vec![ServerConfig::Chat(b.clone())] },
+    ];
+    let mut s = dialog_state(presets.clone(), None);
+    let asks = |fx: &[Effect]| fx.iter().filter(|f| matches!(f, Effect::PeAsk { jobs, .. } if jobs.is_empty())).count();
+    let stops = |fx: &[Effect]| fx.iter().filter(|f| matches!(f, Effect::PeShutdown)).count();
+
+    // A waits to be asked; it isn't an sd-server
+    let fx = update(&mut s, Msg::OpenPreset(0));
+    assert_eq!(asks(&fx), 0);
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if *servers == [gpu0.clone()]));
+    assert_eq!(s.pe.server.as_ref(), Some(&a));
+    assert_eq!(dialog(&s).progress.len(), 1);
+    let at = s.open_attempt;
+    update(&mut s, Msg::ServerOpened(at, 0, Ok(())));
+    assert!(matches!(update(&mut s, Msg::ServersSettled(at))[..], [Effect::StartEngine { .. }]));
+    assert_eq!(s.phase, Phase::Main);
+
+    // the same sd-server with B: nothing to open or ask; A stops, B starts
+    // with its preset
+    update(&mut s, Msg::OpenServerDialog);
+    s.pe.status = PeStatus::Ready;
+    let fx = update(&mut s, Msg::OpenPreset(1));
+    assert!(s.confirm.is_none(), "nothing stops");
+    assert!(!fx.iter().any(|f| matches!(f, Effect::OpenServers { .. } | Effect::StopServers)), "{fx:?}");
+    assert_eq!((asks(&fx), stops(&fx)), (1, 1));
+    let i = fx.iter().position(|f| matches!(f, Effect::PeShutdown)).unwrap();
+    let j = fx.iter().position(|f| matches!(f, Effect::PeAsk { server, .. } if server.name == "B")).unwrap();
+    assert!(i < j, "started after the stop");
+    assert_eq!((&s.phase, s.servers.len()), (&Phase::Main, 1));
+
+    // B only: asks before stopping gpu0; B runs on as it is
+    update(&mut s, Msg::OpenServerDialog);
+    update(&mut s, Msg::OpenPreset(2));
+    let text = s.confirm.as_ref().unwrap().text.clone();
+    assert!(text.starts_with("Stop the servers in use and open B only?"), "{text}");
+    let fx = update(&mut s, Msg::ConfirmYes);
+    assert_eq!(fx.iter().filter(|f| **f == Effect::StopServers).count(), 1);
+    assert_eq!(stops(&fx), 0);
+    assert!(s.servers.is_empty() && s.phase == Phase::Main && s.pe.server.as_ref() == Some(&b));
+
+    // continuing without sd-servers: the chat server in use stays, unless
+    // another is picked
+    let mut s = dialog_state(presets, None);
+    update(&mut s, Msg::AskContinueWithoutServers);
+    update(&mut s, Msg::WithoutDialog(Some(Without { chat: Some(b.clone()) })));
+    let fx = update(&mut s, Msg::ContinueWithoutServers);
+    assert_eq!(asks(&fx), 1, "B starts");
+    assert_eq!((&s.phase, s.pe.server.as_ref()), (&Phase::Main, Some(&b)));
+    s.pe.status = PeStatus::Ready;
+    update(&mut s, Msg::OpenServerDialog);
+    update(&mut s, Msg::AskContinueWithoutServers);
+    assert_eq!(dialog(&s).without.as_ref().unwrap().chat.as_ref(), Some(&b), "the one in use, ticked");
+    update(&mut s, Msg::WithoutDialog(Some(Without { chat: None })));
+    assert_eq!(stops(&update(&mut s, Msg::ContinueWithoutServers)), 1);
+    assert_eq!(s.pe.server, None);
+}
+
+#[test]
+fn the_chat_server_editor_edits_the_presets_draft() {
+    use increart_core::pe::{PeRun, PeServer};
+    let a = PeServer { name: "A".into(), run: PeRun::Connect { url: "http://a:1".into() }, ..Default::default() };
+    let p = ServerPreset { name: "GPU + A".into(), servers: vec![start("gpu0", 1234), ServerConfig::Chat(a.clone())] };
+    let mut s = dialog_state(vec![p, ServerPreset { name: "GPU".into(), servers: vec![start("gpu0", 1234)] }], None);
+    // a new one starts like the presets' first; a preset has one
+    update(&mut s, Msg::EditPreset(1));
+    let fx = update(&mut s, Msg::PeEditorOpen(None));
+    assert!(fx.iter().any(|f| matches!(f, Effect::PeListGpus)), "the GPUs to tick are listed");
+    assert_eq!(s.pe.editor.as_ref().unwrap().draft, a);
+    let mut d = a.clone();
+    (d.name, d.run) = (" C ".into(), PeRun::Connect { url: String::new() });
+    update(&mut s, Msg::PeEditorEdit(d.clone()));
+    update(&mut s, Msg::PeEditorSave);
+    assert!(s.pe.editor.as_ref().unwrap().error.as_deref().unwrap().contains("address"));
+    d.run = PeRun::Connect { url: "http://c:3".into() };
+    update(&mut s, Msg::PeEditorEdit(d.clone()));
+    assert!(update(&mut s, Msg::PeEditorSave).is_empty(), "saved with the preset, not before");
+    assert!(s.pe.editor.is_none());
+    assert_eq!(dialog(&s).draft.chat().unwrap().name, "C");
+    assert!(s.config.server_presets[1].chat().is_none());
+    update(&mut s, Msg::PeEditorOpen(None));
+    update(&mut s, Msg::PeEditorSave);
+    assert_eq!(dialog(&s).draft.servers.len(), 2, "replaced: one per preset");
+    assert_eq!(dialog(&s).draft.chat(), Some(&a));
+    update(&mut s, Msg::SavePreset);
+    assert_eq!(s.config.server_presets[1].chat(), Some(&a));
+    // Settings… on it; files picked go into it
+    update(&mut s, Msg::EditPreset(0));
+    update(&mut s, Msg::PeEditorOpen(Some(1)));
+    assert_eq!(s.pe.editor.as_ref().map(|e| (e.index, e.draft.name.as_str())), Some((Some(1), "A")));
+    let mut d = s.pe.editor.as_ref().unwrap().draft.clone();
+    d.run = PeRun::KoboldCpp {
+        binary: "/bin/k".into(),
+        model: "/m/a.gguf".into(),
+        mmproj: String::new(),
+        host: "127.0.0.1".into(),
+        port: 5001,
+        device: Default::default(),
+        context: 0,
+        args: vec![],
+    };
+    update(&mut s, Msg::PeEditorEdit(d));
+    update(&mut s, Msg::Picked(PickKind::Pe(PeFile::Mmproj), vec!["/m/mm.gguf".into()]));
+    update(&mut s, Msg::PeEditorSave);
+    let chat = dialog(&s).draft.chat().unwrap().clone();
+    assert!(matches!(&chat.run, PeRun::KoboldCpp { mmproj, .. } if mmproj == "/m/mm.gguf"));
+    assert_eq!(dialog(&s).draft.servers.len(), 2);
+}
+
+#[test]
+fn reopening_keeps_the_sd_servers_still_wanted() {
+    let gpu0 = start("gpu0", 1234);
+    let gpu1 = start("gpu1", 1235).with_device("ROCm1");
+    let presets = vec![
+        ServerPreset { name: "One".into(), servers: vec![gpu0.clone()] },
+        ServerPreset { name: "Both".into(), servers: vec![gpu0.clone(), gpu1.clone()] },
+        ServerPreset { name: "Other".into(), servers: vec![gpu1.clone()] },
+    ];
+    let mut s = dialog_state(presets, None);
+    update(&mut s, Msg::OpenPreset(0));
+    let at = s.open_attempt;
+    update(&mut s, Msg::ServerOpened(at, 0, Ok(())));
+    update(&mut s, Msg::ServersSettled(at));
+    // one more: nothing stops, so no question (the runtime keeps gpu0 as it is)
+    update(&mut s, Msg::OpenServerDialog);
+    let fx = update(&mut s, Msg::OpenPreset(1));
+    assert!(s.confirm.is_none() && s.stopping.is_empty());
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if *servers == [gpu0.clone(), gpu1.clone()]));
+    assert!(!fx.contains(&Effect::StopServers));
+    let at = s.open_attempt;
+    update(&mut s, Msg::ServerOpened(at, 0, Ok(())));
+    update(&mut s, Msg::ServerOpened(at, 1, Ok(())));
+    update(&mut s, Msg::ServersSettled(at));
+    // the same again: nothing at all
+    update(&mut s, Msg::OpenServerDialog);
+    assert!(update(&mut s, Msg::OpenPreset(1)).iter().all(|f| matches!(f, Effect::SaveConfig(..))));
+    assert_eq!(s.phase, Phase::Main);
+    // one fewer: asks, naming the one that stops
+    update(&mut s, Msg::OpenServerDialog);
+    update(&mut s, Msg::OpenPreset(2));
+    let text = s.confirm.as_ref().unwrap().text.clone();
+    assert!(text.starts_with("Stop ROCm0 and open Other? ROCm1 stay"), "{text}");
+    update(&mut s, Msg::ConfirmYes);
+    assert_eq!(s.stopping, ["ROCm0"]);
+    let at = s.open_attempt;
+    update(&mut s, Msg::ServerOpened(at, 0, Ok(())));
+    update(&mut s, Msg::ServersSettled(at));
+    // the sd-server settings changed: started ones start again
+    s.config.sdserver.args = vec!["--x".into()];
+    update(&mut s, Msg::OpenServerDialog);
+    update(&mut s, Msg::OpenPreset(2));
+    assert!(s.confirm.as_ref().unwrap().text.starts_with("Stop the servers in use"));
+    let fx = update(&mut s, Msg::ConfirmYes);
+    assert!(fx.iter().any(|f| matches!(f, Effect::OpenServers { .. })));
+}
+
+#[test]
+fn pe_server_stopped_while_starting_is_off_not_failed() {
+    use increart_core::pe::{PeDevice, PeRun, PeServer};
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new();
+    // a KoboldCpp that never answers
+    let bin = h.root.join("kcpp.sh");
+    std::fs::write(&bin, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    h.state.pe.server = Some(PeServer {
+        name: "slow".into(),
+        run: PeRun::KoboldCpp {
+            binary: bin.to_string_lossy().into(),
+            model: "m.gguf".into(),
+            mmproj: String::new(),
+            host: "127.0.0.1".into(),
+            port,
+            device: PeDevice::Gpu { devices: vec![] },
+            context: 0,
+            args: vec![],
+        },
+        ..Default::default()
+    });
+    let wait = |h: &mut Harness, want: PeStatus| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while h.state.pe.status != want {
+            assert!(std::time::Instant::now() < deadline, "still {:?}", h.state.pe.status);
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                h.send(m);
+            }
+        }
+    };
+    h.send(Msg::PeStart);
+    wait(&mut h, PeStatus::Starting);
+    h.send(Msg::PeShutdown);
+    wait(&mut h, PeStatus::Off);
+    // and it stays off
+    for m in h.rt.wait(Duration::from_millis(600)) {
+        h.send(m);
+    }
+    assert_eq!(h.state.pe.status, PeStatus::Off);
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+}
+
+#[test]
+fn prompt_enhance_improves_each_styles_prompt() {
+    use increart_core::pe::{PeRun, PeServer};
+    use increart_core::prompts::{EnhanceAsk, PresetKey, PromptPreset, PromptPresets, PromptTask, StylePrompt};
+    use increart_gui_core::update::{StyleRow, enhance_picks, style_row, styles_to_enhance, sweep_runs};
+    use std::sync::{Arc, Mutex};
+    // a chat server answering "Improved prompt: <n>. <the style's name>",
+    // keeping what it was asked
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let asked: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut req in server.incoming_requests() {
+            let answer = if req.url().ends_with("/v1/models") {
+                r#"{"data": []}"#.to_string()
+            } else {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let text = v["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                let style = text.split('"').nth(1).unwrap_or("?").to_string();
+                let mut seen = seen.lock().unwrap();
+                seen.push(v);
+                // asked to echo: the prompt given back as it was sent
+                let content = match text.contains("Instructions: echo") {
+                    true => text.split("Improve this prompt:\n\n").nth(1).unwrap().split("\n\n").next().unwrap().into(),
+                    false => format!("Improved prompt: {}. {style} in glass", seen.len()),
+                };
+                serde_json::json!({"choices": [{"message": {"content": content}}]}).to_string()
+            };
+            let _ = req.respond(tiny_http::Response::from_string(answer));
+        }
+    });
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let img = h.state.review_queue()[0].image.clone();
+    h.send(Msg::AddRefs(vec![img]));
+    let preset =
+        |name: &str, prompt: &str| PromptPreset { name: name.into(), prompt: prompt.into(), ..Default::default() };
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Becomes".into(),
+            description: String::new(),
+            presets: vec![
+                preset("Sculpted", "<image1> sculpted from {material}"),
+                preset("Plain", "<image1> as a sketch"),
+            ],
+        }],
+    };
+    let key = |name: &str| PresetKey { task: "Becomes".into(), name: name.into() };
+    let mut f = h.state.generate.clone();
+    f.prompt = "a cat, {preset}".into();
+    f.sweep.on = true;
+    h.send(Msg::Generate(f));
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1)], true));
+    let fake = PeServer { name: "fake".into(), run: PeRun::Connect { url }, ..Default::default() };
+    h.state.pe.server = Some(fake);
+    let wait = |h: &mut Harness| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !h.state.pe.jobs.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            for m in h.rt.wait(Duration::from_millis(100)) {
+                h.send(m);
+            }
+        }
+    };
+
+    // both styles as built: both asked, the blank left for PE to fill
+    // asked from Enhance…: both ticked at first; its settings kept with the
+    // project, and it closes
+    assert_eq!(styles_to_enhance(&h.state).len(), 2);
+    h.send(Msg::PeStyleOpen);
+    let a = h.state.pe.style_dialog.clone().unwrap();
+    assert_eq!(a.styles, [key("Sculpted"), key("Plain")]);
+    assert_eq!(enhance_picks(&h.state), [a.styles.clone(), vec![]]);
+    let moody = EnhanceAsk { how: "moody".into(), ..a };
+    h.send(Msg::PeStyleDialog(Some(moody.clone())));
+    assert_eq!(h.state.generate.sweep.enhance_ask.as_ref(), Some(&moody));
+    h.send(Msg::PeStyleAsk);
+    assert!(h.state.pe.style_dialog.is_none());
+    assert_eq!(h.state.pe.styles_waiting(), 2);
+    wait(&mut h);
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    let req = asked.lock().unwrap()[0].clone();
+    assert_eq!(req["messages"][0]["content"].as_str().unwrap(), increart_core::pe::DEFAULT_STYLE_PROMPT);
+    let parts = req["messages"][1]["content"].as_array().unwrap();
+    assert!(parts[0]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"), "the image first");
+    let text = parts.last().unwrap()["text"].as_str().unwrap();
+    assert_eq!(
+        text,
+        "The reference image <image1> is attached.\n\nTemplate (the subject): a cat, {preset}\n\n\
+         Style \"Sculpted\": <image1> sculpted from {material}\n\n\
+         Improve this prompt:\n\na cat, <image1> sculpted from {material}\n\n\
+         Blanks to fill: {material}\n\nInstructions: moody"
+    );
+    let sp = h.state.generate.sweep.style_prompt(&key("Sculpted")).unwrap().clone();
+    assert!(sp.enhanced && sp.prompt.ends_with("Sculpted in glass"), "{sp:?}");
+    assert_eq!(sp.from, "a cat, <image1> sculpted from {material}");
+    assert_eq!(
+        style_row(&h.state, &key("Sculpted"), "<image1> sculpted from {material}"),
+        StyleRow::Enhanced { stale: false }
+    );
+    assert!(styles_to_enhance(&h.state).is_empty(), "all enhanced");
+
+    // the runs take them (the blank PE filled needs no value), marked
+    let (runs, _) = sweep_runs(&h.state).unwrap();
+    assert!(runs.iter().all(|(r, t)| t.enhanced && r.prompt.ends_with("in glass")));
+
+    // a value given after: made from older values, asked again; an edit
+    // by hand isn't (unless asked for every style)
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.insert("material".into(), "wax".into());
+    let plain = f.sweep.style_prompt(&key("Plain")).unwrap().clone();
+    f.sweep.set_style_prompt(&key("Plain"), Some(StylePrompt { prompt: "my own".into(), enhanced: false, ..plain }));
+    h.send(Msg::Generate(f));
+    assert_eq!(
+        style_row(&h.state, &key("Sculpted"), "<image1> sculpted from {material}"),
+        StyleRow::Enhanced { stale: true }
+    );
+    assert_eq!(styles_to_enhance(&h.state), [key("Sculpted")]);
+    assert_eq!(enhance_picks(&h.state)[0], [key("Sculpted")]);
+    // reopened as left, ticks and all
+    h.send(Msg::PeStyleOpen);
+    assert_eq!(h.state.pe.style_dialog.as_ref(), Some(&moody));
+
+    // as shown: an edit is improved further
+    let shown = EnhanceAsk { from_shown: true, styles: vec![key("Plain")], ..moody.clone() };
+    h.send(Msg::PeStyleDialog(Some(shown)));
+    h.send(Msg::PeStyleAsk);
+    wait(&mut h);
+    let text =
+        asked.lock().unwrap().last().unwrap()["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert!(text.contains("Improve this prompt:\n\nmy own\n\n") && !text.contains("Blanks"), "{text}");
+
+    // the quick ask (the bar's, or a row's ✨) takes the defaults, not Enhance…'s
+    h.send(Msg::PeStyleDialog(None));
+    h.send(Msg::PeStyleEnhance(vec![key("Plain")]));
+    wait(&mut h);
+    let last = asked.lock().unwrap().len() - 1;
+    let text = asked.lock().unwrap()[last]["messages"][1]["content"].as_array().unwrap().last().unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("Instructions") && !text.contains("my own"), "{text}");
+
+    // the prompt given back unchanged: asked once more, hotter, then marked
+    let before = h.state.generate.sweep.style_prompt(&key("Plain")).cloned();
+    let n = asked.lock().unwrap().len();
+    h.send(Msg::PeStyleDialog(Some(EnhanceAsk { how: "echo".into(), styles: vec![key("Plain")], ..moody })));
+    h.send(Msg::PeStyleAsk);
+    wait(&mut h);
+    let reqs = asked.lock().unwrap()[n..].to_vec();
+    assert_eq!(reqs.len(), 2, "asked again");
+    assert!(reqs[1]["temperature"].as_f64() > reqs[0]["temperature"].as_f64());
+    assert_eq!(h.state.generate.sweep.style_prompt(&key("Plain")).cloned(), before);
+    assert_eq!(h.state.pe.style_failed[&key("Plain")], "gave the prompt back unchanged, asked 2 times");
+    assert_eq!(enhance_picks(&h.state)[1], [key("Plain")]);
+    assert!(h.errors().iter().any(|e| e.contains("unchanged for Plain")), "{:?}", h.errors());
+    h.state.messages.clear();
+    // asked again and answered: the mark goes
+    h.send(Msg::PeStyleEnhance(vec![key("Plain")]));
+    wait(&mut h);
+    assert!(h.state.pe.style_failed.is_empty());
+
+    // stopped: no answer lands
+    h.send(Msg::PeStyleEnhance(vec![key("Sculpted")]));
+    let ids: Vec<u64> = h.state.pe.jobs.iter().map(|j| j.id).collect();
+    h.send(Msg::PeStop(ids));
+    let before = h.state.generate.sweep.style_prompt(&key("Sculpted")).cloned();
+    for m in h.rt.wait(Duration::from_millis(500)) {
+        h.send(m);
+    }
+    assert_eq!(h.state.generate.sweep.style_prompt(&key("Sculpted")).cloned(), before);
+    assert!(h.state.pe.style_from.is_empty());
+
+    // saved with the project: gone in another, back in it again
+    let kept = h.state.generate.sweep.style_prompts.clone();
+    assert_eq!(kept.len(), 2);
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    assert!(h.state.generate.sweep.style_prompts.is_empty());
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::SelectProject(project.clone()));
+    assert_eq!(h.state.generate.sweep.style_prompts, kept);
+}
+
+#[test]
+fn styles_own_values_become_their_prompts() {
+    use increart_core::prompts::{PresetKey, Sweep};
+    let k = |n: &str| PresetKey { task: "T".into(), name: n.into() };
+    let mut sw = Sweep::default();
+    sw.slots.insert("era".into(), "1920s".into());
+    sw.set_own_slot(&k("A"), "era", "1980s".into());
+    sw.set_own_slot(&k("B"), "era", "1920s".into());
+    assert!(sw.fold_style_slots("x, {preset}", &[(k("A"), "in the {era}"), (k("B"), "in the {era}"), (k("C"), "c")]));
+    assert!(sw.style_slots.is_empty());
+    // B's own value was the shared one: nothing to keep
+    assert_eq!(sw.style_prompts.len(), 1);
+    let a = sw.style_prompt(&k("A")).unwrap();
+    assert_eq!((a.prompt.as_str(), a.from.as_str(), a.enhanced), ("x, in the 1980s", "x, in the 1920s", false));
+    assert_eq!(sw.prompt_for("x, {preset}", &k("A"), "in the {era}"), "x, in the 1980s");
+    assert!(!sw.fold_style_slots("x", &[]), "once");
+}
+
+#[test]
+fn pe_asks_are_batched_by_kind_for_jobs() {
+    use increart_core::prompts::PresetKey;
+    use increart_gui_core::{BlankKey, PeBatchKind, PeJobState, PeKey, PeState, PeStep};
+    let job = |id, key| PeJobState { id, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None };
+    let blank = |s: &str| PeKey::Blank(BlankKey { style: None, slot: s.into() });
+    let style = |s: &str| PeKey::Style(PresetKey { task: "Becomes".into(), name: s.into() });
+    let mut pe = PeState {
+        jobs: vec![job(3, style("A")), job(4, blank("x")), job(5, style("B")), job(6, PeKey::Text(6))],
+        style_batch: 5,
+        blank_batch: 1,
+        ..Default::default()
+    };
+    // a text ask with no window open isn't shown
+    let b = pe.batches();
+    assert_eq!(b.len(), 2);
+    assert_eq!((&b[0].kind, b[0].ids.clone(), b[0].total, b[0].at()), (&PeBatchKind::Styles, vec![3, 5], 5, 4));
+    assert_eq!((&b[1].kind, b[1].ids.clone(), b[1].total, b[1].at()), (&PeBatchKind::Blanks, vec![4], 1, 1));
+    pe.jobs.retain(|j| j.id == 4);
+    pe.blank_batch = 0;
+    assert_eq!(pe.batches()[0].total, 1);
+}
+
+#[test]
+fn blanks_pe_added_are_asked_about() {
+    use increart_core::prompts::PresetKey;
+    let mut s = AppState::new(Config::default(), None);
+    let key = |name: &str| PresetKey { task: "Becomes".into(), name: name.into() };
+    for (id, name) in [(1, "Machine"), (2, "Plain")] {
+        let step = PeStep::Queued;
+        s.pe.jobs.push(PeJobState { id, key: PeKey::Style(key(name)), step, asked: 0.0, since: 0.0, rate: None });
+        s.pe.style_from.insert(key(name), format!("a {{era}} {name}"));
+    }
+    update(&mut s, Msg::PeAnswer(1, Ok("a {era} robot of {scrap_metal} on a {pole}".into())));
+    assert!(!s.pe.added_blanks_ask, "asked once the batch ends");
+    update(&mut s, Msg::PeAnswer(2, Ok("a {era} plain thing".into())));
+    assert!(s.pe.added_blanks_ask);
+    assert_eq!(s.pe.added_blanks, [(key("Machine"), vec!["scrap_metal".to_string(), "pole".into()])]);
+
+    // made words; the blank it was given stays
+    update(&mut s, Msg::PeAddedBlanks(false));
+    assert!(!s.pe.added_blanks_ask && s.pe.added_blanks.is_empty());
+    let own = s.generate.sweep.style_prompt(&key("Machine")).unwrap();
+    assert_eq!(own.prompt, "a {era} robot of scrap metal on a pole");
+    assert!(own.enhanced);
+}
+
+#[test]
+fn a_writing_asks_rate_is_worked_out_at_most_twice_a_second() {
+    use increart_core::prompts::PresetKey;
+    let mut s = AppState::new(Config::default(), None);
+    let key = PeKey::Style(PresetKey { task: "T".into(), name: "A".into() });
+    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None });
+    let token = |s: &mut AppState, now: f64, pieces: u32| {
+        s.now = now;
+        update(s, Msg::PeProgress(1, PeStep::Writing { pieces, text: String::new() }));
+        s.pe.jobs[0].rate.map(|(_, r)| r)
+    };
+    assert_eq!(token(&mut s, 10.0, 1), None);
+    assert_eq!(token(&mut s, 10.5, 5), None, "none in the first second");
+    assert_eq!(token(&mut s, 11.0, 10), Some(10.0));
+    assert_eq!(token(&mut s, 11.2, 14), Some(10.0), "kept");
+    assert_eq!(token(&mut s, 11.4, 18), Some(10.0), "kept");
+    assert_eq!(token(&mut s, 11.5, 24), Some(16.0), "half a second on");
+}
+
+#[test]
+fn jobs_group_runs_by_project_and_sweep() {
+    use increart_core::prompts::{PromptPreset, PromptPresets, PromptTask};
+    use increart_gui_core::{RunItem, runs_progress};
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox".into();
+    f.seeds = 2;
+    h.send(Msg::Generate(f));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let preset = |name: &str| PromptPreset { name: name.into(), prompt: format!("as {name}"), ..Default::default() };
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Styles".into(),
+            description: String::new(),
+            presets: vec![preset("Ink"), preset("Clay")],
+        }],
+    };
+    let mut f = h.state.generate.clone();
+    f.prompt = "a cat, {preset}".into();
+    f.sweep.on = true;
+    h.send(Msg::Generate(f));
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1)], true));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let runs: Vec<_> = h.state.project_entry().unwrap().runs.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(runs.len(), 3);
+    assert!(h.state.run_groups().is_empty(), "nothing in the engine");
+    h.state.active_runs.extend(runs.iter().cloned());
+    let groups = h.state.run_groups();
+    assert_eq!(groups.len(), 1);
+    let g = &groups[0];
+    assert_eq!(g.runs().len(), 3);
+    assert!(matches!(&g.items[0], RunItem::Run(r) if r.run == runs[0]));
+    let RunItem::Sweep { runs: sw, .. } = &g.items[1] else { panic!("the sweep's runs together") };
+    let rows: Vec<_> = sw.iter().map(|r| r.sweep.as_ref().unwrap().1.clone()).collect();
+    assert_eq!(rows, ["Ink", "Clay"]);
+    let (done, total, fraction, eta) = runs_progress(&g.runs(), 1);
+    assert_eq!((done, total, fraction, eta), (0, 6, 0.0, None));
+    // a group's stop: each of its runs
+    h.send(Msg::CancelRuns(runs[1..].to_vec(), increart_core::engine::Stop::Finish));
+    assert!(!h.state.finishing.contains(&runs[0]));
+    assert!(runs[1..].iter().all(|r| h.state.finishing.contains(r)));
+}
+
+#[test]
+fn picked_images_sweep_their_styles_again() {
+    use increart_core::HistoryKey;
+    use increart_core::prompts::{PresetKey, PromptPreset, PromptPresets, PromptTask};
+    use increart_gui_core::NewSweepAsk;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let preset =
+        |name: &str, prompt: &str| PromptPreset { name: name.into(), prompt: prompt.into(), ..Default::default() };
+    h.state.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Looks".into(),
+            description: String::new(),
+            presets: vec![preset("Clay", "claymation"), preset("Ink", "ink in a {mood} mood")],
+        }],
+    };
+    let mut f = h.state.generate.clone();
+    f.prompt = "a fox, {preset}".into();
+    f.seeds = 2;
+    f.sweep.on = true;
+    f.sweep.slots.insert("mood".into(), "gloomy".into());
+    h.send(Msg::Generate(f));
+    h.send(Msg::SweepTicks(vec![(0, 0), (0, 1)], true));
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    let p = h.state.project_entry().unwrap();
+    let project = p.project.id.clone();
+    let label = p.runs[0].sweep.as_ref().unwrap().name.clone();
+    let mut ids: Vec<_> = p.runs.iter().map(|r| r.id.clone()).collect();
+    ids.sort();
+    let seeds: Vec<u64> = p.runs[0].all_seeds().map(|(_, s)| s).collect();
+    for id in &ids {
+        Library_::steal(&h.root).write_seeds(id, &seeds);
+    }
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::ReviewScope(Some(project.clone())));
+    h.send(Msg::ReviewSweep(project.clone(), label.clone()));
+    // two of Ink's images picked: one style
+    let ink = ids.iter().find(|id| h.state.index.run(id).unwrap().1.sweep.as_ref().unwrap().preset == "Ink").unwrap();
+    let images: Vec<_> = h
+        .state
+        .project_entry()
+        .unwrap()
+        .outputs
+        .iter()
+        .filter(|o| &o.name.run == ink)
+        .map(|o| o.image.clone())
+        .collect();
+    assert_eq!(images.len(), 2);
+    h.send(Msg::PickSet(images));
+    h.send(Msg::SheetNewSweep);
+    h.settle();
+    let g = &h.state.generate;
+    assert_eq!((h.state.tab, h.state.projects_tab), (Tab::Projects, ProjectsTab::Generate));
+    assert_eq!(g.prompt, "a fox, {preset}", "the template it was queued with");
+    assert!(g.sweep.on);
+    assert_eq!(g.sweep.selected, [PresetKey { task: "Looks".into(), name: "Ink".into() }]);
+    assert_eq!(g.sweep.slots["mood"], "gloomy");
+    assert_ne!(g.label, label, "the next label");
+    assert!(g.first_seed > *seeds.last().unwrap());
+    // without the history's checkpoint: the run's very prompt
+    h.state.new_sweep = Some(NewSweepAsk { project: project.clone(), sweep: label.clone(), runs: vec![ink.clone()] });
+    h.send(Msg::HistoryLoaded(HistoryKey::Project(project), vec![]));
+    let g = &h.state.generate;
+    assert_eq!(g.prompt, "{preset}");
+    assert_eq!(g.sweep.style_prompts.len(), 1);
+    assert_eq!(g.sweep.style_prompts[0].prompt, "a fox, ink in a gloomy mood");
+    let last = h.state.messages.last().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(last.contains("wasn't in the prompt history"), "{last}");
+}
+
+#[test]
+fn review_follow_stays_on_the_newest_image_until_moved_off() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    let run = Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::Tab(Tab::Review));
+    let shown = |h: &Harness| h.state.review_queue()[h.state.review_cursor].name.seed;
+    assert_eq!(shown(&h), 0);
+    h.send(Msg::ReviewFollow(true));
+    assert_eq!(shown(&h), 1, "on the newest at once");
+
+    // a new image: shown as it arrives
+    Library_::steal(&h.root).write_seeds(&run, &[2]);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    assert_eq!(shown(&h), 2);
+    // rated: the newest left is shown, still following
+    h.send(Msg::ReviewCurrent(Verdict::Good));
+    h.settle();
+    assert_eq!((shown(&h), h.state.review_follow), (1, true));
+    // → at the end keeps following; ← stops it, and the cursor stays put
+    h.send(Msg::ReviewNext(1));
+    assert!(h.state.review_follow);
+    h.send(Msg::ReviewNext(-1));
+    assert!(!h.state.review_follow);
+    Library_::steal(&h.root).write_seeds(&run, &[3]);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    assert_eq!(shown(&h), 0);
 }

@@ -252,6 +252,9 @@ pub struct SweepTag {
     /// The setting this run has (a setting sweep: steps, CFG, …).
     #[serde(default, serialize_with = "bare", skip_serializing_if = "Option::is_none")]
     pub param: Option<SweepParam>,
+    /// The style's prompt was prompt enhance's (perhaps edited after).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enhanced: bool,
 }
 
 impl SweepTag {

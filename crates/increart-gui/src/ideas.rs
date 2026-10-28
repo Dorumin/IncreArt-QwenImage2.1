@@ -7,33 +7,37 @@ use eframe::egui::{self, Align2, Color32, FontId, Key, Panel, RichText, ScrollAr
 use increart_core::scan::IdeaEntry;
 use increart_core::{IdeaLoc, ImageRef, Tree, Verdict};
 use increart_gui_core::{
-    AddIdea, AppState, IdeaAge, IdeaOrigin, InboxFilter, InboxTab, InfoPanel, LibTab, Msg, PickKind, Tab,
+    AddIdea, AppState, IdeaAge, IdeaOrigin, InboxFilter, InboxTab, InfoPanel, LibTab, Msg, PickKind, Tab, ZoomGrid,
 };
 
 use crate::textures::Textures;
 use crate::tree;
 use crate::widgets::{ACCENT, NEUTRAL, card, ic, ph, short, single_click, thumb};
 
-/// Idea cards (Idea inbox and Input library): all one size, the first
-/// image square across the full width, the text cut to fit.
+/// Idea cards (Idea inbox and Input library): all one size (the Input
+/// library's zooms), the first image square across the full width, the
+/// text cut to fit.
 const CARD_W: f32 = 210.0;
-const CARD_H: f32 = CARD_W + 92.0;
+/// Below the image: title, facts, two lines of text and the tags.
+const CARD_TEXT_H: f32 = 92.0;
 
 /// An idea's card. Double-click: its first image full size (the editor
 /// when it has none); the pencil on the image (on hover, or selected): the
 /// editor.
+#[allow(clippy::too_many_arguments)]
 fn idea_card(
     ui: &mut egui::Ui,
     st: &AppState,
     root: &Path,
     tex: &mut Textures,
     e: &IdeaEntry,
+    w: f32,
     selected: bool,
     out: &mut Vec<Msg>,
 ) -> egui::Response {
-    let r = idea_card_body(ui, st, root, tex, e, selected);
+    let r = idea_card_body(ui, st, root, tex, e, w, selected);
     // over the card, so it gets the click rather than the card
-    let edit = egui::Rect::from_min_size(r.rect.left_top() + egui::vec2(CARD_W - 26.0, 13.0), egui::vec2(28.0, 26.0));
+    let edit = egui::Rect::from_min_size(r.rect.left_top() + egui::vec2(w - 26.0, 13.0), egui::vec2(28.0, 26.0));
     if selected || ui.rect_contains_pointer(r.rect) {
         let b = ui.interact(edit, r.id.with("edit"), egui::Sense::click());
         let fill = if b.hovered() { Color32::from_black_alpha(220) } else { Color32::from_black_alpha(150) };
@@ -60,17 +64,18 @@ fn idea_card_body(
     root: &Path,
     tex: &mut Textures,
     e: &IdeaEntry,
+    w: f32,
     selected: bool,
 ) -> egui::Response {
     let usage = st.idea_usage(e);
-    card(ui, selected, CARD_W, CARD_H, |ui| {
+    card(ui, selected, w, w + CARD_TEXT_H, |ui| {
         ui.spacing_mut().item_spacing.y = 3.0;
         match e.idea.images.first().map(|id| tex.thumb(root, &ImageRef::input(id.clone()))) {
             Some(t) => {
-                thumb(ui, t.as_ref(), CARD_W, false, None);
+                thumb(ui, t.as_ref(), w, false, None);
             }
             None => {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(CARD_W, CARD_W), egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(egui::vec2(w, w), egui::Sense::hover());
                 ui.painter().rect_filled(r, 2.0, Color32::from_gray(28));
                 ui.painter().text(
                     r.center(),
@@ -108,7 +113,7 @@ fn idea_card_body(
         }
         // the text: two lines at most
         let color = ui.visuals().text_color();
-        let mut job = egui::text::LayoutJob::simple(e.idea.text.clone(), FontId::proportional(11.0), color, CARD_W);
+        let mut job = egui::text::LayoutJob::simple(e.idea.text.clone(), FontId::proportional(11.0), color, w);
         job.wrap.max_rows = 2;
         let galley = ui.fonts_mut(|f| f.layout_job(job));
         ui.add(egui::Label::new(galley).selectable(false));
@@ -150,28 +155,34 @@ pub fn inbox(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
     desktop_drop(ui, out);
     let n = st.unreviewed_ideas().len();
     Panel::top("inbox_tabs").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            for (t, label) in [
-                (InboxTab::NewIdea, ic(ph::PLUS, "New idea")),
-                (InboxTab::Grid, ic(ph::SQUARES_FOUR, &format!("Grid ({n})"))),
-                (InboxTab::Folder, ic(ph::FOLDER, "Folder")),
-                (InboxTab::Import, ic(ph::FILE_ARROW_DOWN, &format!("Import ({})", st.index.inbox_drop.len()))),
-                (InboxTab::Discarded, ic(ph::TRASH, &format!("Discarded ({})", st.discarded_ideas().len()))),
-            ] {
-                if ui.selectable_label(st.inbox_tab == t, label).clicked() {
-                    out.push(Msg::InboxTab(t));
+        // groups wrap whole when the bar is short of room
+        use crate::widgets::{group, right_group};
+        ui.horizontal_wrapped(|ui| {
+            group(ui, "tabs", |ui| {
+                for (t, label) in [
+                    (InboxTab::NewIdea, ic(ph::PLUS, "New idea")),
+                    (InboxTab::Grid, ic(ph::SQUARES_FOUR, &format!("Grid ({n})"))),
+                    (InboxTab::Folder, ic(ph::FOLDER, "Folder")),
+                    (InboxTab::Import, ic(ph::FILE_ARROW_DOWN, &format!("Import ({})", st.index.inbox_drop.len()))),
+                    (InboxTab::Discarded, ic(ph::TRASH, &format!("Discarded ({})", st.discarded_ideas().len()))),
+                ] {
+                    if ui.selectable_label(st.inbox_tab == t, label).clicked() {
+                        out.push(Msg::InboxTab(t));
+                    }
                 }
-            }
-            ui.separator();
-            if ui
-                .button(ic(ph::FILE_ARROW_DOWN, "Import files…"))
-                .on_hover_text("images and .txt files become new ideas")
-                .clicked()
-            {
-                out.push(Msg::Pick(PickKind::ImportFiles));
-            }
+            });
+            group(ui, "import", |ui| {
+                ui.separator();
+                if ui
+                    .button(ic(ph::FILE_ARROW_DOWN, "Import files…"))
+                    .on_hover_text("images and .txt files become new ideas")
+                    .clicked()
+                {
+                    out.push(Msg::Pick(PickKind::ImportFiles));
+                }
+            });
             if st.inbox_tab == InboxTab::Grid {
-                crate::widgets::details_toggle(ui, st, InfoPanel::Inbox, out);
+                right_group(ui, "right", |ui| crate::widgets::details_toggle(ui, st, InfoPanel::Inbox, out));
             }
         });
     });
@@ -237,7 +248,7 @@ fn import(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Ms
                             if r.double_clicked() {
                                 out.push(Msg::Preview(Some(ImageRef::input(id.clone()))));
                             }
-                            r.context_menu(|ui| crate::widgets::copy_image_item(ui, root, &ImageRef::input(id.clone()), out));
+                            r.context_menu(|ui| crate::widgets::image_menu_items(ui, root, &ImageRef::input(id.clone()), out));
                             ui.vertical(|ui| {
                                 ui.set_width(360.0);
                                 ui.add(egui::Label::new(src.original_name.clone().unwrap_or_else(|| "(clipboard)".into())).truncate());
@@ -289,7 +300,7 @@ pub fn edit_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: 
                         let t = tex.thumb(root, &ImageRef::input(id.clone()));
                         let r = thumb(ui, t.as_ref(), 96.0, false, None).on_hover_text("double-click to view");
                         r.context_menu(|ui| {
-                            crate::widgets::copy_image_item(ui, root, &ImageRef::input(id.clone()), out)
+                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(id.clone()), out)
                         });
                         if r.double_clicked() {
                             out.push(Msg::Preview(Some(ImageRef::input(id.clone()))));
@@ -335,8 +346,8 @@ pub fn edit_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: 
                 {
                     out.push(Msg::ShowInFileManager(entry.dir.clone()));
                 }
-                ui.add_enabled(false, egui::Button::new(ic(ph::MAGIC_WAND, "Rewrite with PE")))
-                    .on_disabled_hover_text("Prompt rewriting is not connected yet");
+                let target = increart_gui_core::PeTarget::Idea(ed.id.clone());
+                crate::rewrite::button(ui, st, target, "Rewrite with PE", out);
             });
         },
     );
@@ -376,7 +387,7 @@ fn new_idea(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
                             out.push(Msg::Preview(Some(ImageRef::input(id.clone()))));
                         }
                         resp.context_menu(|ui| {
-                            crate::widgets::copy_image_item(ui, root, &ImageRef::input(id.clone()), out)
+                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(id.clone()), out)
                         });
                         if ui.small_button(ph::X).on_hover_text("remove").clicked() {
                             out.push(Msg::RemoveDraftImage(i));
@@ -400,8 +411,7 @@ fn new_idea(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
             if ui.button(ic(ph::ROCKET_LAUNCH, "Add & promote into project")).clicked() {
                 out.push(Msg::AddIdea(AddIdea::Promote));
             }
-            ui.add_enabled(false, egui::Button::new(ic(ph::MAGIC_WAND, "Rewrite with PE")))
-                .on_disabled_hover_text("Prompt rewriting is not connected yet");
+            crate::rewrite::button(ui, st, increart_gui_core::PeTarget::NewIdea, "Rewrite with PE", out);
             if ui.button(ic(ph::CLOCK_COUNTER_CLOCKWISE, "History…")).clicked() {
                 out.push(Msg::OpenHistory(increart_core::HistoryKey::NewIdea));
             }
@@ -481,13 +491,13 @@ fn inbox_grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Ve
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (i, e) in ideas.iter().enumerate() {
-                    let r = idea_card(ui, st, root, tex, e, i == st.inbox_cursor, out);
+                    let r = idea_card(ui, st, root, tex, e, CARD_W, i == st.inbox_cursor, out);
                     if r.clicked() {
                         out.push(Msg::InboxCursor(i));
                     }
                     r.context_menu(|ui| {
                         if let Some(img) = e.idea.images.first() {
-                            crate::widgets::copy_image_item(ui, root, &ImageRef::input(img.clone()), out);
+                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(img.clone()), out);
                         }
                         let id = &e.idea.id;
                         if ui.button(ic(ph::PENCIL_SIMPLE, "Edit…")).clicked() {
@@ -647,10 +657,10 @@ fn discarded(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for e in ideas {
-                    let r = idea_card(ui, st, root, tex, e, false, out);
+                    let r = idea_card(ui, st, root, tex, e, CARD_W, false, out);
                     r.context_menu(|ui| {
                         if let Some(img) = e.idea.images.first() {
-                            crate::widgets::copy_image_item(ui, root, &ImageRef::input(img.clone()), out);
+                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(img.clone()), out);
                         }
                         let id = &e.idea.id;
                         if ui.button(ic(ph::TRAY, "Restore to the Idea inbox")).clicked() {
@@ -741,27 +751,37 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
         });
     });
     Panel::top("lib_tabs").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(st.lib_tab == LibTab::Grid, ic(ph::SQUARES_FOUR, "Grid")).clicked() {
-                out.push(Msg::LibTab(LibTab::Grid));
-            }
-            if ui.selectable_label(st.lib_tab == LibTab::Folder, ic(ph::FOLDER, "Folder")).clicked() {
-                out.push(Msg::LibTab(LibTab::Folder));
-            }
-            let n = st.discarded_ideas().len();
-            if ui
-                .selectable_label(st.lib_tab == LibTab::Discarded, ic(ph::TRASH, &format!("Discarded ({n})")))
-                .clicked()
-            {
-                out.push(Msg::LibTab(LibTab::Discarded));
-            }
-            ui.separator();
-            if ui.button(ic(ph::FOLDER_OPEN, "Open in file manager")).clicked() {
-                let dir = std::path::Path::new("input/library").join(st.lib_folder.clone().unwrap_or_default());
-                out.push(Msg::ShowInFileManager(dir));
-            }
+        // groups wrap whole when the bar is short of room
+        use crate::widgets::{group, right_group};
+        ui.horizontal_wrapped(|ui| {
+            group(ui, "tabs", |ui| {
+                if ui.selectable_label(st.lib_tab == LibTab::Grid, ic(ph::SQUARES_FOUR, "Grid")).clicked() {
+                    out.push(Msg::LibTab(LibTab::Grid));
+                }
+                if ui.selectable_label(st.lib_tab == LibTab::Folder, ic(ph::FOLDER, "Folder")).clicked() {
+                    out.push(Msg::LibTab(LibTab::Folder));
+                }
+                let n = st.discarded_ideas().len();
+                if ui
+                    .selectable_label(st.lib_tab == LibTab::Discarded, ic(ph::TRASH, &format!("Discarded ({n})")))
+                    .clicked()
+                {
+                    out.push(Msg::LibTab(LibTab::Discarded));
+                }
+            });
+            group(ui, "open", |ui| {
+                ui.separator();
+                if ui.button(ic(ph::FOLDER_OPEN, "Open in file manager")).clicked() {
+                    let dir = std::path::Path::new("input/library").join(st.lib_folder.clone().unwrap_or_default());
+                    out.push(Msg::ShowInFileManager(dir));
+                }
+            });
             if st.lib_tab == LibTab::Grid {
-                crate::widgets::details_toggle(ui, st, InfoPanel::Library, out);
+                group(ui, "zoom", |ui| {
+                    ui.separator();
+                    crate::review::grid_zoom(ui, st, ZoomGrid::Library, out);
+                });
+                right_group(ui, "right", |ui| crate::widgets::details_toggle(ui, st, InfoPanel::Library, out));
             }
         });
     });
@@ -798,11 +818,13 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
             return;
         }
         ui.weak("Click to select and see it on the right, Ctrl+click to add to the selection; double-click: full size; right-click for actions.");
+        crate::review::grid_ctrl_scroll(ui, st, ZoomGrid::Library, out);
+        let w = st.grid_cell_size(ZoomGrid::Library) as f32;
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (i, e) in ideas.into_iter().enumerate() {
                     let id = e.idea.id.clone();
-                    let r = idea_card(ui, st, &root, tex, e, st.lib_selected.contains(&id), out);
+                    let r = idea_card(ui, st, &root, tex, e, w, st.lib_selected.contains(&id), out);
                     if i == 0 {
                         // where it is, for the screenshot tour's click check
                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_first_idea"), r.rect));
@@ -818,7 +840,7 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
                     }
                     r.context_menu(|ui| {
                         if let Some(img) = e.idea.images.first() {
-                            crate::widgets::copy_image_item(ui, &root, &ImageRef::input(img.clone()), out);
+                            crate::widgets::image_menu_items(ui, &root, &ImageRef::input(img.clone()), out);
                         }
                         if ui.button(ic(ph::PENCIL_SIMPLE, "Edit…")).clicked() {
                             out.push(Msg::OpenIdea(id.clone()));
@@ -967,7 +989,7 @@ fn idea_details(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Texture
                 if r.double_clicked() {
                     out.push(Msg::Preview(Some(image.clone())));
                 }
-                r.context_menu(|ui| crate::widgets::copy_image_item(ui, root, &image, out));
+                r.context_menu(|ui| crate::widgets::image_menu_items(ui, root, &image, out));
             }
         });
     }
@@ -984,7 +1006,7 @@ fn idea_details(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Texture
     ui.add_space(4.0);
     section(ui, "idea_sec_idea", ic(ph::LIGHTBULB, "Idea"), true, |ui| {
         kv_grid(ui, "idea_kv", |ui| {
-            kv(ui, "added", &when(e.idea.created));
+            kv(ui, "added", &crate::widgets::when(e.idea.created));
             let place = match &e.loc {
                 IdeaLoc::Unreviewed => "Idea inbox".to_string(),
                 IdeaLoc::Discarded => "Discarded".to_string(),
@@ -1111,19 +1133,6 @@ fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.end_row();
 }
 
-/// "2026-10-21 11:00 UTC · 6 days ago".
-fn when(t: increart_core::id::Timestamp) -> String {
-    let secs = (increart_core::id::now() - t).num_seconds().max(0);
-    let ago = match secs {
-        0..60 => "just now".to_string(),
-        60..3600 => format!("{} min ago", secs / 60),
-        3600..86_400 => format!("{} h ago", secs / 3600),
-        86_400..172_800 => "yesterday".to_string(),
-        _ => format!("{} days ago", secs / 86_400),
-    };
-    format!("{} · {ago}", t.format("%Y-%m-%d %H:%M UTC"))
-}
-
 /// The `<imageN>` tags in a prompt, each once, in order.
 fn image_tags(text: &str) -> Vec<String> {
     let mut tags: Vec<String> = vec![];
@@ -1224,13 +1233,13 @@ fn image_meta(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures,
                             format!("{} · {} × {} · {kb} KB", s.original_format, s.original_width, s.original_height);
                         kv(ui, "original", &orig);
                         if let Some(t) = s.original_created {
-                            kv(ui, "created", &when(t));
+                            kv(ui, "created", &crate::widgets::when(t));
                         }
                         if let Some(t) = s.original_mtime {
-                            kv(ui, "modified", &when(t));
+                            kv(ui, "modified", &crate::widgets::when(t));
                         }
                         if let Some(t) = s.imported {
-                            kv(ui, "imported", &when(t));
+                            kv(ui, "imported", &crate::widgets::when(t));
                         }
                         let conv =
                             if s.conversions.is_empty() { "unchanged".to_string() } else { s.conversions.join(", ") };

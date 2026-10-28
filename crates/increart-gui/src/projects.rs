@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ComboBox, Panel, RichText, ScrollArea};
+use increart_core::config::TreeOrder;
 use increart_core::engine::Stop;
 use increart_core::{Tree, Verdict};
 use increart_gui_core::{AppState, Msg, OutputSource, PickKind, ProjectsTab, Tab, UseTarget, counts, cover};
@@ -37,24 +38,25 @@ pub fn view(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
             if ui.checkbox(&mut show, "runs").on_hover_text("list the selected project's runs under it").changed() {
                 out.push(Msg::ProjectRuns(show));
             }
-            let by_name = st.config.projects_by_name;
-            let label = |n: bool| if n { "A–Z" } else { "Newest first" };
-            egui::ComboBox::from_id_salt("project_order")
-                .selected_text(ic(ph::SORT_ASCENDING, label(by_name)))
-                .show_ui(ui, |ui| {
-                    for n in [false, true] {
-                        if ui.selectable_label(by_name == n, label(n)).clicked() && by_name != n {
-                            out.push(Msg::ProjectsByName(n));
-                        }
-                    }
-                })
-                .response
-                .on_hover_text("the order of projects in the tree and the grid (folders stay A–Z)");
             let mut narrow = !st.config.project_click_keeps_scope;
             let tip = "selecting a project shows its folder in the grid, when that holds other projects \
                        (else the grid stays as it is)";
             if ui.checkbox(&mut narrow, "narrow to siblings").on_hover_text(tip).changed() {
                 out.push(Msg::NarrowToSiblings(narrow));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            crate::widgets::group(ui, "sort", |ui| {
+                ui.label(ic(ph::SORT_ASCENDING, "Sort"));
+                let tip = "the order of projects in the tree and the grid: Last run goes by when seeds were \
+                           last queued (a project that has never run, by when it was made)";
+                if let Some(o) = order_combo(ui, "project_order", "projects", st.config.project_order, tip) {
+                    out.push(Msg::ProjectOrder(o));
+                }
+            });
+            let tip = "the order of folders in the tree: Created and Last run go by the newest project in them";
+            if let Some(o) = order_combo(ui, "folder_order", "folders", st.config.folder_order.0, tip) {
+                out.push(Msg::FolderOrder(o));
             }
         });
         ui.horizontal(|ui| {
@@ -423,7 +425,7 @@ fn images_pane(
                         out.push(Msg::Preview(Some(x.image.clone())));
                     }
                     resp.context_menu(|ui| {
-                        crate::widgets::copy_image_item(ui, root, &x.image, out);
+                        crate::widgets::image_menu_items(ui, root, &x.image, out);
                         if ui.button(ic(ph::ARROWS_OUT, "View large")).clicked() {
                             out.push(Msg::Preview(Some(x.image.clone())));
                             ui.close();
@@ -1013,7 +1015,7 @@ pub fn preview_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, ke
             ));
             resp.context_menu(|ui| {
                 if !rates {
-                    return crate::widgets::copy_image_item(ui, root, img, out);
+                    return crate::widgets::image_menu_items(ui, root, img, out);
                 }
                 if ui.horizontal(|ui| verdict_buttons(ui, verdict.flatten(), false, out)).inner {
                     ui.close();
@@ -1411,6 +1413,8 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
         .show(ui, |ui| images_pane(ui, st, &root, tex, &mut f, out));
     // the rest of the space, so the form stays left of the images pane
     egui::CentralPanel::default().show(ui, |ui| {
+        // Queue stays in sight however long the form (a sweep's prompts)
+        Panel::bottom("gen_queue").show(ui, |ui| queue_strip(ui, st, &f, out));
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.heading(ic(ph::MAGIC_WAND, &format!("Generate in {}", p.name())));
             ui.horizontal(|ui| {
@@ -1495,8 +1499,7 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
                 ui.colored_label(BAD, format!("Fill in {} (type over it) before queueing.", names.join(", ")));
             }
             ui.horizontal(|ui| {
-                ui.add_enabled(false, egui::Button::new(ic(ph::MAGIC_WAND, "Rewrite")))
-                    .on_disabled_hover_text("Prompt rewriting is not connected yet");
+                crate::rewrite::button(ui, st, increart_gui_core::PeTarget::Prompt, "Rewrite", out);
                 ui.weak("For a transparent background, ask for it in the prompt (e.g. \"make the background transparent\").");
             });
             ui.label("Negative prompt");
@@ -1603,36 +1606,42 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
             if !f.width.is_multiple_of(32) || !f.height.is_multiple_of(32) {
                 ui.colored_label(BAD, "Width and height must be multiples of 32.");
             }
-            let per = estimate(&f);
-            ui.weak(format!("≈ {} per image on one R9700 (rough estimate)", fmt_secs(per)));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let label = if f.sweep.on {
-                    let runs = increart_gui_core::update::sweep_runs(st).map_or(0, |(r, _)| r.len());
-                    format!("Queue sweep: {runs} runs × {} seed(s)", f.seeds)
-                } else {
-                    format!("Queue {} seed(s)", f.seeds)
-                };
-                if ui.button(RichText::new(ic(ph::PLAY, &label)).strong()).clicked() {
-                    out.push(Msg::QueueGenerate);
-                }
-                if ui
-                    .button(ic(ph::ERASER, "Clear"))
-                    .on_hover_text("reset the form (and this project's draft)")
-                    .clicked()
-                {
-                    out.push(Msg::ClearGenerate);
-                }
-                crate::app::draft_note(ui, st, st.generate_dirty);
-            });
-            if !st.engine_running {
-                ui.weak("No servers: the run is saved and generated once servers are connected.");
-            }
         });
     });
     if f != st.generate {
         out.push(Msg::Generate(f));
     }
+}
+
+/// Under the Generate form: **Queue** (how many runs and seeds), **Clear**,
+/// the draft's state, the time per image, and why Queue can't go yet.
+fn queue_strip(ui: &mut egui::Ui, st: &AppState, f: &increart_gui_core::GenerateForm, out: &mut Vec<Msg>) {
+    ui.add_space(4.0);
+    let runs = f.sweep.on.then(|| increart_gui_core::update::sweep_runs(st));
+    ui.horizontal_wrapped(|ui| {
+        let label = match &runs {
+            Some(r) => {
+                let n = r.as_ref().map_or(0, |(r, _)| r.len());
+                format!("Queue sweep: {n} runs × {} seed(s)", f.seeds)
+            }
+            None => format!("Queue {} seed(s)", f.seeds),
+        };
+        if ui.button(RichText::new(ic(ph::PLAY, &label)).strong()).clicked() {
+            out.push(Msg::QueueGenerate);
+        }
+        if ui.button(ic(ph::ERASER, "Clear")).on_hover_text("reset the form (and this project's draft)").clicked() {
+            out.push(Msg::ClearGenerate);
+        }
+        crate::app::draft_note(ui, st, st.generate_dirty);
+        ui.weak(format!("≈ {} per image on one R9700 (rough estimate)", fmt_secs(estimate(f))));
+    });
+    if let Some(Err(e)) = &runs {
+        ui.colored_label(crate::widgets::NEUTRAL, e);
+    }
+    if !st.engine_running {
+        ui.weak("No servers: the run is saved and generated once servers are connected.");
+    }
+    ui.add_space(2.0);
 }
 
 /// **Aspect**: common ratios (landscape and portrait), a swap, and the
@@ -1722,14 +1731,44 @@ fn jobs(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     if ui.button(ic(ph::GEAR, "Change servers…")).clicked() {
         out.push(Msg::OpenServerDialog);
     }
+    if st.pe.server.is_some() || !st.pe.jobs.is_empty() {
+        ui.separator();
+        ui.heading(ic(ph::MAGIC_WAND, "Prompt enhance"));
+        pe_list(ui, st, out);
+    }
     ui.separator();
     ui.heading(ic(ph::QUEUE, "Runs"));
     order_toggle(ui, st, out);
+    stop_all_row(ui, st, out);
     // the servers stay in view; the runs scroll
     ScrollArea::vertical().auto_shrink([false, false]).id_salt("jobs_runs").show(ui, |ui| run_list(ui, st, out));
 }
 
-/// Spread evenly · One at a time: how the queued runs share the servers.
+/// "what [Created ▾]": a sort order dropdown; the new choice when it
+/// changes.
+fn order_combo(ui: &mut egui::Ui, id: &str, what: &str, order: TreeOrder, tip: &str) -> Option<TreeOrder> {
+    let mut picked = None;
+    // one group: the label wraps with its dropdown
+    crate::widgets::group(ui, id, |ui| {
+        ui.weak(what);
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(order.name())
+            .width(72.0)
+            .show_ui(ui, |ui| {
+                for o in TreeOrder::EVERY {
+                    if ui.selectable_label(order == o, o.name()).clicked() && order != o {
+                        picked = Some(o);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(tip);
+    });
+    picked
+}
+
+/// Spread all · Sweep by sweep · One at a time: how the queued runs share
+/// the servers.
 pub fn order_toggle(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     use increart_core::scheduler::Order;
     ui.horizontal(|ui| {
@@ -1737,8 +1776,14 @@ pub fn order_toggle(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
         for (o, label, tip) in [
             (
                 Order::Spread,
-                ic(ph::SHUFFLE_ANGULAR, "Spread evenly"),
+                ic(ph::SHUFFLE_ANGULAR, "Spread all"),
                 "every run gets a seed in turn: all runs move along together (style sweeps fill row by row)",
+            ),
+            (
+                Order::BySweep,
+                ic(ph::STACK, "Sweep by sweep"),
+                "the oldest sweep's runs get a seed in turn (its contact sheet fills row by row) and it \
+                 finishes before the next sweep starts; a lone run counts as a sweep of one",
             ),
             (
                 Order::Sequential,
@@ -1753,7 +1798,7 @@ pub fn order_toggle(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     });
 }
 
-/// Queueing a sweep while the jobs go one at a time: spread them instead?
+/// Queueing a sweep while the jobs go one at a time: sweep by sweep instead?
 pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     if st.sweep_order_ask.is_none() {
         return;
@@ -1762,13 +1807,14 @@ pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>
         ui.set_max_width(440.0);
         ui.heading(ic(ph::LIST_NUMBERS, "Jobs run one at a time"));
         ui.label(
-            "A style sweep is best spread evenly: each style gets a seed in turn, so the contact sheet \
-             fills row by row and you can compare styles early. One at a time finishes each style \
-             (and anything queued before it) before the next starts.",
+            "A style sweep is best spread: each style gets a seed in turn, so the contact sheet \
+             fills row by row and you can compare styles early. Sweep by sweep does that, one sweep \
+             after another. One at a time finishes each style (and anything queued before it) before \
+             the next starts.",
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let spread = RichText::new(ic(ph::SHUFFLE_ANGULAR, "Spread evenly & queue   Enter")).strong();
+            let spread = RichText::new(ic(ph::STACK, "Sweep by sweep & queue   Enter")).strong();
             if ui.button(spread).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 out.push(Msg::SweepOrderAnswer(Some(true)));
             }
@@ -1782,6 +1828,21 @@ pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>
     });
     if m.should_close() {
         out.push(Msg::SweepOrderAnswer(None));
+    }
+}
+
+/// The PE server's device for the servers list: "GPU 1", "CPU", "chat"
+/// (connected to, or Auto).
+fn pe_device(st: &AppState) -> String {
+    use increart_core::pe::{PeDevice, PeRun};
+    match st.pe.server.as_ref().map(|s| &s.run) {
+        Some(PeRun::KoboldCpp { device: PeDevice::Gpu { devices }, .. }) if !devices.is_empty() => {
+            let ids: Vec<String> = devices.iter().map(u32::to_string).collect();
+            format!("GPU {}", ids.join(", "))
+        }
+        Some(PeRun::KoboldCpp { device: PeDevice::Gpu { .. }, .. }) => "GPU".into(),
+        Some(PeRun::KoboldCpp { device: PeDevice::Cpu { .. }, .. }) => "CPU".into(),
+        _ => "chat".into(),
     }
 }
 
@@ -1807,64 +1868,323 @@ pub fn server_list(ui: &mut egui::Ui, st: &AppState) {
             } else {
                 NEUTRAL
             };
-            ui.colored_label(c, &s.state);
+            state_cell(ui, RichText::new(&s.state).color(c));
             ui.label(s.model.clone().unwrap_or_default());
             ui.end_row();
         }
         ui.label(RichText::new("PE").strong()).on_hover_text("Prompt enhance");
-        ui.label("chat");
-        ui.colored_label(weak, "○ not connected");
+        ui.label(pe_device(st))
+            .on_hover_text("the chat server's device; on a GPU an sd-server also uses, its asks slow the images down");
+        let (dot, state, color) = crate::app::pe_state(ui, st);
+        state_cell(ui, RichText::new(format!("{dot} {state}")).color(color));
         ui.label("");
         ui.end_row();
     });
 }
 
-/// One block per run in the engine: progress over its seeds, the seeds being
-/// sampled now, and its stop buttons; above them, stop buttons for all.
-pub fn run_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
-    let jobs = st.jobs();
-    if jobs.is_empty() {
-        ui.weak("Nothing generating.");
-    } else {
-        ui.horizontal(|ui| {
-            let all = st.active_runs.len();
-            let unfinishing = st.active_runs.iter().any(|r| !st.finishing.contains(r));
-            if ui
-                .add_enabled(unfinishing, egui::Button::new(ic(ph::STOP_CIRCLE, "Finish & stop all")))
-                .on_hover_text("the images being generated finish; nothing new starts")
-                .clicked()
-            {
-                out.push(Msg::StopAll(Stop::Finish));
-            }
-            if ui
-                .button(RichText::new(ic(ph::STOP, "Stop all now")).color(BAD))
-                .on_hover_text("everything stops; images being generated are thrown away")
-                .clicked()
-            {
-                let runs = if all == 1 { "the run".to_string() } else { format!("all {all} runs") };
-                let text = format!("Stop {runs} now? The images being generated are thrown away.");
-                out.push(Msg::Ask(text, Box::new(Msg::StopAll(Stop::Now))));
-            }
-        });
+/// A server's state in a fixed width, cut with "…" (whole on hover): it
+/// changes many times a second, and the list mustn't change width with it.
+fn state_cell(ui: &mut egui::Ui, text: RichText) {
+    const W: f32 = 240.0;
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(egui::vec2(W, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_width(W);
+        // egui shows a cut label whole on hover
+        ui.add(egui::Label::new(text).truncate());
+    });
+}
+
+/// The prompt-enhance asks waiting, a block per batch: Stop, what it's for
+/// (a click goes where it was asked), "4 of 41", where the ask being worked
+/// on is, and a bar over the batch; each ask in the tooltip.
+pub fn pe_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_gui_core::{PeBatchKind, PeTarget};
+    let batches = st.pe.batches();
+    if batches.is_empty() {
+        ui.weak("Nothing asked.");
+        return;
     }
-    for j in jobs {
-        let finishing = st.finishing.contains(&j.run);
-        // the whole block opens the details; its own buttons come first
-        let block = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-            job_block(ui, &j, finishing, out);
-        });
-        let r = block.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("click for details");
-        if r.clicked() {
-            out.push(Msg::JobInfo(Some(j.run.clone())));
+    let project = st.project.as_ref().and_then(|p| st.index.project(p)).map(|p| p.name()).unwrap_or_default();
+    for b in &batches {
+        let Some(first) = st.pe.job(b.ids[0]) else { continue };
+        let (title, place, go) = match &b.kind {
+            PeBatchKind::Blanks => ("Suggest values", project.clone(), "go to the Generate form they're for"),
+            PeBatchKind::Styles => ("Enhance style prompts", project.clone(), "go to the Generate form they're for"),
+            PeBatchKind::Text(t) => match t {
+                PeTarget::Prompt => ("Rewrite the prompt", project.clone(), "show the rewrite window"),
+                PeTarget::NewIdea => ("Rewrite the idea", "new idea".into(), "show the rewrite window"),
+                PeTarget::Idea(id) => {
+                    let name = st.idea(id).map(|e| e.idea.title.clone()).filter(|t| !t.is_empty());
+                    ("Rewrite the idea", name.unwrap_or_else(|| "(untitled)".into()), "show the rewrite window")
+                }
+                PeTarget::Describe(_) => ("Describe the image", String::new(), "show the describe window"),
+            },
+        };
+        let mut tip = String::new();
+        for (i, id) in b.ids.iter().enumerate() {
+            if let Some(j) = st.pe.job(*id) {
+                let n = b.at() + i;
+                tip.push_str(&format!(
+                    "{n}. {}: {}\n",
+                    crate::rewrite::ask_name(st, j),
+                    crate::rewrite::progress(st, j)
+                ));
+            }
         }
+        tip.push_str(go);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            // Stop first: the text after it changes as the asks go
+            ui.horizontal(|ui| {
+                ui.spinner();
+                if ui.small_button(ic(ph::STOP, "Stop")).on_hover_text("stop these asks").clicked() {
+                    out.push(Msg::PeStop(b.ids.clone()));
+                }
+                if ui.link(RichText::new(title).strong()).on_hover_text(&tip).clicked() {
+                    match &b.kind {
+                        PeBatchKind::Blanks | PeBatchKind::Styles | PeBatchKind::Text(PeTarget::Prompt) => {
+                            out.push(Msg::Tab(Tab::Projects));
+                            out.push(Msg::ProjectsTab(ProjectsTab::Generate));
+                        }
+                        PeBatchKind::Text(_) => {}
+                    }
+                    if matches!(b.kind, PeBatchKind::Text(_)) {
+                        let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("pe_text"));
+                        ui.ctx().move_to_top(layer);
+                    }
+                    egui::Popup::close_all(ui.ctx());
+                }
+                if !place.is_empty() {
+                    ui.weak(place);
+                }
+                if b.total > 1 {
+                    ui.label(format!("{} of {}", b.at(), b.total));
+                }
+            });
+            let step = RichText::new(crate::rewrite::progress(st, first)).weak();
+            ui.add(egui::Label::new(step).truncate()).on_hover_text(&tip);
+            if b.total > 1 {
+                let done = (b.at() - 1) as f32 / b.total as f32;
+                ui.add(egui::ProgressBar::new(done).desired_height(6.0));
+            }
+        });
     }
+}
+
+/// **Finish & stop all** / **Stop all now**, above the runs (not scrolled
+/// away with them), greyed out while nothing generates.
+pub fn stop_all_row(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    ui.horizontal(|ui| {
+        let all = st.active_runs.len();
+        let unfinishing = st.active_runs.iter().any(|r| !st.finishing.contains(r));
+        if ui
+            .add_enabled(unfinishing, egui::Button::new(ic(ph::STOP_CIRCLE, "Finish & stop all")))
+            .on_hover_text("the images being generated finish; nothing new starts")
+            .clicked()
+        {
+            out.push(Msg::StopAll(Stop::Finish));
+        }
+        if ui
+            .add_enabled(all > 0, egui::Button::new(RichText::new(ic(ph::STOP, "Stop all now")).color(BAD)))
+            .on_hover_text("everything stops; images being generated are thrown away")
+            .clicked()
+        {
+            let runs = if all == 1 { "the run".to_string() } else { format!("all {all} runs") };
+            let text = format!("Stop {runs} now? The images being generated are thrown away.");
+            out.push(Msg::Ask(text, Box::new(Msg::StopAll(Stop::Now))));
+        }
+    });
+}
+
+/// The runs in the engine by project, folded (for the session): a header
+/// with its seeds, time left and stop buttons, and under it a bar; open,
+/// its runs, a sweep's together under one more such header, a line each.
+pub fn run_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_gui_core::{RunItem, runs_progress};
+    let groups = st.run_groups();
+    if groups.is_empty() {
+        ui.weak("Nothing generating.");
+        return;
+    }
+    let servers = st.servers.len();
+    for g in &groups {
+        let runs = g.runs();
+        let p = runs_progress(&runs, servers);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let id = egui::Id::unique(("jobs_project", &g.project));
+            let n = if runs.len() == 1 { "1 run".to_string() } else { format!("{} runs", runs.len()) };
+            let open = fold(ui, id, |ui| {
+                ui.label(RichText::new(&g.name).strong());
+                ui.weak(group_text(&n, p));
+                group_stops(ui, st, &runs, &format!("{n} of {}", g.name), out);
+            });
+            ui.add(egui::ProgressBar::new(p.2).desired_height(6.0));
+            if !open {
+                return;
+            }
+            for item in &g.items {
+                match item {
+                    RunItem::Run(j) => {
+                        let finishing = st.finishing.contains(&j.run);
+                        // the whole block opens the details; its own buttons come first
+                        let block = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                            job_block(ui, j, finishing, out);
+                        });
+                        let r = block
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("click for details");
+                        if r.clicked() {
+                            out.push(Msg::JobInfo(Some(j.run.clone())));
+                        }
+                    }
+                    RunItem::Sweep { name, runs } => {
+                        let runs: Vec<_> = runs.iter().collect();
+                        sweep_block(ui, st, &g.project, &g.name, name, &runs, servers, out);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// A sweep's runs in the engine: its header (what's sampling now among its
+/// seeds) and a bar; open, a line per run.
+#[allow(clippy::too_many_arguments)]
+fn sweep_block(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    project: &increart_core::Id,
+    project_name: &str,
+    name: &str,
+    runs: &[&increart_gui_core::RunProgress],
+    servers: usize,
+    out: &mut Vec<Msg>,
+) {
+    let p = increart_gui_core::runs_progress(runs, servers);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let id = egui::Id::unique(("jobs_sweep", project, name));
+        let n = format!("{} runs", runs.len());
+        let open = fold(ui, id, |ui| {
+            ui.label(RichText::new(format!("{name} · sweep")).strong());
+            ui.weak(group_text(&n, p));
+            group_stops(ui, st, runs, &format!("the {n} of {project_name} {name}"), out);
+        });
+        let now: Vec<String> = runs
+            .iter()
+            .flat_map(|r| {
+                let row = r.sweep.as_ref().map_or(r.label.as_str(), |(_, row)| row.as_str());
+                r.sampling.iter().map(move |(seed, step, n)| format!("{row} s{seed} {step}/{n}"))
+            })
+            .collect();
+        if !now.is_empty() {
+            let text = RichText::new(format!("now: {}", now.join(", "))).weak().small();
+            ui.add(egui::Label::new(text).truncate());
+        }
+        ui.add(egui::ProgressBar::new(p.2).desired_height(6.0));
+        if open {
+            for r in runs {
+                run_line(ui, st, r, out);
+            }
+        }
+    });
+}
+
+/// One of a sweep's runs on a line: its row (the style, "cfg 3"), a bar
+/// over its seeds, what it's sampling, and its stop buttons; a click opens
+/// the details.
+fn run_line(ui: &mut egui::Ui, st: &AppState, r: &increart_gui_core::RunProgress, out: &mut Vec<Msg>) {
+    let finishing = st.finishing.contains(&r.run);
+    let line = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        ui.horizontal(|ui| {
+            let row = r.sweep.as_ref().map_or(r.label.clone(), |(_, row)| row.clone());
+            let h = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(egui::vec2(150.0, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_width(150.0);
+                ui.add(egui::Label::new(row).truncate());
+            });
+            let bar =
+                egui::ProgressBar::new(r.fraction()).desired_width(110.0).text(format!("{} / {}", r.done, r.total));
+            ui.add(bar);
+            let now: Vec<String> = r.sampling.iter().map(|(seed, step, n)| format!("s{seed} {step}/{n}")).collect();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                stop_buttons(ui, &r.run, finishing, r.sampling.len(), true, out);
+                ui.add(egui::Label::new(RichText::new(now.join(", ")).weak().small()).truncate());
+            });
+        });
+    });
+    let resp = line.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("click for details");
+    if resp.clicked() {
+        out.push(Msg::JobInfo(Some(r.run.clone())));
+    }
+}
+
+/// A foldable header: ▸/▾, then `header`; folded until opened (for the
+/// session). Whether it's open.
+fn fold(ui: &mut egui::Ui, id: egui::Id, header: impl FnOnce(&mut egui::Ui)) -> bool {
+    let open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let flip = ui
+        .horizontal(|ui| {
+            let caret = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+            let r = ui.add(egui::Button::new(caret).frame(false)).on_hover_text(if open { "fold" } else { "unfold" });
+            header(ui);
+            r.clicked()
+        })
+        .inner;
+    if flip {
+        ui.ctx().data_mut(|d| d.insert_temp(id, !open));
+    }
+    open != flip
+}
+
+/// "3 runs · 46 / 120 seeds · ~12 min left".
+fn group_text(runs: &str, (done, total, _, eta): (u64, u64, f32, Option<f64>)) -> String {
+    let mut t = format!("{runs} · {done} / {total} seeds");
+    if let Some(s) = eta.filter(|s| *s > 0.0) {
+        t.push_str(&format!(" · ~{} left", increart_gui_core::timing::duration(s)));
+    }
+    t
+}
+
+/// A group's Finish & stop / Stop now (asked first), at the header's right.
+fn group_stops(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    runs: &[&increart_gui_core::RunProgress],
+    what: &str,
+    out: &mut Vec<Msg>,
+) {
+    let ids: Vec<increart_core::Id> = runs.iter().map(|r| r.run.clone()).collect();
+    let unfinishing: Vec<increart_core::Id> = ids.iter().filter(|r| !st.finishing.contains(*r)).cloned().collect();
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // right to left: Stop now, then Finish & stop
+        if ui
+            .add(egui::Button::new(RichText::new(ic(ph::STOP, "Stop now")).color(BAD)).small())
+            .on_hover_text("stop these at once: images being generated are thrown away")
+            .clicked()
+        {
+            let text = format!("Stop {what} now? The images being generated are thrown away.");
+            out.push(Msg::Ask(text, Box::new(Msg::CancelRuns(ids.clone(), Stop::Now))));
+        }
+        if unfinishing.is_empty() {
+            ui.weak("finishing…");
+        } else if ui
+            .add(egui::Button::new(RichText::new(ic(ph::STOP_CIRCLE, "Finish & stop")).strong()).small())
+            .on_hover_text("the images being generated finish and are kept; the rest are cancelled")
+            .clicked()
+        {
+            out.push(Msg::CancelRuns(unfinishing, Stop::Finish));
+        }
+    });
 }
 
 fn job_block(ui: &mut egui::Ui, j: &increart_gui_core::RunProgress, finishing: bool, out: &mut Vec<Msg>) {
     {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} · {}", j.project, j.label)).strong());
+                ui.label(RichText::new(&j.label).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     stop_buttons(ui, &j.run, finishing, j.sampling.len(), true, out);
                 });

@@ -292,7 +292,9 @@ fn server_statuses(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact
             let name = if s.device.is_empty() { s.name.clone() } else { s.device.clone() };
             let model = s.model.as_ref().map(|m| format!(", {m}")).unwrap_or_default();
             let tip = format!("{}: {}{model}\n{busy} seeds generating · click for the server status", s.name, s.state);
-            Item { name, dot, state: s.state.clone(), color, tip, jobs: true }
+            // the sd-server's latest log line only in the tooltip
+            let state = if s.state.starts_with("starting…") { "starting…".into() } else { s.state.clone() };
+            Item { name, dot, state, color, tip, jobs: true }
         })
         .collect();
     // stopped ones, until their processes are gone and the GPU memory free
@@ -310,16 +312,18 @@ fn server_statuses(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact
         let tip = "No sd-server in use: Servers… to start or connect one".to_string();
         items.push(Item { name: "no servers".into(), dot: "", state: String::new(), color: weak, tip, jobs: false });
     }
-    let weak = ui.visuals().weak_text_color();
-    let pe = Item {
-        name: "PE".into(),
-        dot: "○",
-        state: "not connected".into(),
-        color: weak,
-        tip: "Prompt enhance (PE): not connected\nclick for the server status".into(),
-        jobs: false,
-    };
-    items.push(pe);
+    let (dot, full, color) = pe_state(ui, st);
+    let mut tip = format!("Prompt enhance (PE): {full}");
+    // the server's name only in the tooltip: "PE ● ready"; starting or
+    // working, a few words ("PE ● writing 143 tok"), the rest in it too
+    let state = crate::rewrite::brief(st)
+        .unwrap_or_else(|| full.split_once(": ").map_or(full.as_str(), |(_, s)| s).to_string());
+    for (i, j) in st.pe.jobs.iter().enumerate() {
+        let what = crate::rewrite::ask_name(st, j);
+        tip.push_str(&format!("\n{}. {what}: {}", i + 1, crate::rewrite::progress(st, j)));
+    }
+    tip.push_str("\nclick for the server status");
+    items.push(Item { name: "PE".into(), dot, state, color, tip, jobs: false });
     let texts = |level: usize| -> Vec<String> {
         items
             .iter()
@@ -347,10 +351,40 @@ fn server_statuses(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact
         text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x
     };
     let gap = ui.spacing().item_spacing.x;
+    // in full, a status starting or working changes many times a second,
+    // and the bar mustn't move with it: its slot only grows until it
+    // settles, then is its own width again (cut at MAX, whole in its tooltip)
+    const MAX: f32 = 160.0;
+    let slots: Vec<f32> = items
+        .iter()
+        .zip(texts(0))
+        .map(|(i, t)| {
+            let id = egui::Id::unique(("status slot", &i.name));
+            let own = width(&t).ceil();
+            let w = if i.color == NEUTRAL {
+                let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0).max(own);
+                ui.data_mut(|d| d.insert_temp(id, w));
+                w
+            } else {
+                ui.data_mut(|d| d.remove::<f32>(id));
+                own
+            };
+            w.min(MAX)
+        })
+        .collect();
+    let shown =
+        |level: usize| -> Vec<usize> { (0..items.len()).filter(|&i| level < 2 || !items[i].dot.is_empty()).collect() };
+    let fits = |level: usize| -> f32 {
+        shown(level)
+            .into_iter()
+            .zip(texts(level))
+            .map(|(i, t)| if level == 0 { slots[i] } else { width(&t) } + gap)
+            .sum()
+    };
     let title = if compact { String::new() } else { "  Servers…".to_string() };
     let button = width(&format!("{}{title} ●", ph::HARD_DRIVES)) + 2.0 * ui.spacing().button_padding.x + gap;
     let room = ui.available_width() - button - 16.0;
-    let level = (0..3).find(|&l| texts(l).iter().map(|t| width(t) + gap).sum::<f32>() <= room);
+    let level = (0..3).find(|&l| fits(l) <= room);
 
     // the worst state on the button when the statuses don't fit
     let worst = items.iter().filter(|i| i.jobs).max_by_key(|i| match i.color {
@@ -370,10 +404,21 @@ fn server_statuses(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact
         out.push(Msg::ServerStatus(true));
     }
     let Some(level) = level else { return };
-    let shown: Vec<&Item> = items.iter().filter(|i| level < 2 || !i.dot.is_empty()).collect();
-    for (i, text) in shown.iter().zip(texts(level)).rev() {
-        let r =
-            ui.add(egui::Label::new(RichText::new(text).color(i.color)).sense(Sense::click())).on_hover_text(&i.tip);
+    for (n, text) in shown(level).into_iter().zip(texts(level)).rev() {
+        let i = &items[n];
+        let label = egui::Label::new(RichText::new(text).color(i.color)).sense(Sense::click());
+        let r = if level == 0 {
+            let size = egui::vec2(slots[n], ui.spacing().interact_size.y);
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.allocate_ui_with_layout(size, layout, |ui| {
+                ui.set_width(slots[n]);
+                ui.add(label.truncate())
+            })
+            .inner
+        } else {
+            ui.add(label)
+        };
+        let r = r.on_hover_text(&i.tip);
         if r.clicked() {
             out.push(Msg::ServerStatus(true));
         }
@@ -423,18 +468,18 @@ fn library_menu(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact: b
     r.response.on_hover_text(format!("Library: {}\nclick to switch libraries", root.display()));
 }
 
-/// The interface zoom, "+ 100% −" in the status bar: the buttons step by
-/// 10%, the value can be typed (click) or dragged.
+/// The interface zoom, "− 100% +" in the status bar: the buttons step by
+/// 5%, the value can be typed (click) or dragged.
 fn zoom_control(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     use increart_gui_core::{UI_ZOOM_MAX, UI_ZOOM_MIN};
     let z = st.ui_zoom();
     ui.scope(|ui| {
-        // right to left: the minus first
+        // right to left: the plus first
         ui.spacing_mut().item_spacing.x = 2.0;
         let small = |s: &str| egui::Button::new(s).small().min_size(egui::vec2(18.0, 0.0));
-        let r = ui.add_enabled(z > UI_ZOOM_MIN, small(ph::MINUS));
-        if r.on_hover_text("zoom out   Ctrl −").clicked() {
-            out.push(Msg::UiZoomStep(false));
+        let r = ui.add_enabled(z < UI_ZOOM_MAX, small(ph::PLUS));
+        if r.on_hover_text("zoom in   Ctrl +").clicked() {
+            out.push(Msg::UiZoomStep(true));
         }
         let mut v = z;
         let r = ui
@@ -450,9 +495,9 @@ fn zoom_control(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
         if r.changed() || r.drag_stopped() {
             out.push(Msg::UiZoom { percent: v, save: !r.dragged() });
         }
-        let r = ui.add_enabled(z < UI_ZOOM_MAX, small(ph::PLUS));
-        if r.on_hover_text("zoom in   Ctrl +").clicked() {
-            out.push(Msg::UiZoomStep(true));
+        let r = ui.add_enabled(z > UI_ZOOM_MIN, small(ph::MINUS));
+        if r.on_hover_text("zoom out   Ctrl −").clicked() {
+            out.push(Msg::UiZoomStep(false));
         }
     });
     ui.add_space(6.0);
@@ -522,7 +567,14 @@ fn jobs_indicator(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, force_op
         .horizontal(|ui| {
             // a click on the text opens the popover, not a selection
             ui.style_mut().interaction.selectable_labels = false;
-            if sum.runs == 0 {
+            // prompt enhance's asks: "PE 4 / 41" over every batch
+            let batches = st.pe.batches();
+            let pe = (!batches.is_empty()).then(|| {
+                let total: usize = batches.iter().map(|b| b.total).sum();
+                let at: usize = batches.iter().map(|b| b.total - b.ids.len()).sum::<usize>() + 1;
+                format!("PE {at} / {total}")
+            });
+            if sum.runs == 0 && pe.is_none() {
                 let servers = st.servers.iter().filter(|s| s.state == "ready").count();
                 let text = if st.servers.is_empty() {
                     "no jobs".to_string()
@@ -530,9 +582,16 @@ fn jobs_indicator(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, force_op
                     format!("no jobs · {servers} server(s) ready")
                 };
                 ui.weak(ic(ph::QUEUE, &text));
+            } else if sum.runs == 0 {
+                ui.spinner();
+                ui.label(ic(ph::MAGIC_WAND, pe.as_deref().unwrap_or_default()));
             } else {
                 ui.add(egui::ProgressBar::new(sum.fraction).desired_width(140.0).desired_height(12.0));
-                ui.label(ic(ph::SPARKLE, &format!("{} run(s) · {} / {} seeds", sum.runs, sum.done, sum.total)));
+                let mut text = format!("{} run(s) · {} / {} seeds", sum.runs, sum.done, sum.total);
+                if let Some(pe) = &pe {
+                    text.push_str(&format!(" · {pe}"));
+                }
+                ui.label(ic(ph::SPARKLE, &text));
             }
         })
         .response
@@ -545,18 +604,27 @@ fn jobs_indicator(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, force_op
     popup
         .align(egui::RectAlign::TOP_END)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .width(440.0)
+        .width(520.0)
         .show(|ui| {
-            ui.set_min_width(440.0);
+            // a fixed width: the states and steps in it change all the time
+            ui.set_min_width(520.0);
+            ui.set_max_width(520.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(ic(ph::QUEUE, "Jobs")).strong());
                 ui.add_space(12.0);
                 crate::projects::order_toggle(ui, st, out);
             });
+            // the stops for all stay in view; the runs scroll
+            crate::projects::stop_all_row(ui, st, out);
             let n = out.len();
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| crate::projects::run_list(ui, st, out));
             if out[n..].iter().any(|m| matches!(m, Msg::JobInfo(_))) {
                 egui::Popup::close_all(ui.ctx());
+            }
+            if !st.pe.jobs.is_empty() {
+                ui.separator();
+                ui.label(RichText::new(ic(ph::MAGIC_WAND, "Prompt enhance")).strong());
+                crate::projects::pe_list(ui, st, out);
             }
             ui.separator();
             ui.label(RichText::new(ic(ph::HARD_DRIVES, "Servers")).strong());
@@ -648,10 +716,7 @@ fn server_status_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) 
         }
         ui.add_space(8.0);
         ui.label(RichText::new(ic(ph::MAGIC_WAND, "Prompt enhance (PE)")).strong());
-        ui.weak(
-            "Rewriting prompts with the Qwen-Image prompt-enhancer model needs its own chat server \
-             (llama-server). It isn't built into IncreArt yet, so there is nothing to connect.",
-        );
+        pe_section(ui, st, out);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button(RichText::new(ic(ph::GEAR, "Change servers…")).strong()).clicked() {
@@ -899,7 +964,9 @@ impl eframe::App for App {
             if self.st.tab == Tab::Projects && self.st.projects_tab == ProjectsTab::Generate {
                 crate::presets::window(&ctx, &self.st, &mut out);
             }
+            crate::styles::window(&ctx, &self.st, &mut self.tex, &mut out);
             crate::presets::editor_window(&ctx, &self.st, &mut out);
+            crate::rewrite::window(&ctx, &self.st, &mut self.tex, &mut out);
             crate::presets::save_window(&ctx, &self.st, &mut out);
             if let Some(e) = &self.st.export {
                 export_window(&ctx, e, &mut out);
@@ -912,6 +979,9 @@ impl eframe::App for App {
                 no_server_window(&ctx, &mut out);
             }
         }
+        // over the server dialog or the status window
+        crate::pe_settings::window(&ctx, &self.st, &mut out);
+        crate::presets::added_blanks_window(&ctx, &self.st, &mut out);
         if let Some(c) = &self.st.confirm {
             confirm_window(&ctx, &c.text, &mut out);
         }
@@ -927,5 +997,94 @@ impl eframe::App for App {
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+    }
+}
+
+/// The PE server's dot, state and colour, for the top bar and Jobs.
+pub fn pe_state(ui: &egui::Ui, st: &AppState) -> (&'static str, String, Color32) {
+    use increart_gui_core::PeStatus;
+    let weak = ui.visuals().weak_text_color();
+    let Some(server) = st.pe.server.as_ref() else { return ("○", "no chat server".into(), weak) };
+    let waiting = st.pe.jobs.len();
+    if waiting > 0 || st.pe.status == PeStatus::Starting {
+        // the times shown go on
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    match &st.pe.status {
+        PeStatus::Off if server.start == increart_core::pe::PeStart::AtLaunch => {
+            ("○", format!("{}: stopped", server.name), weak)
+        }
+        PeStatus::Off => ("○", format!("{}: starts when asked", server.name), weak),
+        PeStatus::Starting => ("◌", format!("{}: {}", server.name, crate::rewrite::starting(st)), NEUTRAL),
+        PeStatus::Ready if waiting > 0 => {
+            let now = crate::rewrite::progress(st, &st.pe.jobs[0]);
+            ("●", format!("{}: working ({waiting}): {now}", server.name), NEUTRAL)
+        }
+        PeStatus::Ready => ("●", format!("{}: ready", server.name), GOOD),
+        PeStatus::Failed(_) => ("●", format!("{}: failed", server.name), BAD),
+    }
+}
+
+/// The server status window's Prompt enhance section: the chat server in
+/// use, how it runs, its state, and the system prompts (the built-in ones
+/// unless changed), shared by every chat server.
+fn pe_section(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_core::pe::JOBS;
+    crate::pe_settings::summary(ui, st, out);
+    let pe = &st.config.pe;
+    if let increart_gui_core::PeStatus::Failed(e) = &st.pe.status {
+        ui.colored_label(BAD, e);
+    }
+    ui.add_space(4.0);
+    for (job, default) in JOBS {
+        let title = match job {
+            increart_core::pe::FILL_BLANKS => "System prompt: suggesting values for a sweep's blanks",
+            increart_core::pe::REWRITE => "System prompt: rewriting a prompt or an idea",
+            increart_core::pe::DESCRIBE => "System prompt: describing an image",
+            _ => job,
+        };
+        let own = pe.system_prompts.get(job).filter(|p| !p.trim().is_empty());
+        let own_sampling = pe.sampling.get(job);
+        let head =
+            if own.is_some() || own_sampling.is_some() { format!("{title}  (changed)") } else { title.to_string() };
+        egui::CollapsingHeader::new(head).id_salt(("pe_system_head", job)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if own.is_none() {
+                    ui.weak("built in; edit to change it for every chat server");
+                } else if ui.small_button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Default")).clicked() {
+                    out.push(Msg::PeSystemPrompt { job: job.into(), text: String::new() });
+                }
+            });
+            let mut text = own.cloned().unwrap_or_else(|| default.to_string());
+            let r = egui::ScrollArea::vertical()
+                .id_salt(("pe_system", job))
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(5))
+                })
+                .inner;
+            if r.changed() {
+                // the default, unchanged, stays the default
+                let text = if text == default { String::new() } else { text };
+                out.push(Msg::PeSystemPrompt { job: job.into(), text });
+            }
+            ui.horizontal(|ui| {
+                let mut x = pe.sampling(job);
+                ui.label("Temperature");
+                ui.add(egui::Slider::new(&mut x.temperature, 0.0..=2.0).step_by(0.05))
+                    .on_hover_text("hotter: more varied and surprising, but less on topic");
+                ui.label("min_p");
+                ui.add(egui::Slider::new(&mut x.min_p, 0.0..=0.5).step_by(0.01)).on_hover_text(
+                    "drops words less than this fraction as likely as the likeliest: keeps a hot answer \
+                     sensible (0: off)",
+                );
+                if own_sampling.is_some() && ui.small_button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Default")).clicked() {
+                    out.push(Msg::PeSampling { job: job.into(), sampling: None });
+                } else if x != pe.sampling(job) {
+                    let sampling = (x != increart_core::pe::Sampling::default_for(job)).then_some(x);
+                    out.push(Msg::PeSampling { job: job.into(), sampling });
+                }
+            });
+        });
     }
 }

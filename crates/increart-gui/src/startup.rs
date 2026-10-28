@@ -3,7 +3,9 @@
 
 use eframe::egui::{self, Color32, RichText};
 use increart_core::config::ServerConfig;
-use increart_gui_core::{AppState, Editing, LibraryDialog, LibraryWizard, Msg, PickKind, ServerDialog, ServerProgress};
+use increart_gui_core::{
+    AppState, Editing, LibraryDialog, LibraryWizard, Msg, PickKind, ServerDialog, ServerProgress, Without,
+};
 
 use crate::widgets::{ACCENT, ACCENT_MUTED, BAD, GOOD, NEUTRAL, ic, ph};
 
@@ -296,18 +298,22 @@ fn library_wizard(ctx: &egui::Context, d: &LibraryDialog, w: LibraryWizard, rece
     }
 }
 
-/// "Start ROCm0 on :1234" / "Connect to http://…".
+/// "Start ROCm0 on :1234" / "Connect to http://…" / "Chat: Qwen3-VL".
 pub fn describe(s: &ServerConfig) -> String {
     match s {
         ServerConfig::Start { device, port, .. } => format!("Start {device} on :{port}"),
         ServerConfig::Connect { url, .. } => format!("Connect to {url}"),
+        ServerConfig::Chat(c) => format!("Chat: {}", c.name),
     }
 }
 
 pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
     centered(ui, "servers", 560.0, |ui| {
         ui.heading(ic(ph::HARD_DRIVES, "Servers"));
-        ui.label("How to reach sd-server for this session. Connected servers keep running when IncreArt exits.");
+        ui.label(
+            "The servers for this session: sd-servers to generate with, and a chat server for prompt enhance. \
+             Connected servers keep running when IncreArt exits.",
+        );
         if let Some(n) = &d.notice {
             ui.add_space(4.0);
             ui.colored_label(NEUTRAL, ic(ph::WARNING, n));
@@ -352,7 +358,15 @@ pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec
         if d.settings {
             settings_window(ui.ctx(), st, d, out);
         }
-        let modal = d.editing.is_some() || d.wizard || d.settings || st.confirm.is_some();
+        if let Some(w) = &d.without {
+            without_window(ui.ctx(), st, w, out);
+        }
+        let modal = d.editing.is_some()
+            || d.wizard
+            || d.settings
+            || d.without.is_some()
+            || st.confirm.is_some()
+            || st.pe.editor.is_some();
         // ways out on the left, the settings on the right
         let settings = egui::Sides::new().show(
             ui,
@@ -447,7 +461,7 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
             ui.weak(format!("stopping the servers in use first ({})", st.stopping.join(", ")));
         });
     }
-    for (i, (s, p)) in d.draft.servers.iter().zip(&d.progress).enumerate() {
+    for (i, (s, p)) in d.draft.sd_servers().iter().zip(&d.progress).enumerate() {
         ui.horizontal(|ui| {
             ui.label(RichText::new(s.name()).strong());
             ui.weak(describe(s));
@@ -468,6 +482,19 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
                     ui.colored_label(BAD, ic(ph::WARNING, e));
                 }
             }
+        });
+    }
+    // the chat server: on its own, never holding the sd-servers up
+    if let Some(c) = d.draft.chat() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&c.name).strong());
+            ui.weak("chat server");
+            let (dot, state, color) = crate::app::pe_state(ui, st);
+            let state = state.split_once(": ").map_or(state.as_str(), |(_, s)| s);
+            if st.pe.status == increart_gui_core::PeStatus::Starting {
+                ui.spinner();
+            }
+            ui.colored_label(color, format!("{dot} {state}"));
         });
     }
 }
@@ -528,6 +555,62 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
     });
     ui.add_space(6.0);
     ui.weak("Click a preset to open it");
+}
+
+/// **Continue without servers**: nothing generates meanwhile; prompt
+/// enhance can go on with one of the presets' chat servers.
+fn without_window(ctx: &egui::Context, st: &AppState, w: &Without, out: &mut Vec<Msg>) {
+    let m = egui::Modal::new(egui::Id::unique("continue_without")).show(ctx, |ui| {
+        ui.set_width(500.0);
+        ui.heading(ic(ph::ARROW_RIGHT, "Continue without servers"));
+        ui.label(if st.servers.is_empty() {
+            "Browsing, review and the libraries work, but nothing generates until an sd-server is connected \
+             (Servers… in the top bar)."
+        } else {
+            "The sd-servers in use stop. Nothing generates until one is connected again; queued runs wait."
+        });
+        if !st.active_runs.is_empty() {
+            ui.label(format!(
+                "{} run(s) are generating: the images being made now are dropped and made again later.",
+                st.active_runs.len()
+            ));
+        }
+        ui.add_space(8.0);
+        // one per process; the one in use as it is (it may have been
+        // edited in its preset since)
+        let mut list: Vec<increart_core::pe::PeServer> = st.config.chat_servers().into_iter().cloned().collect();
+        if let Some(c) = &st.pe.server {
+            match list.iter_mut().find(|x| x.same_process(c)) {
+                Some(x) => *x = c.clone(),
+                None => list.insert(0, c.clone()),
+            }
+        }
+        if list.is_empty() {
+            ui.weak("Prompt enhance: no preset has a chat server.");
+        } else {
+            ui.label(RichText::new(ic(ph::MAGIC_WAND, "Prompt enhance meanwhile")).strong());
+            let mut pick = w.chat.clone();
+            ui.radio_value(&mut pick, None, "None");
+            for c in &list {
+                ui.radio_value(&mut pick, Some(c.clone()), &c.name).on_hover_text(crate::pe_settings::describe(c));
+            }
+            if pick != w.chat {
+                out.push(Msg::WithoutDialog(Some(Without { chat: pick })));
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(ic(ph::ARROW_RIGHT, "Continue")).strong()).clicked() {
+                out.push(Msg::ContinueWithoutServers);
+            }
+            if ui.button("Cancel").clicked() {
+                out.push(Msg::WithoutDialog(None));
+            }
+        });
+    });
+    if m.should_close() {
+        out.push(Msg::WithoutDialog(None));
+    }
 }
 
 /// **sd-server settings…**: shared by every Start server.
@@ -678,6 +761,26 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
             }
         });
         ui.add_space(10.0);
+        ui.label(RichText::new("Prompt enhance (optional)").strong());
+        ui.weak("A chat model that suggests and rewrites prompt text.");
+        let chat = d.draft.servers.iter().position(ServerConfig::is_chat);
+        ui.horizontal(|ui| match chat.and_then(|i| d.draft.chat().map(|c| (i, c))) {
+            Some((i, c)) => {
+                ui.label(RichText::new(&c.name).strong()).on_hover_text(crate::pe_settings::describe(c));
+                if ui.small_button(ic(ph::GEAR, "Settings…")).clicked() {
+                    out.push(Msg::PeEditorOpen(Some(i)));
+                }
+                if ui.small_button(ph::X).on_hover_text("Remove").clicked() {
+                    out.push(Msg::RemoveServer(i));
+                }
+            }
+            None => {
+                if ui.button(ic(ph::PLUS, "Add a chat server…")).clicked() {
+                    out.push(Msg::PeEditorOpen(None));
+                }
+            }
+        });
+        ui.add_space(10.0);
         if d.draft.servers.is_empty() {
             ui.weak("Tick a GPU, or a server to connect to.");
         } else {
@@ -706,7 +809,7 @@ fn editor_window(ctx: &egui::Context, st: &AppState, d: &ServerDialog, editing: 
     egui::Modal::new(egui::Id::unique("preset_editor")).show(ctx, |ui| {
         ui.set_width(620.0);
         editor(ui, d, editing, out);
-        if st.confirm.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if st.confirm.is_none() && st.pe.editor.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             out.push(Msg::CancelEdit);
         }
     });
@@ -722,7 +825,7 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
     }
     ui.add_space(6.0);
     if d.draft.servers.is_empty() {
-        ui.weak("Add a server to start or connect to.");
+        ui.weak("Add an sd-server to start or connect to, and a chat server for prompt enhance if you like.");
     }
     for (i, s) in d.draft.servers.iter().enumerate() {
         let mut edited = s.clone();
@@ -747,6 +850,13 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
                             ui.add(egui::TextEdit::singleline(url).desired_width(200.0));
                             ui.add(egui::TextEdit::singleline(device).desired_width(70.0).hint_text("device"));
                         }
+                        ServerConfig::Chat(c) => {
+                            ui.label(ic(ph::MAGIC_WAND, "Chat"));
+                            ui.label(RichText::new(&c.name).strong()).on_hover_text(crate::pe_settings::describe(c));
+                            if ui.small_button(ic(ph::GEAR, "Settings…")).clicked() {
+                                out.push(Msg::PeEditorOpen(Some(i)));
+                            }
+                        }
                     },
                     |ui| ui.small_button(ph::X).on_hover_text("Remove").clicked(),
                 )
@@ -766,6 +876,15 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
         }
         if ui.button(ic(ph::PLUS, "Connect")).clicked() {
             out.push(Msg::AddConnectServer);
+        }
+        let chat = d.draft.chat().is_some();
+        if ui
+            .add_enabled(!chat, egui::Button::new(ic(ph::MAGIC_WAND, "Chat server")))
+            .on_hover_text("the chat model prompt enhance uses; one per preset")
+            .on_disabled_hover_text("a preset has one chat server")
+            .clicked()
+        {
+            out.push(Msg::PeEditorOpen(None));
         }
     });
     // the listed devices: a click adds a Start server on one

@@ -23,6 +23,7 @@ pub mod link;
 pub mod model;
 pub mod modelhash;
 pub mod notify;
+pub mod pe;
 pub mod pixel;
 pub mod png;
 pub mod prompts;

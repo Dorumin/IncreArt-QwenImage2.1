@@ -37,6 +37,8 @@ pub enum HistoryKind {
     BeforePreset,
     /// An idea added from the New idea form, or an idea's text saved.
     Saved,
+    /// Before a PE rewrite (or an image's description) replaced the text.
+    BeforeRewrite,
 }
 
 impl HistoryKind {
