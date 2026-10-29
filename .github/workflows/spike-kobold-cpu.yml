@@ -1,0 +1,109 @@
+# Spike (temporary): can KoboldCpp on a CPU-only runner load the smallest
+# Qwen-Image 2.1 set, and how long do two tiny images and two prompt
+# enhance answers take? Answers the questions the real-backend integration
+# test depends on. Run by hand from the Actions tab.
+name: Spike - KoboldCpp on CPU
+
+on:
+  workflow_dispatch:
+    inputs:
+      encoder:
+        description: Text encoder quant (unsloth/Qwen3-VL-8B-Instruct-GGUF)
+        default: UD-IQ1_S
+      steps:
+        description: Sampling steps per image
+        default: '2'
+
+env:
+  KCPP: v1.123.1
+  # pinned revisions, so the cache key names exact bytes
+  IMAGE_URL: https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF/resolve/2c31ccd392b367a6637841a143813320a02dff55/qwen-image-2.1-Q2_K.gguf
+  LLM_URL: https://huggingface.co/unsloth/Qwen3-VL-8B-Instruct-GGUF/resolve/b93a7ee713758252c555be4210c00540df954dc2/Qwen3-VL-8B-Instruct-${{ inputs.encoder }}.gguf
+  MMPROJ_URL: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf
+  VAE_URL: https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/0217efd1d9c9452e84f6448903d6e21bfa171ffd/vae/qwen_image_2.1_vae_bf16.safetensors
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Machine
+        run: nproc; free -g; df -h . | tail -1; grep -m1 'model name' /proc/cpuinfo; grep -o -m1 'avx512[a-z]*\|avx2' /proc/cpuinfo | sort -u
+      - name: Models (cached)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: spike-models-${{ inputs.encoder }}-2c31ccd-b93a7ee-f982a07-0217efd
+          enableCrossOsArchive: true
+      - name: Download models
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          for u in "$IMAGE_URL" "$LLM_URL" "$MMPROJ_URL" "$VAE_URL"; do
+            s=$SECONDS; curl -fsSL --retry 5 -o "models/$(basename "$u")" "$u"; echo "$(basename "$u"): $((SECONDS - s)) s"
+          done
+          ls -la models; du -sh models
+      - name: KoboldCpp
+        run: |
+          curl -fsSL --retry 5 -o kcpp "https://github.com/LostRuins/koboldcpp/releases/download/$KCPP/koboldcpp-linux-x64-nocuda"
+          chmod +x kcpp
+      - name: Images
+        run: |
+          m=models; mkdir -p out
+          start=$SECONDS
+          /usr/bin/time -v ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
+            --sdmodel $m/qwen-image-2.1-Q2_K.gguf --sdllm "$m/Qwen3-VL-8B-Instruct-${{ inputs.encoder }}.gguf" \
+            --sdclip1 $m/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf --sdvae $m/qwen_image_2.1_vae_bf16.safetensors \
+            > out/images.log 2> out/images-time.log &
+          pid=$!
+          until curl -fs http://127.0.0.1:5001/api/extra/version > /dev/null; do
+            kill -0 $pid 2>/dev/null || { tail -50 out/images.log; exit 1; }
+            (( SECONDS - start < 1800 )) || { echo "not up after 30 min"; exit 1; }
+            sleep 2
+          done
+          echo "up after $((SECONDS - start)) s"; curl -s http://127.0.0.1:5001/api/extra/version; echo
+          for seed in 1 2; do
+            s=$SECONDS
+            curl -fsS -X POST http://127.0.0.1:5001/sdapi/v1/txt2img -H 'Content-Type: application/json' \
+              -d "{\"prompt\":\"a red fox in the snow\",\"negative_prompt\":\"\",\"width\":320,\"height\":320,\"steps\":${{ inputs.steps }},\"cfg_scale\":2,\"seed\":$seed,\"sampler_name\":\"euler\"}" \
+              -o out/r$seed.json
+            python3 -c 'import json,sys,base64; d=json.load(open(sys.argv[1])); open(sys.argv[2],"wb").write(base64.b64decode(d["images"][0]))' out/r$seed.json out/image$seed.png
+            echo "image $seed: $((SECONDS - s)) s, $(stat -c %s out/image$seed.png) bytes"
+          done
+          kill $pid; wait $pid || true
+          grep -E 'Maximum resident|Elapsed' out/images-time.log
+      - name: Prompt enhance
+        run: |
+          m=models; start=$SECONDS
+          /usr/bin/time -v ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
+            --model "$m/Qwen3-VL-8B-Instruct-${{ inputs.encoder }}.gguf" --mmproj $m/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf \
+            --jinja --contextsize 2048 > out/pe.log 2> out/pe-time.log &
+          pid=$!
+          until curl -fs http://127.0.0.1:5001/api/extra/version > /dev/null; do
+            kill -0 $pid 2>/dev/null || { tail -50 out/pe.log; exit 1; }
+            (( SECONDS - start < 900 )) || { echo "not up after 15 min"; exit 1; }
+            sleep 2
+          done
+          echo "up after $((SECONDS - start)) s"
+          s=$SECONDS
+          curl -fsS http://127.0.0.1:5001/v1/chat/completions -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"Fill the blank with one word: a {animal} in the snow"}],"max_tokens":24,"temperature":0.9}' \
+            | tee out/pe1.json | python3 -c 'import json,sys; print(repr(json.load(sys.stdin)["choices"][0]["message"]["content"]))'
+          echo "text answer: $((SECONDS - s)) s"
+          s=$SECONDS
+          img=$(base64 -w0 out/image1.png)
+          printf '{"messages":[{"role":"user","content":[{"type":"text","text":"Describe this image in one sentence."},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}],"max_tokens":32,"temperature":0.9}' "$img" > out/pe2-req.json
+          curl -fsS http://127.0.0.1:5001/v1/chat/completions -H 'Content-Type: application/json' -d @out/pe2-req.json \
+            | tee out/pe2.json | python3 -c 'import json,sys; print(repr(json.load(sys.stdin)["choices"][0]["message"]["content"]))'
+          echo "image answer: $((SECONDS - s)) s"
+          kill $pid; wait $pid || true
+          grep -E 'Maximum resident|Elapsed' out/pe-time.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-out
+          path: out
