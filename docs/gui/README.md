@@ -85,3 +85,5 @@ size (regenerate it with `scripts/make-gui-gallery.py`).
 | [71-job-info](71-job-info.png) | Projects → Jobs, a run clicked: its details with progress, prompt, the input images labelled `<image1>` / start image, and the settings |
 | [72-review-sweep-button](72-review-sweep-button.png) | Review → Single on a sweep's image: **Sweep r02 contact sheet** in the top bar |
 | [73-promote](73-promote.png) | Promote into project: the new project's name, always asked (the first idea title as the guess) |
+
+**[Gallery](GALLERY.md)**: every screen above, one after another at full size.
