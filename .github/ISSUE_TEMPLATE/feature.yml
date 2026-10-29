@@ -1,0 +1,21 @@
+name: Feature request
+description: A workflow that's awkward, a backend or GPU to support, a missing feature.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The task, and where IncreArt gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you'd like it to work. Sketches, screenshots or examples from other tools are welcome.
+  - type: textarea
+    id: code
+    attributes:
+      label: Already written a change?
+      description: Describe it here, or link a commit on your fork. Pull requests are turned off, but this helps get it made.

@@ -1,0 +1,31 @@
+# IncreArt
+
+> Rust desktop app (egui) that batch-generates and reviews Qwen-Image 2.1 images through local image servers — KoboldCpp or stable-diffusion.cpp's sd-server — with an optional prompt-enhance chat server (Qwen3-VL-8B through KoboldCpp's OpenAI-compatible /v1/chat/completions). Binary: `increart`, built with `cargo build --release -p increart-gui`. Settings: `config.rsn` (RSN format), path from `INCREART_CONFIG` or the OS config folder. Model weights are never redistributed by this project.
+
+Follow the setup guides in order: build, models, one image backend (KoboldCpp recommended; sd-server with ROCm is fastest on AMD), optional prompt enhancer, first-run configuration. Each step lists commands, the expected result and a verify command.
+
+## Setup guides
+
+- [Setup index and hardware paths](docs/setup/README.md): order of the guides; which path by GPU vendor and VRAM
+- [1. Build IncreArt](docs/setup/01-build-increart.md): system packages, Rust ≥ 1.95, build, launch, command-line flags, `INCREART_CONFIG` and config/state locations
+- [2. Models](docs/setup/02-models.md): GGUF files for KoboldCpp, int8 convrot safetensors for sd-server, URLs, sizes, folder layout
+- [3. KoboldCpp](docs/setup/03-koboldcpp.md): release build per GPU, VRAM presets, the setup wizard, what the app runs, verification with curl
+- [4. sd-server](docs/setup/04-sd-server.md): building stable-diffusion.cpp (HIP / Vulkan / CUDA), device names, how the app starts it
+- [5. Prompt enhancer](docs/setup/05-prompt-enhancer.md): Qwen3-VL chat server via KoboldCpp or any OpenAI-compatible server
+- [6. Configure IncreArt](docs/setup/06-configure-increart.md): first run (library, servers), model presets, `config.rsn` fields, annotated examples
+- [7. Troubleshooting](docs/setup/07-troubleshooting.md): error messages from the source with cause and fix
+
+## Design and measurements
+
+- [Design](docs/DESIGN.md): architecture, start-up flow, server presets, KoboldCpp and sd-server integration, prompt enhance, config file, data model
+- [VRAM tiers](docs/vram-tiers.md): the 8/12/16/24/32 GB KoboldCpp presets, measured speed, peak VRAM and pinned RAM
+- [Backend performance](docs/backend-performance.md): why sd-server on ROCm is about twice as fast as KoboldCpp on Vulkan; int8 convrot support
+- [KoboldCpp support notes](docs/todo-kcpp-support.md): KoboldCpp API, limits (prompt length, 4 references), launch flags
+
+## Optional
+
+- [README](README.md): what the app does, screenshots, the example library
+- [Contributing](CONTRIBUTING.md): issues only; pull requests are turned off
+- [GUI screenshots](docs/gui/README.md): every screen, including the library and server wizards
+- [KoboldCpp preset templates](crates/increart-core/kcppt/): the shipped `.kcppt` files with model URLs
+- [Config types](crates/increart-core/src/config.rs): source of truth for `config.rsn`

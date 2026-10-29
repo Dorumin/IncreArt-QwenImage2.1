@@ -23,8 +23,10 @@ RGBA handling are **unmeasured**.
 ## Model and platform support
 
 - Qwen Image 2.1 generation and editing were added in 1.123, with a `.kcppt`
-  template. int8 convrot image models load since 1.118, so the existing
-  ComfyUI files should work through `--sdmodel` / `--sdllm` / `--sdvae`.
+  template. The ComfyUI int8 convrot files **don't work**:
+  KoboldCpp grows to 29 GiB on them and makes no image (2026-10-28, see
+  [backend-performance.md](backend-performance.md)), so the app hides them
+  from KoboldCpp and its presets use the GGUFs.
 - Progress and previews were added in 1.119, along with `/v1/images/edits`.
   The image LoRA limit is 10, and LoRAs can be chosen at runtime.
 - **No ROCm build for Linux.** The official Linux builds are CUDA

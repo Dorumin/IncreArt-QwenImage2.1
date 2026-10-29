@@ -632,6 +632,26 @@ impl Config {
         Ok((config, warnings))
     }
 
+    /// As [`load`](Self::load), but a file that can't be read gives the
+    /// default config, with a copy of the file kept beside it first
+    /// (`config.rsn.unreadable`, or `.unreadable-2` and on if taken), since
+    /// the next save writes the defaults over it.
+    pub fn load_or_default(path: &Path) -> (Config, Vec<String>) {
+        match Config::load(path) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let mut c = Config::default();
+                let mut warnings = vec![format!("settings not loaded ({e}); using defaults")];
+                match keep_unreadable(path) {
+                    Ok(kept) => warnings.push(format!("the unreadable settings are kept in {}", kept.display())),
+                    Err(e) => warnings.push(format!("the unreadable settings couldn't be kept: {e}")),
+                }
+                warnings.extend(c.normalize());
+                (c, warnings)
+            }
+        }
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         rsnfmt::write(path, self)
     }
@@ -689,6 +709,37 @@ impl Config {
 
     pub fn default_resolution(&self) -> Option<&Resolution> {
         self.resolutions.iter().find(|r| r.default).or(self.resolutions.first())
+    }
+}
+
+/// The folder beside the executable that release zips ship the example
+/// library in.
+pub const EXAMPLE_LIBRARY: &str = "Example library";
+
+/// The example library shipped beside the running executable, if any
+/// (offered at startup on first run).
+pub fn bundled_example_library() -> Option<PathBuf> {
+    example_library_in(std::env::current_exe().ok()?.parent()?)
+}
+
+fn example_library_in(dir: &Path) -> Option<PathBuf> {
+    let lib = dir.join(EXAMPLE_LIBRARY);
+    lib.join("library.rsn").is_file().then_some(lib)
+}
+
+/// Copies a config that failed to load to the first free
+/// `<name>.unreadable`, `<name>.unreadable-2`, …; returns where.
+fn keep_unreadable(path: &Path) -> std::io::Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(if n == 1 { ".unreadable".to_string() } else { format!(".unreadable-{n}") });
+        let kept = PathBuf::from(name);
+        if !kept.exists() {
+            fs::copy(path, &kept)?;
+            return Ok(kept);
+        }
+        n += 1;
     }
 }
 
@@ -767,6 +818,33 @@ mod tests {
         assert!(w.iter().any(|w| w.contains("before-chat-presets")), "{w:?}");
         assert_eq!(fs::read_to_string(dir.path().join("config.rsn.before-chat-presets")).unwrap(), old);
         assert_eq!(Config::load(&path).unwrap(), (c, vec![]));
+    }
+
+    #[test]
+    fn the_example_library_is_found_beside_the_app_only_when_it_is_a_library() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(example_library_in(dir.path()), None);
+        let lib = dir.path().join(EXAMPLE_LIBRARY);
+        fs::create_dir(&lib).unwrap();
+        assert_eq!(example_library_in(dir.path()), None, "a folder without library.rsn");
+        fs::write(lib.join("library.rsn"), "").unwrap();
+        assert_eq!(example_library_in(dir.path()), Some(lib));
+    }
+
+    #[test]
+    fn an_unreadable_config_is_kept_before_defaults_are_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.rsn");
+        fs::write(&path, "Config { oops").unwrap();
+        let (c, w) = Config::load_or_default(&path);
+        assert_eq!(c.recipes, builtin_recipes());
+        assert!(w.iter().any(|w| w.contains("config.rsn.unreadable")), "{w:?}");
+        assert_eq!(fs::read_to_string(dir.path().join("config.rsn.unreadable")).unwrap(), "Config { oops");
+        // a second bad file doesn't replace the first copy
+        fs::write(&path, "Config { again").unwrap();
+        Config::load_or_default(&path);
+        assert_eq!(fs::read_to_string(dir.path().join("config.rsn.unreadable")).unwrap(), "Config { oops");
+        assert_eq!(fs::read_to_string(dir.path().join("config.rsn.unreadable-2")).unwrap(), "Config { again");
     }
 
     #[test]

@@ -65,6 +65,7 @@ pub fn library(
             ui.label("No libraries yet. A library is the folder that holds your ideas, projects and images.");
         } else {
             ui.label(RichText::new("Recent").strong());
+            let example = increart_core::config::bundled_example_library();
             ui.add_enabled_ui(!d.busy, |ui| {
                 for (i, path) in recent.iter().enumerate() {
                     let (open, forget) = egui::Sides::new().shrink_left().truncate().spacing(16.0).show(
@@ -84,6 +85,9 @@ pub fn library(
                                     .clicked();
                             if open_now {
                                 ui.label(RichText::new("open now").color(ACCENT_MUTED));
+                            } else if example.as_deref() == Some(std::path::Path::new(path)) {
+                                // shipped beside the app (maybe never opened yet)
+                                ui.label(RichText::new("example").color(ACCENT_MUTED));
                             } else if i == 0 {
                                 ui.label(RichText::new("last used").color(ACCENT_MUTED));
                             }
@@ -1105,8 +1109,8 @@ fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, out: &mut Vec<Msg>) {
             path_edit(ui, &mut new.models_dir, "/path/to/models", PickKind::WizardModels, out);
         });
         ui.weak(
-            "The models go in koboldcpp/ in this folder (about 15–25 GB). Ones already in your model folders or \
-             Hugging Face's cache are linked, not downloaded again.",
+            "The models go in koboldcpp/ in this folder (about 10 GB for 8–12 GB cards, 13 GB for bigger ones). \
+             Ones already in your model folders or Hugging Face's cache are linked, not downloaded again.",
         );
         ui.add_space(10.0);
         ui.horizontal(|ui| {

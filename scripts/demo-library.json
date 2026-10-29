@@ -1,0 +1,277 @@
+{
+  "recipe": "Qwen-Image 2.1 (CFG 2, refs)",
+  "max_source_px": 768,
+  "ideas": [
+    {
+      "key": "wave",
+      "title": "The Great Wave, but with a cat",
+      "text": "Hokusai's wave with a giant tabby surfing the crest. Keep the woodblock look.",
+      "tags": [
+        "ukiyo-e",
+        "cats"
+      ],
+      "images": [
+        "great-wave.jpg"
+      ],
+      "in": "museums",
+      "starred": true
+    },
+    {
+      "key": "jatte",
+      "title": "Grande Jatte today",
+      "text": "Seurat's Sunday afternoon, present day: phones, scooters, a food truck. Still all dots.",
+      "tags": [
+        "pointillism"
+      ],
+      "images": [
+        "grande-jatte.jpg"
+      ],
+      "in": "museums"
+    },
+    {
+      "key": "wheat",
+      "title": "Cypresses as a tapestry?",
+      "text": "Van Gogh's wheat field woven as a wool tapestry, visible threads.",
+      "tags": [
+        "van gogh",
+        "textile"
+      ],
+      "images": [
+        "wheat-field.jpg"
+      ],
+      "in": "inbox"
+    },
+    {
+      "key": "zion",
+      "title": "WPA park poster: Zion",
+      "tags": [
+        "poster",
+        "wpa"
+      ],
+      "images": [
+        "zion-poster.jpg"
+      ],
+      "in": "posters",
+      "starred": true
+    },
+    {
+      "key": "canyon",
+      "title": "WPA park poster: Grand Canyon",
+      "tags": [
+        "poster",
+        "wpa"
+      ],
+      "images": [
+        "grand-canyon-poster.jpg"
+      ],
+      "in": "posters"
+    },
+    {
+      "key": "mars",
+      "title": "National park posters for other planets",
+      "text": "Ranger Naturalist Service posters for Olympus Mons, the rings of Saturn, Europa's ice.",
+      "tags": [
+        "poster",
+        "space"
+      ],
+      "in": "posters",
+      "starred": true
+    },
+    {
+      "key": "moonwalk",
+      "title": "Moonwalk postcard",
+      "text": "Apollo 11 as a cheerful 1960s travel postcard: \"Greetings from the Sea of Tranquility\".",
+      "tags": [
+        "space",
+        "postcard"
+      ],
+      "images": [
+        "moonwalk.jpg"
+      ],
+      "in": "space",
+      "starred": true
+    },
+    {
+      "key": "earthrise",
+      "title": "Earthrise",
+      "tags": [
+        "space"
+      ],
+      "images": [
+        "earthrise.jpg"
+      ],
+      "in": "inbox"
+    },
+    {
+      "key": "liberty",
+      "title": "Photochrom: Statue of Liberty",
+      "tags": [
+        "photochrom",
+        "new york"
+      ],
+      "images": [
+        "liberty-photochrom.jpg"
+      ],
+      "in": "inbox"
+    },
+    {
+      "key": "harbour",
+      "title": "Harbour by lantern light",
+      "text": "This photochrom of Mosman Bay at night: lantern-lit ferries, fireworks over the water.",
+      "tags": [
+        "photochrom",
+        "night"
+      ],
+      "images": [
+        "sydney-harbour.jpg"
+      ],
+      "in": "photos"
+    },
+    {
+      "key": "mika",
+      "title": "Mika the courier",
+      "text": "Original character. Cheerful bicycle courier, short teal hair, yellow raincoat, a small red fox rides in her front basket. Rainy harbour town.",
+      "tags": [
+        "character",
+        "anime"
+      ],
+      "in": "characters",
+      "starred": true
+    },
+    {
+      "key": "keeper",
+      "title": "Lighthouse keeper robot",
+      "text": "A small rusty robot who keeps a lighthouse, polishing the lens at dawn. Storybook watercolour.",
+      "tags": [
+        "character"
+      ],
+      "in": "inbox"
+    },
+    {
+      "key": "neon",
+      "title": "Neon sign of every museum painting",
+      "text": "Too gimmicky.",
+      "in": "discarded"
+    }
+  ],
+  "projects": [
+    {
+      "folder": "museums",
+      "name": "great-wave-cat",
+      "sources": [
+        "wave"
+      ],
+      "refs": [
+        "wave",
+        "wheat"
+      ],
+      "label": "r01",
+      "pe": "rewrite",
+      "width": 800,
+      "height": 544,
+      "seeds": 4,
+      "prompt": "a tabby cat surfing the big wave from <image1>, painted with the swirling brushwork and colours of <image2>",
+      "verdicts": "ggn-"
+    },
+    {
+      "folder": "museums",
+      "name": "grande-jatte-today",
+      "sources": [
+        "jatte"
+      ],
+      "refs": [
+        "jatte"
+      ],
+      "label": "r01",
+      "pe": "rewrite",
+      "width": 800,
+      "height": 544,
+      "seeds": 4,
+      "prompt": "<image1> but in the present day: phones, e-scooters, picnic blankets, a food truck. still all dots",
+      "verdicts": "gbg-"
+    },
+    {
+      "folder": "posters",
+      "name": "olympus-mons",
+      "sources": [
+        "mars",
+        "zion"
+      ],
+      "refs": [
+        "zion",
+        "canyon"
+      ],
+      "label": "r01",
+      "pe": "rewrite",
+      "width": 544,
+      "height": 800,
+      "seeds": 5,
+      "prompt": "a 1930s WPA travel poster like <image1> and <image2>: \"OLYMPUS MONS NATIONAL PARK\", \"RANGER NATURALIST SERVICE\", red volcano, two moons, a tiny rover",
+      "verdicts": "g-b-g"
+    },
+    {
+      "folder": "",
+      "name": "harbour-lanterns",
+      "sources": [
+        "harbour"
+      ],
+      "refs": [
+        "harbour",
+        "liberty"
+      ],
+      "label": "r01",
+      "pe": "blanks",
+      "width": 800,
+      "height": 544,
+      "seeds": 4,
+      "prompt": "The harbour in <image1> at night as a hand-coloured photochrom print, the statue from <image2> standing on the headland, {celebration} over the water, {boats} crossing the bay",
+      "verdicts": "ngb-"
+    },
+    {
+      "folder": "characters",
+      "name": "mika-the-courier",
+      "sources": [
+        "mika"
+      ],
+      "refs": [],
+      "label": "r01",
+      "pe": "rewrite",
+      "width": 800,
+      "height": 544,
+      "seeds": 4,
+      "prompt": "anime illustration of Mika, an original character: cheerful bicycle courier, short teal hair, yellow raincoat, a small red fox in her front basket, rainy harbour town at dusk",
+      "verdicts": "g-n-"
+    },
+    {
+      "folder": "space",
+      "name": "moonwalk-styles",
+      "sources": [
+        "moonwalk"
+      ],
+      "refs": [
+        "moonwalk"
+      ],
+      "label": "r01",
+      "pe": "styles",
+      "width": 672,
+      "height": 672,
+      "seeds": 3,
+      "prompt": "{preset}",
+      "styles": [
+        [
+          "Effortful Modify Style",
+          "Sculpted from"
+        ],
+        [
+          "Effortful Modify Style",
+          "Made of an element"
+        ],
+        [
+          "Effortful Modify Style",
+          "Assembled from objects"
+        ]
+      ],
+      "verdicts": "gn-gb-ng-"
+    }
+  ]
+}

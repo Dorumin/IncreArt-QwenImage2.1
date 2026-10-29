@@ -1,6 +1,7 @@
 //! RSN reading and writing in the library's style: 4-space indentation and
 //! `Option` values written bare (DESIGN.md, File format: RSN).
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
@@ -17,12 +18,18 @@ pub fn to_string<T: Serialize>(value: &T) -> String {
 }
 
 pub fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, rsn::de::Error> {
-    rsn::from_str(text)
+    rsn::from_str(&lf(text))
 }
 
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).at(path)?;
+    let text = lf(&fs::read_to_string(path).at(path)?).into_owned();
     rsn::from_str(&text).map_err(|e| Error::format(path, describe(&text, &e)))
+}
+
+/// `text` with CRLF line ends turned into LF: rsn rejects a `\r`, and files
+/// saved on Windows (or checked out there) have them.
+fn lf(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') { Cow::Owned(text.replace("\r\n", "\n")) } else { Cow::Borrowed(text) }
 }
 
 /// Writes `value` atomically (temporary file + rename).

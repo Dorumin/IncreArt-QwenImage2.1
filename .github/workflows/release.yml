@@ -1,0 +1,79 @@
+# On a version tag (v*), builds IncreArt for Linux, Windows and macOS and
+# publishes one portable zip per platform to that tag's release. Each zip
+# holds the app, the README and licence, and the example library (from the
+# `example-library` release; see scripts/package-demo-library.sh), which the
+# app offers in its startup list on first run.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p increart-gui
+      - name: Example library
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Windows: links as copies (unzipping there can't make symlinks)
+          if [[ $RUNNER_OS == Windows ]]; then
+            gh release download example-library --pattern increart-example-library-windows.zip --dir dl
+            7z x -y -odl dl/increart-example-library-windows.zip > /dev/null
+          else
+            gh release download example-library --pattern increart-example-library.zip --dir dl
+            unzip -q dl/increart-example-library.zip -d dl
+          fi
+          test -f "dl/Example library/library.rsn"
+      - name: Package
+        id: package
+        run: |
+          name="increart-${TAG}-${{ matrix.platform }}"
+          mkdir -p "stage/$name"
+          exe=increart${{ runner.os == 'Windows' && '.exe' || '' }}
+          cp "target/release/$exe" README.md LICENSE "stage/$name/"
+          mv "dl/Example library" "stage/$name/"
+          # zip keeps the executable bit and (-y) the library's symlinks
+          if [[ $RUNNER_OS == Windows ]]; then (cd stage && 7z a -tzip "../$name.zip" "$name" > /dev/null)
+          else (cd stage && zip -qr -y -X "../$name.zip" "$name"); fi
+          echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes || true
+          gh release upload "$TAG" --clobber "${{ steps.package.outputs.zip }}"

@@ -1,0 +1,58 @@
+name: Bug report
+description: Something broke, looked wrong, or was slower than it should be.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: IncreArt version or commit
+      placeholder: e.g. 0.1.0, or the commit you built
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04, Windows 11
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU(s) and VRAM
+      placeholder: e.g. 2× Radeon AI PRO R9700 32 GB, RTX 4070 12 GB
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Image backend
+      options:
+        - sd-server (stable-diffusion.cpp)
+        - KoboldCpp
+        - Both
+        - Not relevant
+    validations:
+      required: true
+  - type: input
+    id: backend-version
+    attributes:
+      label: Backend version and build
+      placeholder: e.g. KoboldCpp 1.123.1 nocuda (Vulkan); sd.cpp fd21ecf HIP
+  - type: textarea
+    id: log
+    attributes:
+      label: Server log
+      description: From the app's Logs view, trimmed to the part around the problem. Remove anything private.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or anything else

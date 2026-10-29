@@ -1,0 +1,2 @@
+# rsn files are parsed (and embedded with include_str!) as LF.
+*.rsn text eol=lf

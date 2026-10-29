@@ -11,6 +11,9 @@
 //! accounting (`/proc/<pid>/fdinfo`, that card only), and host RAM their
 //! resident memory, so other users of the cards don't count and two cases
 //! on different cards can run at once.
+//!
+//! The model and binary paths below default to the development machine's;
+//! each is overridden by the environment variable named beside it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,11 +28,22 @@ use increart_core::sdserver::{Client, JobStatus, ModelKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const MODELS: &str = "/mnt/storage/comfy-new/ComfyUI/models";
-const KOBOLDCPP: &str = "/workspace/local/koboldcpp/koboldcpp";
-const REF: &str = "/mnt/storage/increart_library/input_images/2026.10.24-22.01-0000.png";
-const PE_MODEL: &str = "/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96/Qwen3VL-8B-Instruct-Q4_K_M.gguf";
-const PE_MMPROJ: &str = "/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-F16.gguf";
+const MODELS: (&str, &str) = ("BENCH_MODELS", "/mnt/storage/comfy-new/ComfyUI/models");
+const KOBOLDCPP: (&str, &str) = ("BENCH_KOBOLDCPP", "/workspace/local/koboldcpp/koboldcpp");
+const REF: (&str, &str) = ("BENCH_REF", "/mnt/storage/increart_library/input_images/2026.10.24-22.01-0000.png");
+const PE_MODEL: (&str, &str) = (
+    "BENCH_PE_MODEL",
+    "/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+);
+const PE_MMPROJ: (&str, &str) = (
+    "BENCH_PE_MMPROJ",
+    "/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+);
+/// A path constant: its environment variable when set, else the default.
+fn path((var, default): (&str, &str)) -> String {
+    std::env::var(var).unwrap_or_else(|_| default.into())
+}
+
 const PROMPT: &str = "Turn this into a winter scene: the same three mime women, same poses and outfits, \
     now wearing red scarves and standing in falling snow in a quiet Paris street at dusk, warm lamp light.";
 
@@ -215,7 +229,7 @@ fn gib(b: u64) -> f64 {
 
 /// The reference image at 1024×1024 (1 MP), as PNG.
 fn reference() -> Vec<u8> {
-    let img = image::open(REF).expect("reference image").to_rgb8();
+    let img = image::open(path(REF)).expect("reference image").to_rgb8();
     let img = image::imageops::resize(&img, 1024, 1024, image::imageops::FilterType::Lanczos3);
     let mut png = vec![];
     image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
@@ -292,7 +306,7 @@ fn median(v: &[f64]) -> f64 {
 }
 
 fn open_image(c: &ImageCase, logs: &Path) -> Result<(increart_core::launcher::ServerProcess, f64), String> {
-    let mut shared = SdServerConfig { model_dirs: vec![MODELS.into()], ..Default::default() };
+    let mut shared = SdServerConfig { model_dirs: vec![path(MODELS)], ..Default::default() };
     let server = match c.server.as_str() {
         "sd" => {
             shared.binary = c.binary.clone();
@@ -308,14 +322,14 @@ fn open_image(c: &ImageCase, logs: &Path) -> Result<(increart_core::launcher::Se
         _ => ServerConfig::Kobold(KoboldServer {
             name: format!("bench{}", c.port),
             run: KoboldRun::Start {
-                binary: KOBOLDCPP.into(),
+                binary: path(KOBOLDCPP),
                 config: String::new(),
                 host: "127.0.0.1".into(),
                 port: c.port,
                 device: PeDevice::Gpu { devices: vec![c.device.parse().unwrap()], runtime: Default::default() },
                 args: c.args.clone(),
             },
-            chat: c.chat.then(|| KoboldChat { model: PE_MODEL.into(), mmproj: PE_MMPROJ.into(), context: 8192 }),
+            chat: c.chat.then(|| KoboldChat { model: path(PE_MODEL), mmproj: path(PE_MMPROJ), context: 8192 }),
             swap: false,
         }),
     };
@@ -330,9 +344,9 @@ fn open_pe(c: &PeCase, logs: &Path) -> Result<(pe::PeProcess, f64), String> {
         PeRun::Connect { url: format!("http://127.0.0.1:{}", c.port) }
     } else {
         PeRun::KoboldCpp {
-            binary: KOBOLDCPP.into(),
-            model: PE_MODEL.into(),
-            mmproj: PE_MMPROJ.into(),
+            binary: path(KOBOLDCPP),
+            model: path(PE_MODEL),
+            mmproj: path(PE_MMPROJ),
             config: String::new(),
             host: "127.0.0.1".into(),
             port: c.port,
@@ -386,7 +400,7 @@ fn main() {
     let logs = out.join("logs").join(&case.id);
     std::fs::create_dir_all(&logs).unwrap();
     let reference = reference();
-    let pe_image = pe::image_for_request(Path::new(REF), pe::TEXT_IMAGE_SIZE).unwrap();
+    let pe_image = pe::image_for_request(Path::new(&path(REF)), pe::TEXT_IMAGE_SIZE).unwrap();
 
     let mem = Arc::new(Mutex::new(Mem::default()));
     mem.lock().unwrap().base_card = card_mem(case.card).0;

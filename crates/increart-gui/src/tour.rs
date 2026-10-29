@@ -10,7 +10,7 @@ use increart_core::config::SheetRows;
 use increart_core::{ImageRef, Tree};
 use increart_gui_core::{
     AppState, IdeaDraft, InboxTab, LibraryDialog, LibraryWizard, Msg, OutputSource, OutputTab, Phase, ProjectsTab,
-    ReviewView, ServerDialog, Tab, counts,
+    ReviewView, ServerDialog, Tab, ZoomGrid, counts,
 };
 
 use crate::textures::Textures;
@@ -172,6 +172,14 @@ const EXTRA_SCENES: &[&str] = &[
     "98g-presets-group",
     "98h-server-logs",
     "99-quit-with-unsaved-draft",
+    // the README's shots, on the demo library (scripts/demo-library.json),
+    // after 02-server-dialog and 03-idea-inbox-grid
+    "R1-review-grid",
+    "R2-review-compare",
+    "R3-generate",
+    "R4-output-lineage",
+    "R5-input-library",
+    "R6-projects-grid",
 ];
 
 /// The tour library's fox-cafe project (clients/acme/fox-cafe).
@@ -1314,6 +1322,48 @@ impl Tour {
                 }
                 v
             }
+            "R1-review-grid" => vec![
+                Msg::ContinueWithoutServers,
+                // the default tile sizes, whatever the config has
+                Msg::GridZoom { grid: ZoomGrid::Review, size: ZoomGrid::Review.default_size(), save: false },
+                Msg::GridZoom { grid: ZoomGrid::Output, size: ZoomGrid::Output.default_size(), save: false },
+                Msg::Tab(Tab::Review),
+                Msg::ReviewScope(None),
+                Msg::ReviewView(ReviewView::Grid),
+            ],
+            "R2-review-compare" => vec![Msg::ReviewView(ReviewView::Single), Msg::ReviewCursor(0), Msg::Compare],
+            "R3-generate" => {
+                let mut v = vec![Msg::Compare, Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
+                if let Some(p) = st.index.projects.iter().find(|p| p.name() == "olympus-mons") {
+                    v.push(Msg::SelectProject(p.project.id.clone()));
+                    if let Some(r) = p.runs.first() {
+                        v.push(Msg::RunInGenerate(r.id.clone()));
+                    }
+                }
+                v
+            }
+            "R4-output-lineage" => {
+                let mut v = vec![
+                    Msg::Tab(Tab::OutputLibrary),
+                    Msg::OutputTab(OutputTab::Grid),
+                    Msg::OutputSource(OutputSource::AllProjects),
+                ];
+                let img = st
+                    .index
+                    .projects
+                    .iter()
+                    .find(|p| p.name() == "great-wave-cat")
+                    .and_then(|p| p.outputs.iter().find(|o| o.verdict == Some(increart_core::Verdict::Good)))
+                    .map(|o| o.image.clone());
+                v.push(Msg::OutputSelect(img));
+                v
+            }
+            "R5-input-library" => vec![Msg::Tab(Tab::InputLibrary), Msg::LibFolder(None)],
+            "R6-projects-grid" => vec![
+                Msg::Tab(Tab::Projects),
+                Msg::ProjectsTab(ProjectsTab::Grid),
+                Msg::SelectProjectFolder(Some(PathBuf::new())),
+            ],
             _ => vec![],
         }
     }
@@ -1405,8 +1455,8 @@ impl Tour {
                 Msg::CancelNewProject,
             ]);
             out.extend(self.msgs(name, st));
-            if name.starts_with("54") || name == "02c-koboldcpp-entry" {
-                // the virtual display's pointer sits mid-dialog: no tooltip over it
+            if name.starts_with("54") || name.starts_with('R') || name == "02c-koboldcpp-entry" {
+                // the virtual display's pointer sits mid-window: no tooltip over it
                 self.inject = vec![egui::Event::PointerGone];
             }
             return;

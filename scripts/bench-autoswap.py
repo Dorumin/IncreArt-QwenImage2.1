@@ -8,8 +8,9 @@ Usage: scripts/bench-autoswap.py ID CARD OUT_DIR -- KOBOLDCPP_ARGS...
 the port, and admin, router and autoswap unless a template is given)."""
 import base64, json, os, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.request
 
-KOBOLDCPP = "/workspace/local/koboldcpp/koboldcpp"
-REF = "/mnt/storage/increart_library/input_images/2026.10.24-22.01-0000.png"
+# override with the environment variables of the same name
+KOBOLDCPP = os.environ.get("KOBOLDCPP", "/workspace/local/koboldcpp/koboldcpp")
+REF = os.environ.get("REF", "/mnt/storage/increart_library/input_images/2026.10.24-22.01-0000.png")
 PROMPT = ("Turn this into a winter scene: the same three mime women, same poses and outfits, "
           "now wearing red scarves and standing in falling snow in a quiet Paris street at dusk, warm lamp light.")
 REWRITE = ("You rewrite image-editing prompts. Given the user's prompt and the reference image, "

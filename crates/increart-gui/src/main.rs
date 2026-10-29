@@ -84,18 +84,20 @@ fn main() -> eframe::Result {
         std::process::exit(2);
     });
     let config_path = std::env::var_os("INCREART_CONFIG").map(PathBuf::from).or_else(Config::default_path);
+    let first_run = config_path.as_ref().is_none_or(|p| !p.exists());
     let (mut config, warnings) = match &config_path {
-        Some(p) => Config::load(p).unwrap_or_else(|e| {
-            let mut c = Config::default();
-            let w = c.normalize();
-            (c, [vec![format!("settings not loaded ({e}); using defaults")], w].concat())
-        }),
+        Some(p) => Config::load_or_default(p),
         None => {
             let mut c = Config::default();
             let w = c.normalize();
             (c, w)
         }
     };
+    // a release zip's example library: in the startup list on first run
+    // (once removed from it, it stays removed)
+    if first_run && let Some(lib) = increart_core::config::bundled_example_library() {
+        config.add_recent_library(lib.to_string_lossy().into_owned());
+    }
     // KoboldCpp named nowhere: found where it usually is (saved with the
     // settings' next save)
     if config.known_koboldcpp().is_none()

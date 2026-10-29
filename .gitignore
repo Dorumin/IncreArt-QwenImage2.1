@@ -3,3 +3,4 @@
 /local/
 /.Trash-*/
 *.whl
+__pycache__/

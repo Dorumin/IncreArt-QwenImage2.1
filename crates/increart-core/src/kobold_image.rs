@@ -1045,14 +1045,8 @@ mod tests {
         };
         let flags =
             model_flags(&key(&[("diffusion_model", "dm/d.gguf"), ("vae", "vae/v.safetensors")]), &dirs).unwrap();
-        let d = dir.path().display();
-        assert_eq!(
-            flags,
-            [
-                ("--sdmodel".to_string(), format!("{d}/dm/d.gguf")),
-                ("--sdvae".to_string(), format!("{d}/vae/v.safetensors"))
-            ]
-        );
+        let d = |rel| dir.path().join(rel).to_string_lossy().into_owned();
+        assert_eq!(flags, [("--sdmodel".to_string(), d("dm/d.gguf")), ("--sdvae".to_string(), d("vae/v.safetensors"))]);
         assert!(
             model_flags(&key(&[("diffusion_model", "dm/x.gguf")]), &dirs)
                 .unwrap_err()

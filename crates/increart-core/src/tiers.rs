@@ -905,7 +905,8 @@ mod tests {
         let p = plan_auto(&[gpu(1, 11.9)], Layout::PeOwnCard).unwrap();
         let [ServerConfig::Kobold(k)] = &p.servers[..] else { panic!("{:?}", p.servers) };
         assert!(k.swap);
-        assert_eq!(k.chat.as_ref().unwrap().model, "/m/koboldcpp/Qwen3VL-8B-Instruct-Q4_K_M.gguf");
+        let chat = Path::new("/m").join("koboldcpp/Qwen3VL-8B-Instruct-Q4_K_M.gguf");
+        assert_eq!(k.chat.as_ref().unwrap().model, chat.to_string_lossy());
         let KoboldRun::Start { port, device, args, .. } = &k.run else { panic!() };
         assert_eq!((*port, device), (5001, &PeDevice::Gpu { devices: vec![1], runtime: GpuRuntime::Vulkan }));
         assert!(args.join(" ").ends_with("--sdvramlimit 8192"));

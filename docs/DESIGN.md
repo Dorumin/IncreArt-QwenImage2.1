@@ -1,8 +1,8 @@
 # IncreArt — Qwen-Image 2.1 batch generation & review
 
-Status: **draft**. Architecture deliberately mirrors IncreMusic-Yue2
-(`~/Programming/incremusic-yue2`); read its `docs/DESIGN.md` for the parts
-described here as "same as Yue2".
+Status: **draft**. Architecture deliberately mirrors IncreMusic-Yue2, a
+sibling project for music generation; sections marked "same as Yue2" follow
+its design.
 
 Licence: GUI source is MIT. sd.cpp is MIT; model weights carry their own
 licences and are never redistributed by this project.
@@ -107,7 +107,7 @@ start-up (see Startup: servers). Device names come from `sd-server
 `Vulkan0`):
 
 ```
-sd-server --listen-port 1234 --backend ROCm0 --model-dir /mnt/storage/comfy-new/ComfyUI/models --fa --conditioning-cache-size 32
+sd-server --listen-port 1234 --backend ROCm0 --model-dir /path/to/ComfyUI/models --fa --conditioning-cache-size 32
 sd-server --listen-port 1235 --backend ROCm1 --model-dir ...
 ```
 
@@ -118,7 +118,11 @@ by itself, unless the command line says so (see Startup: command line). The dial
 `config.rsn`, most recent first, at most 10; the last used one tagged "last used",
 the tag in a muted accent colour): a click opens one, × removes it from the list
 (the folder is left alone). With none yet it says what a library is.
-Opening a library moves it to the top of the list. While it opens, a
+Opening a library moves it to the top of the list. Release zips ship an
+example library in an `Example library` folder beside the executable; on
+first run (no `config.rsn` yet) it is put in the list, tagged "example" in
+place of "last used", so it is the main button. Removed with ×, it stays
+removed. While it opens, a
 progress bar shows under the buttons (reading every project, run and idea:
 under a second, about 1 s on a cold disk).
 The bottom row's main button names the last used one, **Open
@@ -324,7 +328,7 @@ asks among them):
   server. It lists the presets' chat servers (one per process) with
   **None**, the one in use ticked, so prompt enhance can go on without any
   sd-server; **Continue** or **Cancel**. Continuing without from the main
-  window by other means (the command line's `--servers none` aside, which
+  window by other means (the command line's `--no-servers` aside, which
   has none in use yet) keeps the chat server in use. The first
   Queue of a session with no server (and none starting) warns that the run
   will only wait, with **Set up servers…**, **Queue anyway** and **Cancel**;
@@ -457,7 +461,7 @@ work the same.
 Kobold(KoboldServer {
     name: "kcpp0",
     run: Start {
-        binary: "/workspace/local/koboldcpp/koboldcpp",  // or "python3 …/koboldcpp.py"
+        binary: "/opt/koboldcpp/koboldcpp",  // or "python3 …/koboldcpp.py"
         // config: "…/qwen-image.kcpps",  // from KoboldCpp's launcher; what follows goes over it
         port: 5001,
         device: Gpu { devices: [1] },     // as for prompt enhance (runtime: Vulkan unless set); missing: KoboldCpp's choice
@@ -562,21 +566,26 @@ API switch. The documented format is:
 
 ## Prompt rewriting
 
-Qwen ships two fine-tuned Qwen3.5-9B prompt-enhancer (PE) models: one for
-text-to-image and one for edit (i2i). The i2i one is already present:
-`text_encoders/qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors`.
+Prompt enhance (PE) runs **Qwen3-VL-8B-Instruct** (GGUF: `Q4_K_M` plus the
+`Q8_0` mmproj for vision) in **KoboldCpp**, through its OpenAI-compatible
+`/v1/chat/completions`. It's the same model the image presets use as their
+text encoder, so one download serves both. Any other OpenAI-compatible chat
+server can be connected instead (`Connect`).
 
-- sd-server cannot run chat models, so rewriting is a **separate, optional
-  service**: an OpenAI-compatible chat endpoint (`/v1/chat/completions`).
-  llama.cpp's `llama-server` is the default choice. It needs GGUF weights,
-  because the ComfyUI int8_convrot safetensors file can't be used directly.
-  The T2I PE model, and GGUFs for both, still need to be obtained.
-- The PE system prompts come from the official Qwen-Image 2.1 repo and are
-  stored in config, not hard-coded.
-- GPU placement: the PE server runs on demand rather than permanently. It
-  shares a GPU with an sd-server, or runs on CPU, because both GPUs are busy
-  during batches. Rewriting is a short, interactive step, so CPU is
-  acceptable.
+- sd-server cannot run chat models, so PE is a **separate, optional
+  service**: a chat server entry in a server preset (see PE server and
+  requests below). The app starts it on demand (or when the preset opens),
+  or connects to one already running.
+- Qwen also ships fine-tuned Qwen3.5-9B prompt-enhancer models for
+  Qwen-Image 2.1 (text-to-image and edit). They aren't used yet; PE runs
+  the general Qwen3-VL model with IncreArt's own system prompts (see Open
+  questions).
+- The system prompts are built in (`pe.rs`) and can be overridden in
+  config, per job.
+- GPU placement: the chat server runs on a GPU of its own, shares one with
+  an image server (KoboldCpp's swap mode takes turns on cards too small for
+  both, docs/vram-tiers.md), or runs on CPU. Rewriting is a short,
+  interactive step, so CPU is acceptable.
 - Where it's used:
   - Idea inbox / input library: `W` (or Rewrite in a card's menu) queues the
     idea for the PE server; rewriting is asynchronous (seconds to a minute,
@@ -588,8 +597,7 @@ text-to-image and one for edit (i2i). The i2i one is already present:
     **Reject** drops it. Card right-click menus offer **Accept all ready
     rewrites (N)**. The top bar's PE status shows the server state, with the
     queue in its tooltip; clicking it opens the server status (the
-    **Servers** modal), which has a Prompt enhance section. Until PE is
-    built that section says it isn't connected and why.
+    **Servers** modal), which has a Prompt enhance section.
   - New idea form: **Rewrite with PE** suggests a rewrite of the draft, to
     use as the text, keep as a variant, or discard.
   - Generate panel: a **Rewrite** button (T2I or i2i model, depending on
@@ -616,10 +624,10 @@ rewrites).
       Chat(PeServer {
           name: "Qwen3-VL 8B (GPU)",
           run: KoboldCpp {
-              binary: "/workspace/local/koboldcpp/koboldcpp",  // or a command line: "python3 /opt/koboldcpp/koboldcpp.py"
+              binary: "/opt/koboldcpp/koboldcpp",  // or a command line: "python3 /opt/koboldcpp/koboldcpp.py"
               // config: "…/qwen3vl.kcpps",  // settings saved from KoboldCpp's launcher; what's below goes over it
               model: "…/Qwen3VL-8B-Instruct-Q4_K_M.gguf",  // may be left out with a config
-              mmproj: "…/mmproj-Qwen3VL-8B-Instruct-F16.gguf",  // vision; empty: text only
+              mmproj: "…/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf",  // vision; empty: text only
               host: "127.0.0.1",
               port: 1240,
               device: Gpu { devices: [1] },  // or Cpu { threads: 16 }; missing: Auto (KoboldCpp's choice)
@@ -889,8 +897,8 @@ Config {
     ],
     last_preset: "Both GPUs",
     sdserver: SdServer {
-        binary: "/mnt/storage/sdcpp/build-hip/bin/sd-server",
-        model_dirs: ["/mnt/storage/comfy-new/ComfyUI/models"],
+        binary: "/opt/sdcpp/build-hip/bin/sd-server",
+        model_dirs: ["/path/to/ComfyUI/models"],
         args: ["--fa", "--conditioning-cache-size", "32"],
         preview: "none",
         commit: "fd21ecf",
@@ -1423,7 +1431,7 @@ costs ~4% speed and frees ~21 GiB: see Measurements so far).
 ## Filesystem layout
 
 ```
-<library_root>/                       e.g. /mnt/storage/sdcpp/increart_lib
+<library_root>/                       e.g. ~/IncreArt
   library.rsn                         format version, link mode (see Links), store format
   library.lock                        held while the app has the library open
   input_images/<image-id>.png         input image store (PNG or .webp, see Image stores)

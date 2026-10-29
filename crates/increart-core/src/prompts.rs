@@ -995,6 +995,12 @@ mod tests {
     }
 
     #[test]
+    fn the_defaults_read_with_crlf_line_ends() {
+        let crlf: PromptPresets = rsnfmt::from_str(&DEFAULTS.replace('\n', "\r\n")).unwrap();
+        assert_eq!(crlf.count(), builtin().count());
+    }
+
+    #[test]
     fn builtin_set() {
         let p = builtin();
         assert_eq!(p.tasks.len(), 11);

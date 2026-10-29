@@ -5,8 +5,9 @@
 set -u
 cd "$(dirname "$0")/.."
 OUT=tmp/bench-tiers
-HUB=/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96
-G=/mnt/storage/huggingface/gguf
+# HUB: the Qwen3-VL GGUF folder; G: the Qwen-Image GGUF folder
+HUB=${HUB:-/mnt/storage/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/f982a07559d4a2f6c8744d840bf6fccab30eea96}
+G=${G:-/mnt/storage/huggingface/gguf}
 models() { printf '{"diffusion_model":"%s/qwen_image_2.1-%s.gguf","llm":"%s/Qwen3VL-8B-Instruct-Q4_K_M.gguf","clip_l":"%s/mmproj-Qwen3VL-8B-Instruct-F16.gguf"}' "$G" "$1" "$HUB" "$HUB"; }
 while IFS='|' read -r id card quant args extra; do
     [ -z "$id" ] && continue

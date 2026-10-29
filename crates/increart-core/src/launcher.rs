@@ -72,20 +72,42 @@ impl Drop for ServerProcess {
 /// The command line for a `Start` server (empty for `Connect`).
 pub fn command_args(server: &ServerConfig, shared: &SdServerConfig) -> Vec<String> {
     let ServerConfig::Start { host, port, device, args: own, .. } = server else { return vec![] };
-    let mut args: Vec<String> = vec![
-        "--listen-ip".into(),
-        host.clone(),
-        "--listen-port".into(),
-        port.to_string(),
-        "--backend".into(),
-        device.clone(),
-    ];
+    let backend = match visible_device(device) {
+        Some((_, prefix, _)) => format!("{prefix}0"),
+        None => device.clone(),
+    };
+    let mut args: Vec<String> =
+        vec!["--listen-ip".into(), host.clone(), "--listen-port".into(), port.to_string(), "--backend".into(), backend];
     for dir in &shared.model_dirs {
         args.extend(["--model-dir".into(), dir.clone()]);
     }
     args.extend(shared.args.iter().cloned());
     args.extend(own.iter().cloned());
     args
+}
+
+/// For a ROCm or CUDA `--backend` device: the variable that hides the other
+/// GPUs from sd-server, the device's prefix and its number. Otherwise every
+/// server opens every GPU, and one GPU's hung firmware stalls them all (each
+/// memory map waits ~2 s on its TLB flush).
+fn visible_device(device: &str) -> Option<(&'static str, &str, &str)> {
+    let split = device.find(|c: char| c.is_ascii_digit())?;
+    let (prefix, n) = device.split_at(split);
+    if !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let var = match prefix.to_lowercase().as_str() {
+        "rocm" => "HIP_VISIBLE_DEVICES",
+        "cuda" => "CUDA_VISIBLE_DEVICES",
+        _ => return None,
+    };
+    Some((var, prefix, n))
+}
+
+/// The environment for [`command_args`].
+pub fn command_env(server: &ServerConfig) -> Vec<(String, String)> {
+    let ServerConfig::Start { device, .. } = server else { return vec![] };
+    visible_device(device).map(|(var, _, n)| vec![(var.into(), n.into())]).unwrap_or_default()
 }
 
 /// Opens one server of the chosen preset. `Connect` checks that it answers.
@@ -134,7 +156,11 @@ pub fn open_cancellable(
     let out = OpenOptions::new().create(true).append(true).open(&log)?;
     let start = out.metadata()?.len();
     let mut cmd = Command::new(&shared.binary);
-    cmd.args(command_args(server, shared)).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
+    cmd.args(command_args(server, shared))
+        .envs(command_env(server))
+        .stdin(Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(out);
     crate::process::background(&mut cmd, false);
     let child = if shared.leave_running { cmd.spawn() } else { crate::process::spawn_with_app(cmd) }
         .map_err(|source| LaunchError::Spawn { name: name.clone(), binary: shared.binary.clone(), source })?;
@@ -344,8 +370,18 @@ mod tests {
         let shared = SdServerConfig { model_dirs: vec!["/m".into()], ..Default::default() };
         assert_eq!(
             command_args(&server, &shared).join(" "),
-            "--listen-ip 127.0.0.1 --listen-port 1235 --backend ROCm1 --model-dir /m --fa --conditioning-cache-size 32 --offload-to-cpu"
+            "--listen-ip 127.0.0.1 --listen-port 1235 --backend ROCm0 --model-dir /m --fa --conditioning-cache-size 32 --offload-to-cpu"
         );
+        assert_eq!(command_env(&server), vec![("HIP_VISIBLE_DEVICES".to_string(), "1".to_string())]);
+        let vulkan = ServerConfig::Start {
+            name: "v".into(),
+            host: "127.0.0.1".into(),
+            port: 1236,
+            device: "Vulkan1".into(),
+            args: vec![],
+        };
+        assert!(command_args(&vulkan, &shared).join(" ").contains("--backend Vulkan1"));
+        assert!(command_env(&vulkan).is_empty());
         let remote = ServerConfig::Connect { name: "box".into(), url: "http://h:1".into(), device: String::new() };
         assert!(command_args(&remote, &shared).is_empty());
     }

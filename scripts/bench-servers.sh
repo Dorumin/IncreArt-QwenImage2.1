@@ -17,8 +17,9 @@ OUT=${1:-tmp/bench-servers}
 mkdir -p "$OUT"
 cargo build -q --release -p increart-core --example bench
 BENCH=target/release/examples/bench
-HIP=/mnt/storage/sdcpp/build-hip/bin/sd-server
-VK=/mnt/storage/sdcpp/build-vulkan/bin/sd-server
+SDCPP_ROOT=${SDCPP_ROOT:-/mnt/storage/sdcpp}
+HIP=$SDCPP_ROOT/build-hip/bin/sd-server
+VK=$SDCPP_ROOT/build-vulkan/bin/sd-server
 CACHE='"--conditioning-cache-size","32"'
 
 # card → sd-server HIP / Vulkan device, KoboldCpp Vulkan number
