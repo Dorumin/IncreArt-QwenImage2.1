@@ -11,6 +11,10 @@
 //! `INCREART_IT_MODELS` holds the four files named below.
 //! `INCREART_IT_VISION=0` leaves the vision projector out of image
 //! generation (less memory; text-to-image doesn't need it).
+//! `INCREART_IT_IMAGES=0` starts and stops the image server but generates
+//! nothing, so the image model isn't loaded and there's no image to
+//! describe (macOS runners: KoboldCpp's image generation uses Metal even
+//! with `--usecpu`, and crashes on their virtual GPU).
 //! `INCREART_IT_OUT`, if set, gets the servers' logs afterwards, failed or
 //! not.
 
@@ -59,12 +63,17 @@ impl App {
     }
 
     /// Feeds the runtime's messages back until `done` (false: timed out).
+    /// An error shown to the user fails the test at once: the app may
+    /// retry what failed until the limit.
+    #[track_caller]
     fn pump(&mut self, limit: Duration, done: impl Fn(&AppState) -> bool) -> bool {
         let end = Instant::now() + limit;
         while Instant::now() < end {
             for m in self.rt.wait(Duration::from_millis(50)) {
                 self.send(m);
             }
+            let errors = self.errors();
+            assert!(errors.is_empty(), "{errors:?}");
             if done(&self.state) {
                 return true;
             }
@@ -85,7 +94,7 @@ impl App {
     fn pe_answer(&mut self, target: PeTarget) -> String {
         let t = Instant::now();
         self.send(Msg::PeRewrite(target));
-        let answered = self.pump(Duration::from_secs(900), |s| {
+        let answered = self.pump(Duration::from_secs(300), |s| {
             s.pe.text.as_ref().is_some_and(|t| t.waiting.is_none() && (!t.text.is_empty() || t.error.is_some()))
         });
         let text = self.state.pe.text.clone();
@@ -134,6 +143,8 @@ fn config(kcpp: &str, models: &Path, vision: bool) -> Config {
         flow_shift: None,
         custom_sigmas: vec![],
     }];
+    // KoboldCpp's own choice is half the CPUs, one on a macOS runner
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
     config.sdserver.model_dirs = vec![models.to_string_lossy().into_owned()];
     config.server_presets = vec![ServerPreset {
         name: "CPU".into(),
@@ -145,7 +156,7 @@ fn config(kcpp: &str, models: &Path, vision: bool) -> Config {
                     config: String::new(),
                     host: "127.0.0.1".into(),
                     port: IMAGE_PORT,
-                    device: PeDevice::Cpu { threads: 0 },
+                    device: PeDevice::Cpu { threads },
                     args: vec![],
                 },
                 chat: None,
@@ -162,7 +173,7 @@ fn config(kcpp: &str, models: &Path, vision: bool) -> Config {
                     config: String::new(),
                     host: "127.0.0.1".into(),
                     port: CHAT_PORT,
-                    device: PeDevice::Cpu { threads: 0 },
+                    device: PeDevice::Cpu { threads },
                     context: 2048,
                     args: vec![],
                 },
@@ -183,6 +194,7 @@ fn images_cancel_and_prompt_enhance() {
         assert!(models.join(f).is_file(), "{} missing", models.join(f).display());
     }
     let vision = std::env::var("INCREART_IT_VISION").map_or(true, |v| v != "0");
+    let images = std::env::var("INCREART_IT_IMAGES").map_or(true, |v| v != "0");
     let _logs = KeepLogs;
     assert!(!listening(IMAGE_PORT) && !listening(CHAT_PORT), "the test's ports are taken");
 
@@ -197,12 +209,12 @@ fn images_cancel_and_prompt_enhance() {
     app.send(Msg::CreateLibrary);
     assert!(app.pump(Duration::from_secs(60), |s| s.library.is_some()), "no library: {:?}", app.errors());
     app.send(Msg::OpenPresetNow(0));
-    let up = app.pump(Duration::from_secs(600), |s| s.engine_running);
+    let up = app.pump(Duration::from_secs(120), |s| s.engine_running);
     assert!(up, "KoboldCpp not up: {:?} / {:?}", app.state.servers, app.errors());
     assert!(listening(IMAGE_PORT));
     app.log(&format!("KoboldCpp up: {:?}", app.state.servers.iter().map(|s| &s.state).collect::<Vec<_>>()));
 
-    // ---- two images
+    // ---- a project to generate in
     app.send(Msg::NewProject(PathBuf::new()));
     app.send(Msg::CommitRename);
     assert!(app.pump(Duration::from_secs(30), |s| s.project.is_some() && s.saving == 0), "no project");
@@ -210,44 +222,7 @@ fn images_cancel_and_prompt_enhance() {
     app.send(Msg::Tab(Tab::Projects));
     app.send(Msg::ProjectsTab(ProjectsTab::Generate));
     app.send(Msg::SelectProject(project.clone()));
-    let mut f = app.state.generate.clone();
-    f.label = "pair".into();
-    f.prompt = "a red fox in the snow".into();
-    f.preset = 0;
-    (f.width, f.height, f.steps, f.cfg) = (256, 256, 1, 1.0);
-    (f.seeds, f.first_seed) = (2, 1);
-    app.send(Msg::Generate(f.clone()));
-    app.send(Msg::QueueGenerate);
-    let t = Instant::now();
-    let made = app.pump(Duration::from_secs(2400), |s| {
-        s.index.projects.iter().map(|p| p.outputs.len()).sum::<usize>() >= 2 && s.active_runs.is_empty()
-    });
-    assert!(made, "two images not made: {:?}", app.errors());
-    app.log(&format!("two images in {:.0} s (with the model load)", t.elapsed().as_secs_f64()));
-    let outs = app.outputs();
-    for o in &outs {
-        let file = o.image.path(&root);
-        let img = image::open(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-        assert_eq!((img.width(), img.height()), (256, 256), "{}", file.display());
-    }
-
-    // ---- a generation stopped partway: gone from the app at once
-    f.label = "stopped".into();
-    (f.steps, f.seeds, f.first_seed) = (8, 1, 3);
-    app.send(Msg::Generate(f.clone()));
-    app.send(Msg::QueueGenerate);
-    let started = app.pump(Duration::from_secs(600), |s| s.progress.values().any(|(step, _)| *step >= 1));
-    assert!(started, "the third image never started: {:?}", app.errors());
-    let run = app.state.active_runs.iter().next().cloned().expect("an active run");
-    app.log("generating; stopping it now");
-    let t = Instant::now();
-    app.send(Msg::CancelRun(run.clone(), Stop::Now));
-    let stopped = app.pump(Duration::from_secs(30), |s| s.active_runs.is_empty() && s.progress.is_empty());
-    assert!(stopped, "still generating 30 s after Stop now: {:?}", app.state.active_runs);
-    let took = t.elapsed();
-    app.log(&format!("stopped in {:.2} s", took.as_secs_f64()));
-    assert!(took < Duration::from_secs(5), "stopping took {took:?}");
-    assert_eq!(app.outputs().len(), 2, "the stopped image was kept");
+    let outs = if images { make_images(&mut app, &root) } else { vec![] };
 
     // ---- the image server stopped: its process gone, the port free
     app.rt.run(Effect::StopServers);
@@ -262,8 +237,10 @@ fn images_cancel_and_prompt_enhance() {
     app.send(Msg::Generate(f));
     let text = app.pe_answer(PeTarget::Prompt);
     assert!(!text.trim().is_empty());
-    let described = app.pe_answer(PeTarget::Describe(ImageRef::output(outs[0].image.id.clone())));
-    assert!(!described.trim().is_empty());
+    if let Some(o) = outs.first() {
+        let described = app.pe_answer(PeTarget::Describe(ImageRef::output(o.image.id.clone())));
+        assert!(!described.trim().is_empty());
+    }
     app.send(Msg::PeShutdown);
     let freed = app.pump(Duration::from_secs(60), |_| !listening(CHAT_PORT));
     assert!(freed, "the chat KoboldCpp still listening on {CHAT_PORT}");
@@ -277,6 +254,52 @@ fn images_cancel_and_prompt_enhance() {
     let lib = Library::open(&root).expect("reopen");
     let report = increart_core::check::check(&lib).unwrap();
     assert!(report.problems.is_empty(), "{:?}", report.problems);
-    assert_eq!(report.outputs, 2, "{}", report.summary());
+    assert_eq!(report.outputs, outs.len(), "{}", report.summary());
     eprintln!("{}", report.summary());
+}
+
+/// Two images in the selected project, then a third stopped partway; the two kept.
+fn make_images(app: &mut App, root: &Path) -> Vec<increart_core::scan::OutputLink> {
+    // ---- two images
+    let mut f = app.state.generate.clone();
+    f.label = "pair".into();
+    f.prompt = "a red fox in the snow".into();
+    f.preset = 0;
+    (f.width, f.height, f.steps, f.cfg) = (256, 256, 1, 1.0);
+    (f.seeds, f.first_seed) = (2, 1);
+    app.send(Msg::Generate(f.clone()));
+    app.send(Msg::QueueGenerate);
+    let t = Instant::now();
+    // 304 s on a runner
+    let made = app.pump(Duration::from_secs(900), |s| {
+        s.index.projects.iter().map(|p| p.outputs.len()).sum::<usize>() >= 2 && s.active_runs.is_empty()
+    });
+    assert!(made, "two images not made: {:?}", app.errors());
+    app.log(&format!("two images in {:.0} s (with the model load)", t.elapsed().as_secs_f64()));
+    let outs = app.outputs();
+    for o in &outs {
+        let file = o.image.path(root);
+        let img = image::open(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        assert_eq!((img.width(), img.height()), (256, 256), "{}", file.display());
+    }
+
+    // ---- a generation stopped partway: gone from the app at once
+    f.label = "stopped".into();
+    (f.steps, f.seeds, f.first_seed) = (8, 1, 3);
+    app.send(Msg::Generate(f.clone()));
+    app.send(Msg::QueueGenerate);
+    let started = app.pump(Duration::from_secs(300), |s| s.progress.values().any(|(step, _)| *step >= 1));
+    assert!(started, "the third image never started: {:?}", app.errors());
+    let run = app.state.active_runs.iter().next().cloned().expect("an active run");
+    app.log("generating; stopping it now");
+    let t = Instant::now();
+    app.send(Msg::CancelRun(run.clone(), Stop::Now));
+    let stopped = app.pump(Duration::from_secs(30), |s| s.active_runs.is_empty() && s.progress.is_empty());
+    assert!(stopped, "still generating 30 s after Stop now: {:?}", app.state.active_runs);
+    let took = t.elapsed();
+    app.log(&format!("stopped in {:.2} s", took.as_secs_f64()));
+    assert!(took < Duration::from_secs(5), "stopping took {took:?}");
+    assert_eq!(app.outputs().len(), 2, "the stopped image was kept");
+
+    outs
 }

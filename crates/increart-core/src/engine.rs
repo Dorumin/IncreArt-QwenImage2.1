@@ -317,7 +317,9 @@ impl Coordinator {
         match action {
             Action::Probe { server } => self.send(server, Cmd::Probe),
             Action::WarmUp { server } if self.opts.warm_up => self.send(server, Cmd::WarmUp(request::warmup_body())),
-            Action::WarmUp { server } => self.sched.warmed(server, true, now),
+            Action::WarmUp { server } => {
+                self.sched.warmed(server, true, now);
+            }
             Action::Load { server, model } => self.send(server, Cmd::Load(model)),
             Action::Cancel { server, ticket } => self.send(server, Cmd::Cancel { ticket, waiting_only: false }),
             Action::Submit { server, ticket, seed } => {
@@ -369,7 +371,14 @@ impl Coordinator {
                     if let Err(e) = &r {
                         self.emit(Event::Problem(format!("{}: warm-up failed: {e}", self.servers[s].name)));
                     }
-                    self.sched.warmed(s, r.is_ok(), now)
+                    if let Some(model) = self.sched.warmed(s, r.is_ok(), now) {
+                        self.emit(Event::Problem(format!(
+                            "{}: gave up on {} after {} failed warm-ups; its runs wait (cancel them, or restart the server preset)",
+                            self.servers[s].name,
+                            model.recipe,
+                            crate::scheduler::WARM_UP_TRIES
+                        )));
+                    }
                 }
                 Report::Waiting(w) => self.waiting[s] = w,
                 Report::Loaded(r) => {

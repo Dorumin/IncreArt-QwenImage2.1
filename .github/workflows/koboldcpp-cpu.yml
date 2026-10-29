@@ -1,7 +1,7 @@
 # The app against a real KoboldCpp on each OS's CPU
 # (crates/increart-gui-core/tests/koboldcpp_cpu.rs): two tiny images, a
 # generation stopped partway, two prompt enhance answers, the servers
-# stopped. The smallest Qwen-Image 2.1 set (5.8 GiB) is one cache entry
+# stopped (macOS: no images). The smallest Qwen-Image 2.1 set (5.8 GiB) is one cache entry
 # shared by the three OSes. Nightly, by hand, and before each release.
 name: KoboldCpp on CPU
 
@@ -38,12 +38,18 @@ jobs:
           - os: windows-latest
             asset: koboldcpp-nocuda.exe
             vision: '1'
-          # 7 GB of RAM: image generation without the vision projector
+            images: '1'
+            images: '1'
+          # KoboldCpp's image generation runs on Metal even with --usecpu,
+          # and crashes on the runners' virtual GPU: the image server is
+          # started and stopped, nothing generated
           - os: macos-latest
             asset: koboldcpp-mac-arm64
             vision: '0'
+            images: '0'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # the test takes about 8 minutes, the job 12
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -87,6 +93,7 @@ jobs:
           INCREART_IT_KOBOLDCPP: ${{ github.workspace }}/kcpp/${{ matrix.asset }}
           INCREART_IT_MODELS: ${{ github.workspace }}/models
           INCREART_IT_VISION: ${{ matrix.vision }}
+          INCREART_IT_IMAGES: ${{ matrix.images }}
           INCREART_IT_OUT: ${{ github.workspace }}/out
         run: cargo test --locked -p increart-gui-core --test koboldcpp_cpu -- --ignored --nocapture
       - if: always()

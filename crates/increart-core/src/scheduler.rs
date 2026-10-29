@@ -19,7 +19,7 @@
 //! - Back-off: a failing server's in-flight seeds go back to the pool and it
 //!   is probed again after an exponentially growing delay.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::id::Id;
@@ -109,6 +109,9 @@ pub enum Order {
     Sequential,
 }
 
+/// Warm-ups of one model that may fail in a row before it is given up on.
+pub const WARM_UP_TRIES: u32 = 3;
+
 #[derive(Debug)]
 struct Server {
     state: ServerState,
@@ -135,6 +138,9 @@ pub struct Scheduler {
     servers: Vec<Server>,
     runs: Vec<RunQueue>,
     broken: HashSet<ModelKey>,
+    /// Warm-ups failed in a row, by model (a server that crashes on it
+    /// would otherwise be restarted and reloaded forever).
+    warm_failures: HashMap<ModelKey, u32>,
     next_ticket: Ticket,
     pub max_in_flight: usize,
     pub backoff_base: Duration,
@@ -150,6 +156,7 @@ impl Scheduler {
                 .collect(),
             runs: vec![],
             broken: HashSet::new(),
+            warm_failures: HashMap::new(),
             next_ticket: 1,
             max_in_flight: 2,
             backoff_base: Duration::from_secs(2),
@@ -283,16 +290,32 @@ impl Scheduler {
         }
     }
 
-    pub fn warmed(&mut self, s: ServerIdx, ok: bool, now: Instant) {
+    /// A warm-up ended. Returns the model given up on, at its
+    /// [`WARM_UP_TRIES`]th failure in a row: it is broken like a model that
+    /// failed to load.
+    pub fn warmed(&mut self, s: ServerIdx, ok: bool, now: Instant) -> Option<ModelKey> {
         if self.servers[s].state != ServerState::WarmingUp {
-            return;
+            return None;
         }
+        let model = self.servers[s].loaded.clone();
         if ok {
             self.servers[s].state = ServerState::Ready;
             self.servers[s].failures = 0;
-        } else {
-            self.back_off(s, now);
+            if let Some(m) = &model {
+                self.warm_failures.remove(m);
+            }
+            return None;
         }
+        self.back_off(s, now);
+        let m = model?;
+        let n = self.warm_failures.entry(m.clone()).or_default();
+        *n += 1;
+        if *n < WARM_UP_TRIES {
+            return None;
+        }
+        self.warm_failures.remove(&m);
+        self.broken.insert(m.clone());
+        Some(m)
     }
 
     pub fn loaded(&mut self, s: ServerIdx, result: LoadResult, now: Instant) {
@@ -746,7 +769,9 @@ mod tests {
                         s.finished(ticket, Outcome::Done);
                     }
                     Action::Load { server, .. } => s.loaded(server, LoadResult::Ok, now),
-                    Action::WarmUp { server } => s.warmed(server, true, now),
+                    Action::WarmUp { server } => {
+                        s.warmed(server, true, now);
+                    }
                     other => panic!("{other:?}"),
                 }
             }
@@ -843,5 +868,50 @@ mod tests {
         assert_eq!(s.model_of(0).cloned(), Some(model("a")));
         s.retry_model(&model("b"));
         assert_eq!(s.poll(now), [Action::Load { server: 0, model: model("b") }]);
+    }
+
+    #[test]
+    fn a_model_that_fails_its_warm_up_three_times_is_given_up() {
+        let (mut s, mut now) = up(&[None]);
+        s.add_seeds(&run(0), model("b"), seeds(1));
+        for i in 1..=WARM_UP_TRIES {
+            // the server crashed and came back empty: loaded again, warmed again
+            loop {
+                let actions = s.poll(now);
+                if let [Action::Probe { .. }] = actions[..] {
+                    s.probed(0, Ok(None), now);
+                } else if let [Action::Load { .. }] = actions[..] {
+                    s.loaded(0, LoadResult::Ok, now);
+                } else if let [Action::WarmUp { .. }] = actions[..] {
+                    break;
+                } else {
+                    now += Duration::from_secs(120);
+                }
+            }
+            let gave_up = s.warmed(0, false, now);
+            assert_eq!(gave_up, (i == WARM_UP_TRIES).then(|| model("b")), "try {i}");
+        }
+        assert_eq!(s.stuck_runs(), [&run(0)]);
+        for _ in 0..5 {
+            now += Duration::from_secs(120);
+            for a in s.poll(now) {
+                match a {
+                    Action::Probe { .. } => s.probed(0, Ok(None), now),
+                    a => panic!("{a:?}: not loaded again"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_good_warm_up_starts_the_count_again() {
+        let (mut s, now) = up(&[Some("b")]);
+        s.add_seeds(&run(0), model("b"), seeds(1));
+        for ok in [false, false, true, false, false] {
+            s.servers[0].state = ServerState::WarmingUp;
+            s.servers[0].loaded = Some(model("b"));
+            assert_eq!(s.warmed(0, ok, now), None);
+        }
+        assert!(s.stuck_runs().is_empty());
     }
 }
