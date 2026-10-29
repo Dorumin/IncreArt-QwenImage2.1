@@ -160,7 +160,8 @@ fn resolves(lib: &Library, rel: &Path, store: Store) -> ImageRef {
 
 #[test]
 fn whole_library_through_the_api() {
-    let (tmp, mut lib) = setup(None);
+    // symlinks whatever INCREART_LINK_MODE says: this test reads them as such
+    let (tmp, mut lib) = setup(Some(LinkMode::Symlink));
     let root = lib.root().to_path_buf();
     assert_eq!(lib.link_mode(), LinkMode::Symlink);
 
@@ -377,6 +378,23 @@ fn whole_library_through_the_api() {
     let ix = lib.scan().unwrap();
     assert_eq!(ix.ideas.iter().filter(|e| e.idea.id == next).count(), 1);
     assert!(ix.ideas.iter().all(|e| e.idea.id <= next));
+
+    // ---- the whole-library check agrees, and the library moves between
+    // OSes: no path in its files or images uses `\` or names this machine
+    let report = increart_core::check::check(&lib).unwrap();
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert!(report.store_images > 0 && report.links > 0, "{}", report.summary());
+    let home = root.to_string_lossy().into_owned();
+    for f in increart_core::fsutil::walk(&root).unwrap() {
+        if f.starts_with(root.join("cache")) || f.starts_with(root.join("thumbs")) || !f.is_file() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&fs::read(&f).unwrap()).into_owned();
+        for dir in ["_images\\", "projects\\", "input\\", "collections\\"] {
+            assert!(!text.contains(dir), "{} names a path with `\\`", f.display());
+        }
+        assert!(!text.contains(&home), "{} names the library's own path", f.display());
+    }
 }
 
 /// Converts every store image to `to` the way the GUI does: encode, then
@@ -509,6 +527,39 @@ fn avif_imports_as_png() {
     assert_eq!((src.original_format.as_str(), &src.conversions[..]), ("avif", &["avif -> png".to_string()][..]));
     let av = image::load_from_memory(&fs::read(lib.image_path(&ImageRef::input(still.clone()))).unwrap()).unwrap();
     assert_eq!((av.width(), av.height(), av.color().has_alpha()), (12, 8, true));
+}
+
+/// A library deep enough that its files' paths pass Windows' old 260
+/// character limit, in the link mode this file system gets.
+#[test]
+fn long_paths() {
+    common::init();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut root = tmp.path().to_path_buf();
+    while root.as_os_str().len() < 240 {
+        root.push("a folder name long enough to need a few of them");
+    }
+    let mut lib = Library::create(&root, None).unwrap();
+    lib.set_clock(t0);
+    lib.set_disposal(Disposal::Directory(tmp.path().join("trash")));
+    let photo = lib.import_bytes(&jpeg_bytes(picture(20, 20, 3)), &original("a photo with a long name.jpg")).unwrap();
+    let idea = lib.new_idea(NewIdea { images: vec![photo.image], ..NewIdea::text("A", "") }).unwrap();
+    lib.review_idea(&idea, Verdict::Good).unwrap();
+    let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+    let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 1)).unwrap();
+    let (_, def) = lib.find_run(&run).unwrap();
+    let (_, at) = lib.write_output(&run, 0, 0, &sdserver_png(1), &recipe(&def, 0, None)).unwrap();
+    assert!(lib.path(&at).as_os_str().len() > 300, "{}", lib.path(&at).display());
+    lib.review_output(&at, Some(Verdict::Good)).unwrap();
+    lib.create_folder(Tree::Projects, Path::new(""), Some("a folder for the project")).unwrap();
+    lib.move_node(Tree::Projects, Path::new("new project"), Path::new("a folder for the project")).unwrap();
+    drop(lib);
+
+    let lib = Library::open(&root).unwrap();
+    assert!(lib.problems().is_empty(), "{:?}", lib.problems());
+    let report = increart_core::check::check(&lib).unwrap();
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!((report.projects, report.outputs), (1, 1), "{}", report.summary());
 }
 
 #[test]

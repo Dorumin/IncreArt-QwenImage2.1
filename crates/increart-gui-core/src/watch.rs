@@ -167,3 +167,38 @@ fn run(root: &Path, rx: &Receiver<PathBuf>, stop: &Receiver<()>, tx: &Sender<Msg
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opened through a symlink (and on macOS, under /var, which events name
+    /// /private/var): a file dropped into the drop folder is still noticed.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_opened_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        for d in WATCHED {
+            std::fs::create_dir_all(real.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(real.join(DROP)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let _watch = start(link, tx, Arc::new(|| {}));
+        std::thread::sleep(Duration::from_millis(300)); // the watch is set up
+        std::fs::write(real.join(DROP).join("photo.png"), b"not really").unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let mut changed = false;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(Msg::DropReady) => return assert!(changed, "DropReady without LibraryChanged"),
+                Ok(Msg::LibraryChanged) => changed = true,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        panic!("the dropped file wasn't noticed (changed: {changed})");
+    }
+}

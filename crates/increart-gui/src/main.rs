@@ -48,6 +48,7 @@ pub fn version() -> String {
 const USAGE: &str = "\
 usage: increart [--library <folder>|last] [--servers <preset>|last | --no-servers]
        increart --version
+       increart --check-library <folder>
 
   --library <folder>   open this library (skips the library screen)
   --library last       the most recently opened library
@@ -56,6 +57,9 @@ usage: increart [--library <folder>|last] [--servers <preset>|last | --no-server
   --servers last       the preset opened last
   --no-servers         continue without servers
   -V, --version        print the version and the commit built from
+  --check-library <folder>
+                       check a library (every link, image and pixel hash),
+                       print what's wrong and exit: 0 if nothing is
 
 A screen is still shown when its argument doesn't work (not a library, no
 such preset, sd-server missing), saying why.";
@@ -67,9 +71,55 @@ pub struct Startup {
     pub servers: Option<StartupServers>,
 }
 
+/// Windows: the release build has no console of its own (it's a GUI app),
+/// so before printing it attaches to the one it was started from, if any.
+/// Output already redirected (a pipe, a file) goes there as it is.
+fn console() {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn AttachConsole(process: u32) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        // SAFETY: no arguments to get wrong; failing (no parent console, or
+        // one already attached) leaves things as they were
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
+/// `--check-library`: checks the library at `dir` and exits (1 when
+/// something is wrong, 2 when it can't be opened).
+fn check_library(dir: &str) -> ! {
+    let lib = match increart_core::Library::open(std::path::Path::new(dir)) {
+        Ok(lib) => lib,
+        Err(e) => {
+            eprintln!("increart: {dir}: {e}");
+            std::process::exit(2);
+        }
+    };
+    match increart_core::check::check(&lib) {
+        Ok(r) => {
+            for p in &r.problems {
+                println!("{p}");
+            }
+            println!("{dir}: {}", r.summary());
+            std::process::exit(if r.problems.is_empty() { 0 } else { 1 });
+        }
+        Err(e) => {
+            eprintln!("increart: {dir}: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn parse_args() -> Result<Startup, String> {
     let mut s = Startup::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some() {
+        console();
+    }
     while let Some(a) = args.next() {
         let mut value = |flag: &str| args.next().ok_or_else(|| format!("{flag} needs a value"));
         match a.as_str() {
@@ -81,6 +131,7 @@ fn parse_args() -> Result<Startup, String> {
                 println!("{}", version());
                 std::process::exit(0);
             }
+            "--check-library" => check_library(&value("--check-library")?),
             "--library" => s.library = Some(value("--library")?),
             "--servers" => s.servers = Some(StartupServers::Preset(value("--servers")?)),
             "--no-servers" => s.servers = Some(StartupServers::Without),

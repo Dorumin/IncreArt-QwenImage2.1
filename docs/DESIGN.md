@@ -1485,6 +1485,10 @@ order:
 3. **Copies**: last resort, e.g. on FAT32/exFAT drives, which support no
    links at all. Works, but uses the space twice.
 
+`INCREART_LINK_MODE=symlink|hardlink|copy` skips the trial and makes new
+libraries with that kind (an unknown value refuses to create one); CI runs
+the tests in all three on Windows.
+
 Windows: symlinks are supported on NTFS, but **creating** one needs
 Developer Mode or administrator rights (following them doesn't), so an
 ordinary Windows install usually ends up on hard links. A library on a Linux

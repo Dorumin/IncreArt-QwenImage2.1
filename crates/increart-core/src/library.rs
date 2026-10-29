@@ -195,10 +195,19 @@ impl Library {
         }
         let lock_path = root.join(LOCK_FILE);
         let mut lock = OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).at(&lock_path)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Err(Error::Locked(root)),
-            Err(fs::TryLockError::Error(e)) => return Err(e).at(&lock_path),
+        // tried for a moment: a process being started elsewhere in this one
+        // holds a copy of every open file (the lock too) until it execs
+        let mut tries = 0;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if tries < 10 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(fs::TryLockError::WouldBlock) => return Err(Error::Locked(root)),
+                Err(fs::TryLockError::Error(e)) => return Err(e).at(&lock_path),
+            }
         }
         lock.set_len(0).at(&lock_path)?;
         writeln!(lock, "{}", std::process::id()).at(&lock_path)?;
@@ -651,7 +660,7 @@ impl Library {
                     Store::Input => self.source_info(&image.id).ok().flatten().and_then(|s| s.original_name),
                     Store::Output => None,
                 };
-                let file = self.rel(&self.image_path(image)).to_string_lossy().into_owned();
+                let file = fsutil::posix(&self.rel(&self.image_path(image)));
                 Some(InputImage { role, image: image.clone(), file, original_name, blake3 })
             })
             .collect()

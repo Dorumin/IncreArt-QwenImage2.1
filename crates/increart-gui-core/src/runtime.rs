@@ -23,6 +23,9 @@ const START_WAIT: Duration = Duration::from_secs(180);
 #[derive(Default)]
 struct Shared {
     library: Option<Arc<Mutex<Library>>>,
+    /// Where libraries opened from now on put deleted things (tests); None:
+    /// the system trash.
+    disposal: Option<increart_core::library::Disposal>,
     /// The sd-servers open, each with what it was opened as.
     servers: Vec<Option<(ServerConfig, ServerProcess)>>,
     /// The shared settings `servers` were opened with.
@@ -90,6 +93,12 @@ pub fn log_dir() -> PathBuf {
 }
 
 impl Runtime {
+    /// Libraries opened after this put what they delete in `dir` rather than
+    /// the system trash (tests: macOS's trash goes through Finder).
+    pub fn set_trash_dir(&self, dir: PathBuf) {
+        self.shared.lock().unwrap().disposal = Some(increart_core::library::Disposal::Directory(dir));
+    }
+
     /// `wake` is called whenever a message is ready (e.g. request a repaint).
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Runtime {
         let (tx, rx) = mpsc::channel();
@@ -981,7 +990,10 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
         },
         Effect::OpenLibrary { path, create } => {
             let opened = if create { Library::create(&path, None) } else { Library::open(&path) };
-            vec![Msg::LibraryOpened(opened.map_err(err).and_then(|lib| {
+            vec![Msg::LibraryOpened(opened.map_err(err).and_then(|mut lib| {
+                if let Some(d) = shared.lock().unwrap().disposal.clone() {
+                    lib.set_disposal(d);
+                }
                 let ix = lib.scan().map_err(err)?;
                 let root = lib.root().to_path_buf();
                 shared.lock().unwrap().library = Some(Arc::new(Mutex::new(lib)));

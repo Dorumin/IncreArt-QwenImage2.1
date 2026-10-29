@@ -75,7 +75,20 @@ for p in images("*_images/*"):
         src = json.loads(text(d, "increart:source"))
         if src.get("version") != 1 or "original_format" not in src: problems.append(f"bad source json: {p}")
     elif text(d, "increart:recipe") is None: problems.append(f"output without recipe: {p}")
+# the library's link mode: Symlink links are symlinks; Hardlink ones share a
+# store file's inode; Copy ones its increart:id and pixels (not every byte:
+# the usage counts are updated in the store file only)
+mode = re.search(r"link_mode: (\w+)", read("library.rsn")).group(1)
+outside = [p for p in images("**/*") if not os.path.islink(p) and not p.startswith(("input_images/", "output_images/", "input/inbox_drop/"))]
+if mode != "Symlink":
+    def same(p):
+        if mode == "Hardlink": return (os.stat(p).st_dev, os.stat(p).st_ino)
+        d = open(p, "rb").read(); return (text(d, "increart:id"), text(d, "increart:pixels"))
+    stores = {same(p) for p in store}
+    for p in outside:
+        if same(p) not in stores: problems.append(f"{mode.lower()} not of a store file: {p}")
 links = [p for p in images("**/*") if os.path.islink(p)]
+if mode != "Symlink" and links: problems.append(f"symlinks in a {mode} library: {links}")
 for p in links:
     # relative to the real cwd: a temp dir's path may itself go through a
     # link or (Windows) a short name
@@ -83,8 +96,7 @@ for p in links:
     if os.path.isabs(os.readlink(p)): problems.append(f"absolute link: {p}")
     if t not in store: problems.append(f"link not into a store: {p} -> {t}")
     elif os.path.splitext(p)[1] != os.path.splitext(t)[1]: problems.append(f"link's extension isn't its image's: {p} -> {t}")
-plain = [p for p in images("**/*") if not os.path.islink(p) and not p.startswith(("input_images/", "output_images/", "input/inbox_drop/"))]
-if plain: problems.append(f"image files outside stores that aren't links: {plain}")
+if mode == "Symlink" and outside: problems.append(f"image files outside stores that aren't links: {outside}")
 blob = "".join(read(f) for f in glob.glob("**/*.rsn", recursive=True)) + "".join(text(d, "increart:recipe") or "" for d in store.values())
 refs = re.findall(r'id: "([0-9.\-]+)",\s*store: (Input|Output)', blob)
 for h, s in refs:
@@ -100,4 +112,4 @@ for kind, xs in ids.items():
     if len(set(xs)) != len(xs) or not all(ID.fullmatch(x) for x in xs): problems.append(f"{kind} ids bad or duplicated: {xs}")
 for f in glob.glob("input/**/idea.rsn", recursive=True):
     if re.search(r'^    id: "(.*)",$', read(f), re.M).group(1) != os.path.basename(os.path.dirname(f)): problems.append(f"idea dir != id: {f}")
-print(f"{sum(map(len, ids.values()))} idea/project/run ids; {len(store)} store images, {len(links)} links, {len(refs)} refs{f", {unhashed} WebP pixel hashes left unchecked" if unhashed else ""}; problems: {problems or 'none'}")
+print(f"{sum(map(len, ids.values()))} idea/project/run ids; {len(store)} store images, {len(links) if mode == "Symlink" else len(outside)} links, {len(refs)} refs{f", {unhashed} WebP pixel hashes left unchecked" if unhashed else ""}; problems: {problems or 'none'}")

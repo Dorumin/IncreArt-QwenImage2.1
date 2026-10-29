@@ -23,7 +23,9 @@ impl Harness {
         let root = tmp.path().join("lib");
         let mut config = Config::default();
         config.normalize();
-        let mut h = Harness { state: AppState::new(config, None), rt: Runtime::new(|| {}), _tmp: tmp, root };
+        let rt = Runtime::new(|| {});
+        rt.set_trash_dir(tmp.path().join("trash"));
+        let mut h = Harness { state: AppState::new(config, None), rt, _tmp: tmp, root };
         h.send(Msg::SetLibraryPath(h.root.to_string_lossy().into()));
         h.send(Msg::CreateLibrary);
         h.settle();
@@ -43,6 +45,7 @@ impl Harness {
     }
 
     /// Feeds runtime messages back until nothing is pending.
+    #[track_caller]
     fn settle(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
@@ -51,7 +54,13 @@ impl Harness {
                 if self.state.busy == 0 && self.state.saving == 0 {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "operations still pending");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "operations still pending (busy {}, saving {}): {:?}",
+                    self.state.busy,
+                    self.state.saving,
+                    self.errors()
+                );
                 continue;
             }
             for m in msgs {

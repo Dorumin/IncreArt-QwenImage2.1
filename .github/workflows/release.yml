@@ -53,8 +53,6 @@ jobs:
           [[ $TAG == "v$version" ]] || { echo "tag $TAG, but increart-gui is version $version" >&2; exit 1; }
       - run: cargo build --release --locked -p increart-gui
       - name: Version line
-        # Windows: a GUI-subsystem app prints nothing to the console
-        if: runner.os != 'Windows'
         run: |
           v=$(target/release/increart --version)
           echo "$v"
@@ -84,6 +82,17 @@ jobs:
           if [[ $RUNNER_OS == Windows ]]; then (cd stage && 7z a -tzip "../$name.zip" "$name" > /dev/null)
           else (cd stage && zip -qr -y -X "../$name.zip" "$name"); fi
           echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: The zip works
+        # unzipped fresh, as a user would: the app runs and finds every link,
+        # image and recipe of the example library intact
+        run: |
+          rm -rf smoke && mkdir smoke
+          if [[ $RUNNER_OS == Windows ]]; then 7z x -y -osmoke "${{ steps.package.outputs.zip }}" > /dev/null
+          else unzip -q "${{ steps.package.outputs.zip }}" -d smoke; fi
+          dir="smoke/${{ steps.package.outputs.name }}"
+          "$dir/increart" --version
+          "$dir/increart" --check-library "$dir/Example library"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

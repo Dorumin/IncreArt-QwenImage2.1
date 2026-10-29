@@ -122,7 +122,8 @@ libraries (dav1d); that is **not covered** here.
 Prints `usage: increart [--library <folder>|last] [--servers <preset>|last | --no-servers]`
 and exits 0. `--version` prints `increart 0.1.0 (<commit>, <date>)`; the
 commit has `-dirty` when the tree had uncommitted changes, and is left out
-when built outside a git checkout. (`--help` is parsed before any window opens, so it works without
+when built outside a git checkout. On Windows these print to the console
+they're run from, too. (`--help` is parsed before any window opens, so it works without
 a display.)
 
 **If it fails:**
@@ -155,6 +156,7 @@ Command line (from `main.rs`):
 | `--servers last` | the preset opened last |
 | `--no-servers` | continue without servers |
 | `-V`, `--version` | print the version and the commit built from, e.g. `increart 0.1.0 (b6bd961, 2026-10-29)`, and exit (Settings shows the same line) |
+| `--check-library <folder>` | check a library without opening a window: every link reaches its image, every image the library names is there, every stored image decodes to the pixels it records. Prints the problems and a summary; exits 0 if none, 1 if some, 2 if it can't be opened. The release workflow runs it on each zip's example library |
 
 A screen is still shown when its argument doesn't work (no `library.rsn`,
 unknown preset, sd-server or models folder missing), with the reason. An

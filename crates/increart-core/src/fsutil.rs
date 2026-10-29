@@ -125,6 +125,13 @@ pub fn subdirs(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// `path` with `/` between its parts on every OS, for paths written into a
+/// library's files or images (which move between OSes).
+pub fn posix(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+}
+
 /// Names starting with `.` (our temporary files, file manager metadata).
 pub fn hidden(path: &Path) -> bool {
     path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))

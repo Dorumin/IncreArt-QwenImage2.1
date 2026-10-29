@@ -23,8 +23,20 @@ pub fn symlink(target: &Path, at: &Path) -> io::Result<()> {
 }
 
 /// Picks the library's link mode by trying each kind in `dir` (inside the
-/// library, so hard links stay on one volume).
+/// library, so hard links stay on one volume). `INCREART_LINK_MODE`
+/// (`symlink`, `hardlink` or `copy`) picks it instead: tests run every mode
+/// this way, and it gives a library that copies cleanly to another drive.
 pub fn probe(dir: &Path) -> Result<LinkMode> {
+    if let Ok(m) = std::env::var("INCREART_LINK_MODE")
+        && !m.is_empty()
+    {
+        return match m.to_ascii_lowercase().as_str() {
+            "symlink" => Ok(LinkMode::Symlink),
+            "hardlink" => Ok(LinkMode::Hardlink),
+            "copy" => Ok(LinkMode::Copy),
+            _ => Err(Error::Refused(format!("INCREART_LINK_MODE={m}: expected symlink, hardlink or copy"))),
+        };
+    }
     let probe = dir.join(".link-probe");
     fs::create_dir_all(&probe).at(&probe)?;
     let target = probe.join("target");

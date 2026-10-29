@@ -111,10 +111,10 @@ impl ImageRef {
         if webp.exists() { webp } else { png }
     }
 
-    /// [`path`](Self::path) relative to the library root.
+    /// [`path`](Self::path) relative to the library root, with `/`.
     pub fn rel_path(&self, root: &Path) -> String {
         let p = self.path(root);
-        p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned()
+        crate::fsutil::posix(p.strip_prefix(root).unwrap_or(&p))
     }
 
     /// The store file's path relative to the root when stored as `format`.

@@ -1,5 +1,8 @@
 # Builds and tests IncreArt on Linux, Windows and macOS, and keeps each
-# platform's release build as a downloadable artifact.
+# platform's release build as a downloadable artifact. Windows runs the
+# tests twice more with libraries on hard links and on copies (what most
+# Windows installs and the Windows example library use; the runner itself
+# can make symlinks).
 name: CI
 
 on:
@@ -9,11 +12,21 @@ on:
 
 jobs:
   test:
+    name: test (${{ matrix.os }}${{ matrix.link_mode && format(', {0}', matrix.link_mode) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+          - os: windows-latest
+            link_mode: hardlink
+          - os: windows-latest
+            link_mode: copy
     runs-on: ${{ matrix.os }}
+    env:
+      INCREART_LINK_MODE: ${{ matrix.link_mode }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,10 +36,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: ${{ !matrix.link_mode }}
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast
-      - run: cargo build --release -p increart-gui
-      - uses: actions/upload-artifact@v4
+      - if: ${{ !matrix.link_mode }}
+        run: cargo build --release -p increart-gui
+      - if: ${{ !matrix.link_mode }}
+        uses: actions/upload-artifact@v4
         with:
           name: increart-${{ runner.os }}
           path: target/release/increart${{ runner.os == 'Windows' && '.exe' || '' }}
