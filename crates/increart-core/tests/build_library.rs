@@ -386,7 +386,9 @@ fn whole_library_through_the_api() {
     assert!(report.store_images > 0 && report.links > 0, "{}", report.summary());
     let home = root.to_string_lossy().into_owned();
     for f in increart_core::fsutil::walk(&root).unwrap() {
-        if f.starts_with(root.join("cache")) || f.starts_with(root.join("thumbs")) || !f.is_file() {
+        // the lock: Windows locks are mandatory, so it can't be read while held
+        let skip = [root.join("cache"), root.join("thumbs"), root.join(increart_core::library::LOCK_FILE)];
+        if skip.iter().any(|s| f.starts_with(s)) || !f.is_file() {
             continue;
         }
         let text = String::from_utf8_lossy(&fs::read(&f).unwrap()).into_owned();

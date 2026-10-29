@@ -35,7 +35,11 @@ jobs:
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
+      # one cache per OS (the Windows jobs share a key), saved by the job
+      # that builds everything, so the link-mode runs can't save a partial one
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ !matrix.link_mode }}
       - if: ${{ !matrix.link_mode }}
         run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast

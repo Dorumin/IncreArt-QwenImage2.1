@@ -54,11 +54,12 @@ jobs:
       - name: Images
         run: |
           m=models; mkdir -p out
+          (while sleep 1; do free -m | awk '/^Mem/{print $3}'; done > out/mem.txt) & mem=$!
           start=$SECONDS
-          /usr/bin/time -v ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
+          ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
             --sdmodel $m/qwen-image-2.1-Q2_K.gguf --sdllm "$m/Qwen3-VL-8B-Instruct-${{ inputs.encoder }}.gguf" \
             --sdclip1 $m/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf --sdvae $m/qwen_image_2.1_vae_bf16.safetensors \
-            > out/images.log 2> out/images-time.log &
+            > out/images.log 2>&1 &
           pid=$!
           until curl -fs http://127.0.0.1:5001/api/extra/version > /dev/null; do
             kill -0 $pid 2>/dev/null || { tail -50 out/images.log; exit 1; }
@@ -74,14 +75,15 @@ jobs:
             python3 -c 'import json,sys,base64; d=json.load(open(sys.argv[1])); open(sys.argv[2],"wb").write(base64.b64decode(d["images"][0]))' out/r$seed.json out/image$seed.png
             echo "image $seed: $((SECONDS - s)) s, $(stat -c %s out/image$seed.png) bytes"
           done
-          kill $pid; wait $pid || true
-          grep -E 'Maximum resident|Elapsed' out/images-time.log
+          pkill -f ./kcpp; wait $pid || true; kill $mem
+          echo "peak memory in use: $(sort -n out/mem.txt | tail -1) MiB (machine, at start $(head -1 out/mem.txt) MiB)"
       - name: Prompt enhance
         run: |
           m=models; start=$SECONDS
-          /usr/bin/time -v ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
+          (while sleep 1; do free -m | awk '/^Mem/{print $3}'; done > out/mem.txt) & mem=$!
+          ./kcpp --skiplauncher --usecpu --threads "$(nproc)" --host 127.0.0.1 --port 5001 \
             --model "$m/Qwen3-VL-8B-Instruct-${{ inputs.encoder }}.gguf" --mmproj $m/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf \
-            --jinja --contextsize 2048 > out/pe.log 2> out/pe-time.log &
+            --jinja --contextsize 2048 > out/pe.log 2>&1 &
           pid=$!
           until curl -fs http://127.0.0.1:5001/api/extra/version > /dev/null; do
             kill -0 $pid 2>/dev/null || { tail -50 out/pe.log; exit 1; }
@@ -100,8 +102,8 @@ jobs:
           curl -fsS http://127.0.0.1:5001/v1/chat/completions -H 'Content-Type: application/json' -d @out/pe2-req.json \
             | tee out/pe2.json | python3 -c 'import json,sys; print(repr(json.load(sys.stdin)["choices"][0]["message"]["content"]))'
           echo "image answer: $((SECONDS - s)) s"
-          kill $pid; wait $pid || true
-          grep -E 'Maximum resident|Elapsed' out/pe-time.log
+          pkill -f ./kcpp; wait $pid || true; kill $mem
+          echo "peak memory in use: $(sort -n out/mem.txt | tail -1) MiB (machine, at start $(head -1 out/mem.txt) MiB)"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
