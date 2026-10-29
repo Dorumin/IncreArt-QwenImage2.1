@@ -2834,6 +2834,9 @@ calls while the window is minimized or hidden, with a clock of the app's own
   project's prompt and closes the window on the next frame (inside the 2 s
   autosave delay), checking that the draft is flushed on quit: afterwards
   `projects/experiments/glass-fish/draft.rsn` must hold the edit.
+  Scenes `R…` take the README's shots and `G…` its gallery
+  ([readme/GALLERY.md](readme/GALLERY.md), retaken by
+  `scripts/make-readme-gallery.sh` as WebP), both on the example library.
 - GUI runs that need no human input (screenshots, synthetic input) run on a
   private Xvfb display via `scripts/headless.sh`, never on the desktop. POC1's
   screenshot walkthrough and documentation tour are described in

@@ -180,6 +180,21 @@ const EXTRA_SCENES: &[&str] = &[
     "R4-output-lineage",
     "R5-input-library",
     "R6-projects-grid",
+    // the README's gallery (docs/readme/GALLERY.md, scripts/make-readme-gallery.sh),
+    // on the demo library too, after 02-server-dialog
+    "G01-server-wizard",
+    "G02-idea-inbox",
+    "G03-projects-grid",
+    "G04-generate-refs",
+    "G05-check-select-mika",
+    "G06-setting-sweep",
+    "G07-prompt-history",
+    "G08-jobs",
+    "G09-contact-sheet",
+    "G10-tile-window",
+    "G11-export",
+    // last: its status message would show in the shots after it
+    "G12-crop-mark",
 ];
 
 /// The tour library's fox-cafe project (clients/acme/fox-cafe).
@@ -1269,35 +1284,8 @@ impl Tour {
             }
             "15b-crop-mark" => {
                 // an output in glass-fish's Generate, cropped with a circle and a scribble
-                let mut v = vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
-                if let (Some(p), Some(root)) =
-                    (st.index.projects.iter().find(|p| p.name() == "glass-fish"), st.library.as_ref())
-                    && let Some(o) = p.outputs.first()
-                {
-                    use increart_core::model::{ImageEdits, Mark, Shape};
-                    let (w, h) = image::image_dimensions(o.image.path(root)).unwrap_or((1024, 1024));
-                    let (w, h) = (w as f32, h as f32);
-                    let red = increart_gui_core::MarkTools::default().color;
-                    let width = w.max(h) * increart_gui_core::MarkTools::default().width / 1000.0;
-                    let scribble = (0..24)
-                        .map(|i| {
-                            let t = i as f32 / 23.0;
-                            [w * (0.15 + 0.3 * t), h * (0.75 + 0.04 * (t * 12.0).sin())]
-                        })
-                        .collect();
-                    v.push(Msg::SelectProject(p.project.id.clone()));
-                    v.push(Msg::ClearGenerate);
-                    v.push(Msg::UseImage(o.image.clone(), increart_gui_core::UseTarget::CurrentProject));
-                    v.push(Msg::OpenMarkup(o.image.clone(), Some(0)));
-                    v.push(Msg::MarkupEdit(ImageEdits {
-                        crop: Some([(w * 0.05) as u32, (h * 0.1) as u32, (w * 0.85) as u32, (h * 0.8) as u32]),
-                        marks: vec![
-                            Mark { shape: Shape::Ellipse([w * 0.35, h * 0.3], [w * 0.65, h * 0.6]), color: red, width },
-                            Mark { shape: Shape::Pencil(scribble), color: [255, 210, 0, 191], width },
-                        ],
-                    }));
-                }
-                v
+                let o = st.index.projects.iter().find(|p| p.name() == "glass-fish").and_then(|p| p.outputs.first());
+                crop_mark(st, "glass-fish", o)
             }
             "14-output-library-rejected" => {
                 vec![Msg::Tab(Tab::OutputLibrary), Msg::OutputPreset(increart_gui_core::OutputPreset::Rejected)]
@@ -1362,6 +1350,98 @@ impl Tour {
                 Msg::ProjectsTab(ProjectsTab::Grid),
                 Msg::SelectProjectFolder(Some(PathBuf::new())),
             ],
+            "G01-server-wizard" => self.msgs("54-server-wizard", st),
+            "G02-idea-inbox" => {
+                let mut v = vec![Msg::ContinueWithoutServers];
+                // the default card and tile sizes, whatever the config has
+                for grid in [ZoomGrid::Review, ZoomGrid::Output, ZoomGrid::Library, ZoomGrid::Inbox] {
+                    v.push(Msg::GridZoom { grid, size: grid.default_size(), save: false });
+                }
+                v.extend([Msg::Tab(Tab::IdeaInbox), Msg::InboxTab(InboxTab::Grid)]);
+                v
+            }
+            "G03-projects-grid" => self.msgs("R6-projects-grid", st),
+            "G04-generate-refs" | "G05-check-select-mika" | "G07-prompt-history" => {
+                let project = if name == "G05-check-select-mika" { "mika-the-courier" } else { "olympus-mons" };
+                let mut v = vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
+                if let Some(p) = st.index.projects.iter().find(|p| p.name() == project) {
+                    v.push(Msg::SelectProject(p.project.id.clone()));
+                    if name == "G07-prompt-history" {
+                        // step() selects its prompt before prompt enhance's rewrite
+                        v.push(Msg::OpenHistory(increart_core::HistoryKey::Project(p.project.id.clone())));
+                    }
+                }
+                v
+            }
+            "G06-setting-sweep" => {
+                // mika-the-courier's draft (G05) as a CFG sweep
+                let mut f = st.generate.clone();
+                f.sweep.on = true;
+                f.sweep.vary = increart_core::prompts::SweepVary::Cfg;
+                f.sweep.values = increart_gui_core::update::sweep_defaults(f.sweep.vary, &f);
+                vec![Msg::Generate(f)]
+            }
+            "G12-crop-mark" => {
+                let good = st
+                    .index
+                    .projects
+                    .iter()
+                    .find(|p| p.name() == "olympus-mons")
+                    .and_then(|p| p.outputs.iter().find(|o| o.verdict == Some(increart_core::Verdict::Good)));
+                crop_mark(st, "olympus-mons", good)
+            }
+            "G08-jobs" => {
+                // two projects' runs pretend to generate, a seed each part-sampled
+                let mut v = vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Jobs)];
+                let runs: Vec<_> = ["great-wave-cat", "harbour-lanterns"]
+                    .iter()
+                    .filter_map(|n| st.index.projects.iter().find(|p| p.name() == *n))
+                    .filter_map(|p| p.runs.last())
+                    .collect();
+                v.push(Msg::RunsQueued(runs.iter().map(|r| r.id.clone()).collect()));
+                for (i, r) in runs.iter().enumerate() {
+                    v.push(Msg::Engine(increart_core::engine::Event::Progress {
+                        run: r.id.clone(),
+                        rev: 0,
+                        seed: r.all_seeds().next().map_or(0, |(_, s)| s),
+                        server: i,
+                        step: [14, 5][i % 2],
+                        total: 20,
+                        preview: None,
+                    }));
+                }
+                v
+            }
+            "G09-contact-sheet" | "G10-tile-window" => {
+                // moonwalk-styles' sweep: three styles, three seeds each
+                let mut v = vec![
+                    Msg::RunsQueued(vec![]),
+                    Msg::Tab(Tab::Review),
+                    Msg::SheetRows(SheetRows::Full),
+                    Msg::SheetZoom { size: increart_gui_core::SHEET_CELL_DEFAULT, save: false },
+                ];
+                if let Some(p) = st.index.projects.iter().find(|p| p.name() == "moonwalk-styles") {
+                    v.push(Msg::ReviewSweep(p.project.id.clone(), "r01".into()));
+                    v.push(Msg::SheetFilter(String::new()));
+                    if name == "G10-tile-window" {
+                        let mut picked: Vec<_> = p.outputs.iter().map(|o| o.image.clone()).collect();
+                        picked.sort_by(|a, b| a.id.cmp(&b.id));
+                        picked.truncate(6);
+                        v.extend([
+                            Msg::PickSet(picked),
+                            Msg::OpenTile,
+                            Msg::TileCaptions(increart_gui_core::CaptionFill::Style),
+                            Msg::TileTitle("Moonwalk, restyled".into(), "sweep r01 · two seeds per style".into()),
+                            Msg::TileSelect(Some(0)),
+                        ]);
+                    }
+                }
+                v
+            }
+            "G11-export" => {
+                let kept: Vec<_> = st.kept_outputs().iter().map(|o| o.image.clone()).collect();
+                vec![Msg::CloseTile, Msg::Tab(Tab::OutputLibrary), Msg::OpenExport(kept, "all kept images".into())]
+            }
             _ => vec![],
         }
     }
@@ -1453,7 +1533,7 @@ impl Tour {
                 Msg::CancelNewProject,
             ]);
             out.extend(self.msgs(name, st));
-            if name.starts_with("54") || name.starts_with('R') || name == "02c-koboldcpp-entry" {
+            if name.starts_with("54") || name.starts_with(['R', 'G']) || name == "02c-koboldcpp-entry" {
                 // the virtual display's pointer sits mid-window: no tooltip over it
                 self.inject = vec![egui::Event::PointerGone];
             }
@@ -1500,6 +1580,11 @@ impl Tour {
                     image::ExtendedColorType::Rgba8,
                 );
             });
+        }
+        if name == "G07-prompt-history" && self.settled == 5 {
+            // once loaded (loading selects the newest): the entry before the
+            // rewrite, compared with the current prompt
+            out.push(Msg::HistorySelect(2));
         }
         if name == "25-check-grid-click" && self.settled == 5 && !self.clicked {
             self.click_check(ctx, st);
@@ -2023,6 +2108,39 @@ impl Tour {
 }
 
 /// An input library image with an idea title, for the compare scenes.
+/// Scene 15b and G07: `output` made the start image of `project`'s Generate,
+/// cropped, with a circle and a scribble.
+fn crop_mark(st: &AppState, project: &str, output: Option<&increart_core::scan::OutputLink>) -> Vec<Msg> {
+    let mut v = vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
+    if let (Some(p), Some(root), Some(o)) =
+        (st.index.projects.iter().find(|p| p.name() == project), st.library.as_ref(), output)
+    {
+        use increart_core::model::{ImageEdits, Mark, Shape};
+        let (w, h) = image::image_dimensions(o.image.path(root)).unwrap_or((1024, 1024));
+        let (w, h) = (w as f32, h as f32);
+        let red = increart_gui_core::MarkTools::default().color;
+        let width = w.max(h) * increart_gui_core::MarkTools::default().width / 1000.0;
+        let scribble = (0..24)
+            .map(|i| {
+                let t = i as f32 / 23.0;
+                [w * (0.15 + 0.3 * t), h * (0.75 + 0.04 * (t * 12.0).sin())]
+            })
+            .collect();
+        v.push(Msg::SelectProject(p.project.id.clone()));
+        v.push(Msg::ClearGenerate);
+        v.push(Msg::UseImage(o.image.clone(), increart_gui_core::UseTarget::CurrentProject));
+        v.push(Msg::OpenMarkup(o.image.clone(), Some(0)));
+        v.push(Msg::MarkupEdit(ImageEdits {
+            crop: Some([(w * 0.05) as u32, (h * 0.1) as u32, (w * 0.85) as u32, (h * 0.8) as u32]),
+            marks: vec![
+                Mark { shape: Shape::Ellipse([w * 0.35, h * 0.3], [w * 0.65, h * 0.6]), color: red, width },
+                Mark { shape: Shape::Pencil(scribble), color: [255, 210, 0, 191], width },
+            ],
+        }));
+    }
+    v
+}
+
 fn tour_input(st: &AppState) -> Option<increart_core::ImageRef> {
     let mut ideas: Vec<_> = st
         .index
