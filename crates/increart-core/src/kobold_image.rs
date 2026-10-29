@@ -894,7 +894,7 @@ fn generate(inner: &Inner, id: &str, path: &str, body: &Value) -> Result<String,
     }
     let addr = hostport.to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or("no address")?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(GENERATE_TIMEOUT)).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(CANCEL_CHECK)).map_err(|e| e.to_string())?;
     if let Some(j) = inner.jobs.lock().unwrap().get_mut(id) {
         j.conn = stream.try_clone().ok();
     }
@@ -906,7 +906,8 @@ fn generate(inner: &Inner, id: &str, path: &str, body: &Value) -> Result<String,
         data.len()
     );
     stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(&data)).map_err(|e| e.to_string())?;
-    let (status, reply) = read_response(stream).map_err(|e| format!("KoboldCpp: {e}"))?;
+    let reader = Cancellable { stream, inner, id, deadline: Instant::now() + GENERATE_TIMEOUT };
+    let (status, reply) = read_response(reader).map_err(|e| format!("KoboldCpp: {e}"))?;
     if !(200..300).contains(&status) {
         return Err(format!(
             "HTTP {status}: {}",
@@ -921,7 +922,39 @@ fn generate(inner: &Inner, id: &str, path: &str, body: &Value) -> Result<String,
     }
 }
 
-fn read_response(stream: TcpStream) -> std::io::Result<(u16, Vec<u8>)> {
+/// How often a generation's read looks whether its job was cancelled.
+const CANCEL_CHECK: Duration = Duration::from_millis(200);
+
+/// A generation's connection, read until its job is cancelled. Cancelling
+/// shuts the socket down, which wakes a blocked read on Linux and macOS but
+/// not on Windows, so reads also time out every [`CANCEL_CHECK`] to look.
+struct Cancellable<'a> {
+    stream: TcpStream,
+    inner: &'a Inner,
+    id: &'a str,
+    deadline: Instant,
+}
+
+impl Read for Cancellable<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::ErrorKind::{TimedOut, WouldBlock};
+        loop {
+            match self.stream.read(buf) {
+                Err(e) if matches!(e.kind(), WouldBlock | TimedOut) => {
+                    if self.inner.jobs.lock().unwrap().get(self.id).is_none_or(|j| j.cancel) {
+                        return Err(std::io::Error::other("cancelled"));
+                    }
+                    if Instant::now() >= self.deadline {
+                        return Err(e);
+                    }
+                }
+                r => return r,
+            }
+        }
+    }
+}
+
+fn read_response(stream: impl Read) -> std::io::Result<(u16, Vec<u8>)> {
     let mut r = BufReader::new(stream);
     let mut line = String::new();
     r.read_line(&mut line)?;
