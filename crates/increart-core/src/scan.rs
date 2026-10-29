@@ -24,6 +24,9 @@ pub const IMPORTED: &str = "input/inbox_drop/imported";
 pub const UNREVIEWED_IDEAS: &str = "input/unreviewed";
 pub const INPUT_LIBRARY: &str = "input/library";
 pub const DISCARDED_IDEAS: &str = "input/discarded";
+/// Cropped and marked copies (Crop / mark…), out of the input library's
+/// lists unless asked for.
+pub const EDITED_IDEAS: &str = "input/edited";
 pub const PROJECTS: &str = "projects";
 pub const COLLECTIONS: &str = "collections";
 
@@ -36,6 +39,8 @@ pub enum IdeaLoc {
     /// top level).
     Library(PathBuf),
     Discarded,
+    /// A cropped and marked copy, `input/edited/`.
+    Edited,
 }
 
 impl IdeaLoc {
@@ -49,6 +54,7 @@ impl IdeaLoc {
             IdeaLoc::Unreviewed => PathBuf::from(UNREVIEWED_IDEAS),
             IdeaLoc::Library(folder) => Path::new(INPUT_LIBRARY).join(folder),
             IdeaLoc::Discarded => PathBuf::from(DISCARDED_IDEAS),
+            IdeaLoc::Edited => PathBuf::from(EDITED_IDEAS),
         }
     }
 }
@@ -113,6 +119,15 @@ impl ProjectEntry {
         let revs = self.runs.iter().flat_map(|r| &r.revisions).map(|r| r.created);
         revs.chain([self.project.created]).max().unwrap_or(self.project.created)
     }
+
+    /// Seeds of one of its runs still to generate: live seeds with no output
+    /// link. As [`crate::Library::pending_seeds`], from what was scanned
+    /// (no reading the disk again).
+    pub fn pending_seeds<'a>(&self, run: &'a Run) -> impl Iterator<Item = (u32, u64)> + 'a {
+        let done: std::collections::HashSet<u64> =
+            self.outputs.iter().filter(|o| o.name.run == run.id).map(|o| o.name.seed).collect();
+        run.live_seeds().filter(move |(_, s)| !done.contains(s))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,7 +190,7 @@ impl Index {
 
 pub fn scan(root: &Path) -> Result<Index> {
     let mut ix = Index::default();
-    for loc in [IdeaLoc::Unreviewed, IdeaLoc::Discarded] {
+    for loc in [IdeaLoc::Unreviewed, IdeaLoc::Discarded, IdeaLoc::Edited] {
         for dir in fsutil::subdirs(&root.join(loc.dir()))? {
             read_idea(root, &dir, loc.clone(), &mut ix);
         }

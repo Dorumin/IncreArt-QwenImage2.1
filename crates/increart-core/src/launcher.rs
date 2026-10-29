@@ -12,15 +12,15 @@ use crate::sdserver::Client;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
-    #[error("{name}: no sd-server answers on {url}")]
+    #[error("{name}: no server answers on {url}")]
     NotRunning { name: String, url: String },
     #[error("{name}: can't start {binary}: {source}")]
     Spawn { name: String, binary: String, source: std::io::Error },
-    #[error("{name}: sd-server exited ({status}) during start-up; log {}:\n{tail}", log.display())]
+    #[error("{name}: the server exited ({status}) during start-up; log {}:\n{tail}", log.display())]
     Exited { name: String, status: String, log: PathBuf, tail: String },
     #[error("{name}: opening cancelled")]
     Cancelled { name: String },
-    #[error("{name}: sd-server didn't answer within {secs} s; log {}", log.display())]
+    #[error("{name}: the server didn't answer within {secs} s; log {}", log.display())]
     Timeout { name: String, secs: u64, log: PathBuf },
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -36,6 +36,8 @@ pub struct ServerProcess {
     child: Option<Child>,
     /// The log file, for a launched server.
     pub log: Option<PathBuf>,
+    /// KoboldCpp: its process group is stopped, not just the launcher.
+    group: bool,
 }
 
 impl ServerProcess {
@@ -50,9 +52,13 @@ impl ServerProcess {
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        match self.child.take() {
+            Some(child) if self.group => crate::process::stop(child),
+            Some(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            None => {}
         }
     }
 }
@@ -104,14 +110,18 @@ pub fn open_cancellable(
     wait: Duration,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<ServerProcess, LaunchError> {
+    if let ServerConfig::Kobold(k) = server {
+        return open_kobold(k, shared, log_dir, wait, cancel);
+    }
     let name = server.name().to_string();
     let client = Client::new(&server.base_url());
     let mut proc = ServerProcess {
         name: name.clone(),
-        device: server.device().to_string(),
+        device: server.device(),
         client: client.clone(),
         child: None,
         log: None,
+        group: false,
     };
     if client.capabilities().is_ok() {
         return Ok(proc);
@@ -123,15 +133,84 @@ pub fn open_cancellable(
     let log = log_path(log_dir, server);
     let out = OpenOptions::new().create(true).append(true).open(&log)?;
     let start = out.metadata()?.len();
-    let child = Command::new(&shared.binary)
-        .args(command_args(server, shared))
-        .stdin(Stdio::null())
-        .stdout(out.try_clone()?)
-        .stderr(out)
-        .spawn()
+    let mut cmd = Command::new(&shared.binary);
+    cmd.args(command_args(server, shared)).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
+    crate::process::background(&mut cmd, false);
+    let child = if shared.leave_running { cmd.spawn() } else { crate::process::spawn_with_app(cmd) }
         .map_err(|source| LaunchError::Spawn { name: name.clone(), binary: shared.binary.clone(), source })?;
     proc.child = Some(child);
     proc.log = Some(log.clone());
+    wait_up(proc, log, start, wait, cancel)
+}
+
+/// KoboldCpp generating images: `Connect` checks it answers; `Start`
+/// launches it with admin on (its folder and password in the state dir,
+/// beside `log_dir`), logging to `log_dir/koboldcpp-<name>.log`; one
+/// already answering on the port is used as is.
+fn open_kobold(
+    k: &crate::kobold::KoboldServer,
+    shared: &SdServerConfig,
+    log_dir: &Path,
+    wait: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<ServerProcess, LaunchError> {
+    use crate::kobold::{KoboldRun, admin_dir};
+    use crate::kobold_image::Admin;
+    let name = k.name.clone();
+    let (client, binary, args, env, log) = match &k.run {
+        KoboldRun::Connect { url, password, .. } => (Client::kobold(url, password, None), None, vec![], vec![], None),
+        KoboldRun::Start { binary, device, .. } => {
+            let (dir, password) = admin_dir(log_dir.parent().unwrap_or(log_dir), &name)?;
+            let args = k.start_args(&dir, &password);
+            let log = log_dir.join(crate::kobold::log_name(&name));
+            let admin = Admin {
+                binary: binary.clone(),
+                args: args.clone(),
+                dir,
+                password,
+                model_dirs: shared.model_dirs.clone(),
+                log: Some(log.clone()),
+                swap: k.swap && k.chat.as_ref().is_some_and(|c| !c.model.is_empty()),
+            };
+            let env = crate::pe::device_env(device);
+            (Client::kobold(&k.base_url(), "", Some(admin)), Some(binary.clone()), args, env, Some(log))
+        }
+    };
+    let mut proc = ServerProcess {
+        name: name.clone(),
+        device: k.device(),
+        client: client.clone(),
+        child: None,
+        log: None,
+        group: true,
+    };
+    if client.capabilities().is_ok() {
+        return Ok(proc);
+    }
+    let (Some(binary), Some(log)) = (binary, log) else {
+        return Err(LaunchError::NotRunning { name, url: k.base_url() });
+    };
+    fs::create_dir_all(log_dir)?;
+    let start = fs::metadata(&log).map_or(0, |m| m.len());
+    let child = crate::kobold::spawn(&binary, &args, &env, &log, !shared.leave_running).map_err(|e| {
+        LaunchError::Spawn { name: name.clone(), binary: binary.clone(), source: std::io::Error::other(e) }
+    })?;
+    proc.child = Some(child);
+    proc.log = Some(log.clone());
+    wait_up(proc, log, start, wait, cancel)
+}
+
+/// Waits for a started server to answer (its log since `start` says why
+/// if it exits).
+fn wait_up(
+    mut proc: ServerProcess,
+    log: PathBuf,
+    start: u64,
+    wait: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<ServerProcess, LaunchError> {
+    let name = proc.name.clone();
+    let client = proc.client.clone();
     let deadline = Instant::now() + wait;
     loop {
         if client.capabilities().is_ok() {
@@ -152,9 +231,17 @@ pub fn open_cancellable(
     }
 }
 
-/// Where a `Start` server logs.
+/// Where a started server logs.
 pub fn log_path(log_dir: &Path, server: &ServerConfig) -> PathBuf {
-    log_dir.join(format!("sd-server-{}.log", server.name()))
+    match server {
+        ServerConfig::Kobold(k) => log_dir.join(crate::kobold::log_name(&k.name)),
+        _ => log_dir.join(log_name(server.name())),
+    }
+}
+
+/// A started sd-server's log file name, by the server's name.
+pub fn log_name(server: &str) -> String {
+    format!("sd-server-{server}.log")
 }
 
 /// What a starting server is doing, from its log since byte `start`: the
@@ -203,7 +290,8 @@ fn tail(log: &Path, start: u64) -> String {
 
 /// `sd-server --list-devices`, one line per device as printed.
 pub fn list_devices(binary: &str) -> std::io::Result<Vec<String>> {
-    let out = Command::new(binary).arg("--list-devices").stdin(Stdio::null()).output()?;
+    let mut cmd = Command::new(binary);
+    let out = crate::process::background(&mut cmd, false).arg("--list-devices").stdin(Stdio::null()).output()?;
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)

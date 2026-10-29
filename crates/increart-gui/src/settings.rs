@@ -1,32 +1,116 @@
-//! The Settings window (top bar ⚙) and the status bar's notification bell.
+//! The Settings dialog (top bar ⚙) and the status bar's notification bell.
 
 use eframe::egui::{self, RichText};
+use increart_core::model::StoreFormat;
 use increart_core::notify::{self, AlertRule, Notifications, Sound};
+use increart_gui_core::state::SettingsTab;
 use increart_gui_core::{AppState, Msg};
 
-use crate::widgets::{BAD, GOOD, ic, ph};
+use crate::widgets::{BAD, GOOD, dialog_buttons, ic, ph};
 
 pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     if !st.settings_open {
         return;
     }
-    let mut open = true;
     let mut n = st.config.notifications.clone();
-    egui::Window::new(ic(ph::GEAR, "Settings")).open(&mut open).default_width(620.0).collapsible(false).show(
-        ctx,
-        |ui| {
-            ui.horizontal(|ui| {
-                let _ = ui.selectable_label(true, ic(ph::BELL, "Notifications"));
-            });
-            ui.separator();
-            notifications(ui, st, &mut n, out);
-        },
-    );
+    // a modal (the rest dims); changes apply as they are made, so only Close
+    let m = egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
+        ui.set_width(620.0);
+        ui.heading(ic(ph::GEAR, "Settings"));
+        ui.horizontal(|ui| {
+            for (tab, icon, name) in
+                [(SettingsTab::Notifications, ph::BELL, "Notifications"), (SettingsTab::Library, ph::BOOKS, "Library")]
+            {
+                if ui.selectable_label(st.settings_tab == tab, ic(icon, name)).clicked() && st.settings_tab != tab {
+                    out.push(Msg::SettingsTab(tab));
+                }
+            }
+        });
+        ui.separator();
+        match st.settings_tab {
+            SettingsTab::Notifications => notifications(ui, st, &mut n, out),
+            SettingsTab::Library => library(ui, st, out),
+        }
+        ui.add_space(8.0);
+        dialog_buttons(ui, |ui| ui.button("Close   Esc").clicked())
+    });
     if n != st.config.notifications {
         out.push(Msg::SetNotifications(n));
     }
-    if !open {
+    if m.inner || m.should_close() {
         out.push(Msg::Settings(false));
+    }
+}
+
+/// This library's own settings: how its images are stored.
+fn library(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    if let Some(root) = &st.library {
+        ui.weak(format!("For this library only ({})", root.display()));
+    }
+    ui.add_space(4.0);
+    ui.label(RichText::new("Image storage").strong());
+    let Some(info) = st.store else {
+        ui.spinner();
+        return;
+    };
+    let mut f = info.format;
+    ui.add_enabled_ui(st.converting.is_none(), |ui| {
+        ui.radio_value(&mut f, StoreFormat::Png, "PNG").on_hover_text("readable by every image program");
+        ui.radio_value(&mut f, StoreFormat::Webp, "WebP, lossless")
+            .on_hover_text("about half the size of PNG, the same pixels exactly; most image programs read it");
+    });
+    if f != info.format {
+        out.push(Msg::SetStoreFormat(f));
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.weak("New images are stored this way. Images already stored stay as they are until you convert them.");
+    });
+    ui.add_space(8.0);
+    ui.label(RichText::new("Stored now").strong());
+    let c = info.counts;
+    for (name, (n, bytes)) in [("PNG", c.png), ("WebP", c.webp)] {
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            ui.label(format!("{name}: {n} image(s), {}", size(bytes)));
+        });
+    }
+    let others = match info.format {
+        StoreFormat::Png => c.webp.0,
+        StoreFormat::Webp => c.png.0,
+    };
+    ui.add_space(4.0);
+    if let Some((done, total)) = st.converting {
+        ui.horizontal(|ui| {
+            let progress = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+            ui.add(
+                egui::ProgressBar::new(progress)
+                    .desired_width(380.0)
+                    .text(format!("converting to {}: {done} of {total}", info.format.name())),
+            );
+            if ui.button("Stop").on_hover_text("after the images being converted now").clicked() {
+                out.push(Msg::CancelConvert);
+            }
+        });
+    } else if others > 0 {
+        let label = format!("Convert {others} image(s) to {}…", info.format.name());
+        if ui.button(ic(ph::ARROWS_CLOCKWISE, &label)).clicked() {
+            out.push(Msg::ConvertStore);
+        }
+    } else {
+        ui.weak(format!("Every image is stored as {}.", info.format.name()));
+    }
+    if info.format == StoreFormat::Webp || c.webp.0 > 0 {
+        ui.add_space(4.0);
+        ui.weak("Older versions of IncreArt can't open a library holding WebP images.");
+    }
+}
+
+fn size(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 => format!("{:.2} GB", n as f64 / (1 << 30) as f64),
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
+        n => format!("{:.0} KB", n as f64 / (1 << 10) as f64),
     }
 }
 

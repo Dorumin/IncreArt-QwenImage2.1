@@ -422,3 +422,181 @@ fn renaming_and_moving_a_project_mid_run_keeps_every_output() {
     let report = common::verify(s.lib.lock().unwrap().root());
     assert!(report.trim_end().ends_with("problems: none"), "{report}");
 }
+
+// ------------------------------------------------------------- KoboldCpp
+
+use common::fake_kobold::FakeKobold;
+#[cfg(unix)]
+use common::fake_kobold::export_script;
+use increart_core::kobold_image::Admin;
+
+/// The run's model files under a model folder, for KoboldCpp to find.
+fn model_dir(dir: &Path) -> String {
+    for (_, id) in FILES {
+        let p = dir.join("models").join(id);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "").unwrap();
+    }
+    dir.join("models").to_string_lossy().into_owned()
+}
+
+fn kobold_engine(s: &Setup, k: &FakeKobold, admin: Option<Admin>) -> Engine {
+    let client = Client::kobold(&k.url, "", admin);
+    let ep = Endpoint { name: "kcpp".into(), device: "Vulkan1".into(), client };
+    Engine::start(s.lib.clone(), vec![ep], opts(), None)
+}
+
+#[cfg(unix)]
+fn admin(k: &FakeKobold, dir: &Path) -> Admin {
+    let admin_dir = dir.join("admin");
+    k.with(|st| st.admin = Some((admin_dir.clone(), "pw".into())));
+    Admin {
+        binary: export_script(dir),
+        args: vec!["--port".into(), "5001".into(), "--nomodel".into(), "--admin".into()],
+        dir: admin_dir,
+        password: "pw".into(),
+        model_dirs: vec![model_dir(dir)],
+        log: None,
+        swap: false,
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn koboldcpp_loads_the_model_and_generates() {
+    let s = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let k = FakeKobold::start("");
+    let admin = admin(&k, tmp.path());
+    let models = admin.model_dirs[0].clone();
+    let run = new_run(&s, "qwen-image-21", 2, false);
+    let engine = kobold_engine(&s, &k, Some(admin));
+    engine.queue_run(&run);
+    let events = collect(&engine, run_done(&run));
+    assert_eq!(outputs(&events).iter().map(|(seed, _)| *seed).collect::<Vec<_>>(), [0, 1]);
+    // loaded by a reload with the settings KoboldCpp wrote: launch args, model files
+    assert_eq!(k.count("reload_config"), 1);
+    assert_eq!(k.with(|st| st.sdmodel.clone()), format!("{models}/diffusion_models/q.safetensors"));
+    let kcpps = std::fs::read_dir(tmp.path().join("admin")).unwrap().flatten().next().unwrap().path();
+    let args = std::fs::read_to_string(kcpps).unwrap();
+    assert!(args.starts_with("--port\n5001\n--admin\n--sdmodel\n"), "{args}");
+    assert!(args.contains(&format!("--sdvae\n{models}/vae/v.safetensors\n")), "{args}");
+    // A1111 bodies: the run's settings, refs as extra images
+    let gens = k.generations();
+    assert_eq!(gens.len(), 2);
+    let (path, body) = &gens[0];
+    assert_eq!(path, "/sdapi/v1/txt2img");
+    assert_eq!((body["steps"].as_u64(), body["cfg_scale"].as_f64()), (Some(20), Some(6.0)));
+    assert_eq!((body["sampler_name"].as_str(), body["flow_shift"].as_f64()), (Some("euler"), Some(3.0)));
+    assert_eq!(body["extra_images"].as_array().unwrap().len(), 1);
+    // previews with steps came through; recipes say what generated
+    assert!(events.iter().any(|e| matches!(e, Event::Progress { step, total: 20, .. } if *step > 0)));
+    let lib = s.lib.lock().unwrap();
+    let recipe = lib.recipe(&outputs(&events)[0].1).unwrap().unwrap();
+    assert_eq!((recipe.sdcpp.as_str(), recipe.device.as_str()), ("koboldcpp 1.123.1", "Vulkan1"));
+}
+
+#[test]
+#[cfg(unix)]
+fn koboldcpp_swapping_takes_turns_with_prompt_enhance() {
+    let s = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let k = FakeKobold::start("");
+    k.with(|st| st.gen_ms = 400);
+    let mut admin = admin(&k, tmp.path());
+    admin.args.extend(["--model", "/m/chat.gguf", "--mmproj", "/m/proj.gguf"].map(String::from));
+    admin.swap = true;
+    let run = new_run(&s, "qwen-image-21", 2, false);
+    let engine = kobold_engine(&s, &k, Some(admin));
+    engine.queue_run(&run);
+    collect(&engine, |e, _| matches!(e, Event::Progress { step, .. } if *step > 0));
+    // an ask while an image generates waits for it, then has the chat model back
+    let finished = k.with(|st| st.finished);
+    let turn = increart_core::kobold_image::chat_turn(&k.url).unwrap().expect("a swapping server");
+    assert_eq!(k.with(|st| (st.finished, st.sdmodel.clone())), (finished + 1, String::new()));
+    let reloads = k.count("reload_config");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(k.count("reload_config"), reloads, "no image while the ask holds its turn");
+    drop(turn);
+    let events = collect(&engine, run_done(&run));
+    assert_eq!(outputs(&events).len(), 2);
+    // the image model's settings again, without the chat model
+    let sdmodel = k.with(|st| st.sdmodel.clone());
+    assert!(sdmodel.ends_with("diffusion_models/q.safetensors"), "{sdmodel}");
+    let kcpps = std::fs::read_dir(tmp.path().join("admin")).unwrap().flatten().next().unwrap().path();
+    let args = std::fs::read_to_string(kcpps).unwrap();
+    assert!(!args.contains("--model\n") && !args.contains("chat.gguf"), "{args}");
+    assert!(increart_core::kobold_image::chat_turn("http://127.0.0.1:1").unwrap().is_none());
+}
+
+#[test]
+fn koboldcpp_cancel_closes_the_generation() {
+    let s = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let models = model_dir(tmp.path());
+    let k = FakeKobold::start(&format!("{models}/diffusion_models/q.safetensors"));
+    k.with(|st| st.gen_ms = 5_000);
+    let run = new_run(&s, "qwen-image-21", 3, false);
+    // started elsewhere, running the run's model: used without admin
+    let mut o = opts();
+    o.warm_up = false;
+    let ep = Endpoint { name: "kcpp".into(), device: String::new(), client: Client::kobold(&k.url, "", None) };
+    let engine = Engine::start(s.lib.clone(), vec![ep], o, None);
+    engine.queue_run(&run);
+    collect(&engine, |e, _| matches!(e, Event::Progress { .. }));
+    let t = Instant::now();
+    engine.cancel_run(&run, Stop::Now);
+    let events = collect(&engine, run_done(&run));
+    assert!(t.elapsed() < Duration::from_secs(3), "stopped, not waited out: {:?}", t.elapsed());
+    assert!(outputs(&events).is_empty());
+    // the second in flight may start between the two cancels: closed too
+    assert!(k.count("2img") <= 2, "the third never sent");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(k.with(|st| st.finished), 0, "none ran to the end");
+    assert_eq!(k.count("reload_config"), 0);
+}
+
+#[test]
+fn koboldcpp_without_admin_keeps_its_model() {
+    let s = setup();
+    let k = FakeKobold::start("/models/other.safetensors");
+    let run = new_run(&s, "qwen-image-21", 1, false);
+    let engine = kobold_engine(&s, &k, None);
+    engine.queue_run(&run);
+    let events = collect(&engine, |e, _| matches!(e, Event::Problem(_)));
+    let Some(Event::Problem(p)) = events.last() else { unreachable!() };
+    assert!(p.contains("it runs other.safetensors and can't switch to q.safetensors"), "{p}");
+    engine.cancel_run(&run, Stop::Now);
+}
+
+#[test]
+#[cfg(unix)]
+fn koboldcpp_failed_load_says_why() {
+    let s = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let k = FakeKobold::start("");
+    let mut admin = admin(&k, tmp.path());
+    let log = tmp.path().join("k.log");
+    std::fs::write(&log, "earlier: error loading\n").unwrap();
+    admin.log = Some(log.clone());
+    let model = format!("{}/diffusion_models/q.safetensors", admin.model_dirs[0]);
+    k.with(|st| st.broken.push(model.clone()));
+    // the reason lands in the log while it restarts
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        let mut f = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+        std::io::Write::write_all(&mut f, b"Cannot find image model file: q.safetensors\n").unwrap();
+    });
+    let client = Client::kobold(&k.url, "", Some(admin));
+    let key = increart_core::sdserver::ModelKey::from(&model_sel());
+    let err = client.load_model(&key).unwrap_err();
+    writer.join().unwrap();
+    assert_eq!(err.to_string(), "model load failed: Cannot find image model file: q.safetensors");
+    assert_eq!(client.model_status().unwrap().state, "empty");
+    drop(s);
+}
+
+#[cfg(unix)]
+fn model_sel() -> ModelSelection {
+    model("qwen-image-21")
+}

@@ -7,8 +7,8 @@ use increart_core::HistoryKey;
 use increart_core::config::{Config, RecipePreset, Resolution, ServerConfig, ServerPreset, TreeOrder};
 use increart_core::history::{HistoryEntry, HistoryKind};
 use increart_core::id::Timestamp;
-use increart_core::model::IdeaSource;
 use increart_core::model::{GenerateDraft, GenerateImage, IdeaDraftFile};
+use increart_core::model::{IdeaSource, ImageEdits};
 use increart_core::model::{Recipe, SourceInfo};
 use increart_core::prompts::{PromptPreset, PromptPresets, SuggestAsk, Sweep};
 use increart_core::scan::{IdeaEntry, OutputLink, ProjectEntry};
@@ -50,6 +50,8 @@ pub struct LibFilter {
     pub promoted: Option<bool>,
     /// Most used first (as ref or start image), instead of newest first.
     pub most_used: bool,
+    /// The edited copies (Crop / mark…) too, from `input/edited/`.
+    pub show_hidden: bool,
 }
 
 /// An input image's metadata from its file: where it was imported from, and
@@ -64,8 +66,6 @@ pub struct InputMeta {
 /// can be hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InfoPanel {
-    /// The Idea inbox Grid's current idea.
-    Inbox,
     /// The Input library's idea.
     Library,
     /// The Output library's selected image (its lineage).
@@ -100,7 +100,9 @@ impl IdeaOrigin {
             IdeaSource::Clipboard => IdeaOrigin::Clipboard,
             IdeaSource::InboxFolder => IdeaOrigin::InboxFolder,
             IdeaSource::DroppedFile { .. } => IdeaOrigin::DroppedFile,
-            IdeaSource::FromOutput { .. } | IdeaSource::Tiled { .. } => IdeaOrigin::FromOutput,
+            IdeaSource::FromOutput { .. } | IdeaSource::Tiled { .. } | IdeaSource::Edited { .. } => {
+                IdeaOrigin::FromOutput
+            }
         }
     }
 
@@ -248,7 +250,8 @@ impl OutputFilter {
 }
 
 /// Generate's From library… picker: a full-window browser of the input
-/// library's and the output library's images, to add as references.
+/// library's and the output library's images, to add as references (or,
+/// for Compare with…, the one image to compare against).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefPicker {
     pub source: RefSource,
@@ -258,6 +261,7 @@ pub struct RefPicker {
     pub ratings: Ratings,
     /// Chosen to add, in the order clicked.
     pub chosen: Vec<ImageRef>,
+    pub target: PickTarget,
 }
 
 /// The title dialog: an output image and the title being typed.
@@ -273,7 +277,37 @@ pub enum RefSource {
     /// The input library, or one of its folders (relative to
     /// `input/library/`).
     Inputs(Option<PathBuf>),
+    /// The Idea inbox.
+    Inbox,
     Outputs(OutputSource),
+    /// What the Tile window's images were made from.
+    TileInputs,
+    /// What an image was made from: its start image and references.
+    ImageInputs(ImageRef),
+    /// What a project's runs were made from.
+    ProjectInputs(Id),
+    /// The edited copies (Crop / mark…), hidden from the input library.
+    Edited,
+}
+
+/// Where the reference picker's choices go.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PickTarget {
+    /// Generate's references.
+    Generate,
+    /// The Tile window: from that cell on, else after its last tile.
+    Tile(Option<(u32, u32)>),
+    /// Compare with…: the image clicked becomes A, against Review's image
+    /// (or the Output library's selected one) as B.
+    Compare,
+}
+
+impl RefSource {
+    /// Tied to the image or tiling it was opened for: not where the
+    /// picker opens next time.
+    pub fn contextual(&self) -> bool {
+        matches!(self, RefSource::TileInputs | RefSource::ImageInputs(_) | RefSource::ProjectInputs(_))
+    }
 }
 
 /// An image the reference picker shows.
@@ -559,6 +593,75 @@ pub struct ExportDialog {
     pub by_id: bool,
 }
 
+/// Crop / mark… (DESIGN.md, Crop and mark): an image, what is drawn on it,
+/// and where the copy goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Markup {
+    /// The image drawn on (an edited copy reopens on its original, with
+    /// its edits).
+    pub image: ImageRef,
+    pub edits: ImageEdits,
+    pub undo: Vec<ImageEdits>,
+    pub redo: Vec<ImageEdits>,
+    /// Opened from this Generate image (project, index): the copy goes
+    /// in next to it, or in its place when it is itself an edited copy.
+    pub slot: Option<(Id, usize)>,
+    pub replace: bool,
+    /// The copy is being made.
+    pub saving: bool,
+}
+
+/// Where a saved copy goes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditedTo {
+    /// Only into `input/edited/`.
+    Library,
+    /// Also into the selected project's Generate form, as a reference.
+    UseInGenerate,
+    /// Next to (or in place of) a Generate image: project, index, replace.
+    Generate(Id, usize, bool),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkTool {
+    Crop,
+    #[default]
+    Pencil,
+    Rect,
+    Ellipse,
+    Eraser,
+}
+
+/// The crop's aspect ratio.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CropAspect {
+    #[default]
+    Free,
+    /// The original image's.
+    Original,
+    /// The Generate form's size.
+    Generate,
+}
+
+/// The editor's tools, kept between images for the session.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarkTools {
+    pub tool: MarkTool,
+    /// Colour and opacity (alpha, in quarters: 25, 50, 75 or 100%).
+    pub color: [u8; 4],
+    /// Line width, in thousandths of the image's longer side.
+    pub width: f32,
+    pub aspect: CropAspect,
+    /// Crop sides to multiples of 32.
+    pub snap32: bool,
+}
+
+impl Default for MarkTools {
+    fn default() -> Self {
+        Self { tool: MarkTool::Pencil, color: [230, 30, 30, 255], width: 3.0, aspect: CropAspect::Free, snap32: false }
+    }
+}
+
 /// The Tile dialog: picked images on a grid (DESIGN.md, Tiling); its
 /// settings are `config.tile`.
 #[derive(Clone, Debug, PartialEq)]
@@ -568,6 +671,8 @@ pub struct TileDialog {
     pub selected: Option<usize>,
     /// Compositions under way.
     pub working: usize,
+    /// Opened from Generate: its img2img start image (`{kind}` "start").
+    pub start: Option<ImageRef>,
 }
 
 /// What "Captions from" fills every tile's caption with.
@@ -587,7 +692,7 @@ pub enum CaptionFill {
 }
 
 /// What a caption's `{placeholders}` can be (DESIGN.md, Tiling).
-pub const CAPTION_FIELDS: [(&str, &str); 12] = [
+pub const CAPTION_FIELDS: [(&str, &str); 13] = [
     ("n", "the tile's number"),
     ("style", "the sweep row (style or setting), else the run label"),
     ("seed", "the seed"),
@@ -600,6 +705,7 @@ pub const CAPTION_FIELDS: [(&str, &str); 12] = [
     ("run", "the run label"),
     ("prompt", "the prompt"),
     ("project", "the project's name"),
+    ("kind", "output, input or pasted"),
 ];
 
 /// A run's settings in a line: "20 steps · cfg 3 · shift 3.1 · strength 0.6".
@@ -771,6 +877,72 @@ pub enum ScaleBy {
     Height,
 }
 
+/// The model presets editor (DESIGN.md, Model presets): a working copy of
+/// `config.recipes`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipeEditor {
+    pub rows: Vec<RecipeRow>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipeRow {
+    pub preset: RecipePreset,
+    /// Its index in `config.recipes` (`None`: added here), so Generate keeps
+    /// its model through renames and moves.
+    pub origin: Option<usize>,
+    /// The custom sigmas as typed (comma-separated; empty: the recipe's).
+    pub sigmas: String,
+}
+
+impl RecipeEditor {
+    pub fn new(recipes: &[RecipePreset], selected: usize) -> RecipeEditor {
+        let rows = recipes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| RecipeRow {
+                preset: p.clone(),
+                origin: Some(i),
+                sigmas: p.custom_sigmas.iter().map(f32::to_string).collect::<Vec<_>>().join(", "),
+            })
+            .collect();
+        RecipeEditor { rows, selected: selected.min(recipes.len().saturating_sub(1)) }
+    }
+
+    /// Why it can't be saved, if it can't.
+    pub fn problem(&self) -> Option<String> {
+        let mut names = BTreeSet::new();
+        for r in &self.rows {
+            let p = &r.preset;
+            let name = p.name.trim();
+            if name.is_empty() {
+                return Some("A model preset has no name".into());
+            }
+            if !names.insert(name) {
+                return Some(format!("Two model presets are called {name}"));
+            }
+            if p.recipe.trim().is_empty() {
+                return Some(format!("{name} has no recipe"));
+            }
+            if !p.files.contains_key("diffusion_model") && !p.files.contains_key("model") {
+                return Some(format!("{name} has no diffusion model file"));
+            }
+            if let Some((slot, _)) = p.files.iter().find(|(_, f)| f.trim().is_empty()) {
+                return Some(format!("{name}: no file for {slot}"));
+            }
+            if parse_sigmas(&r.sigmas).is_none() {
+                return Some(format!("{name}: the sigmas aren't numbers"));
+            }
+        }
+        if self.rows.is_empty() { Some("Keep at least one model preset".into()) } else { None }
+    }
+}
+
+/// Comma- (or space-) separated sigmas; `None` if one isn't a number.
+pub fn parse_sigmas(text: &str) -> Option<Vec<f32>> {
+    text.split([',', ' ']).filter(|t| !t.trim().is_empty()).map(|t| t.trim().parse().ok()).collect()
+}
+
 /// The Scale dialog: a new size with the same aspect, from a megapixel
 /// count or one side.
 #[derive(Clone, Debug, PartialEq)]
@@ -939,6 +1111,8 @@ pub enum ZoomGrid {
     Output,
     /// The Input library's idea cards (their width).
     Library,
+    /// The Idea inbox's idea cards (their width).
+    Inbox,
 }
 
 /// The image grids' tile sizes (points): smaller can't be judged, larger
@@ -951,7 +1125,7 @@ impl ZoomGrid {
         match self {
             ZoomGrid::Review => 200,
             ZoomGrid::Output => 180,
-            ZoomGrid::Library => 210,
+            ZoomGrid::Library | ZoomGrid::Inbox => 210,
         }
     }
 }
@@ -1010,11 +1184,37 @@ pub enum OutputSource {
     Run(Id),
 }
 
-/// A question with Yes / Cancel; Yes sends `then`.
+/// A question with a button named for what it does (`verb`) and Cancel;
+/// the button sends `then`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Confirm {
     pub text: String,
+    pub verb: String,
     pub then: Box<crate::Msg>,
+}
+
+impl Confirm {
+    pub fn new(text: impl Into<String>, verb: impl Into<String>, then: crate::Msg) -> Self {
+        Self { text: text.into(), verb: verb.into(), then: Box::new(then) }
+    }
+}
+
+/// The log viewer: the started servers' logs (DESIGN.md, Server logs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogsView {
+    /// The log shown: its file name in the log folder.
+    pub file: Option<String>,
+    /// Only the lines containing this (any case).
+    pub search: String,
+    pub wrap: bool,
+    /// Keep to the end as the log grows.
+    pub follow: bool,
+}
+
+impl LogsView {
+    pub fn new(file: Option<String>) -> Self {
+        LogsView { file, search: String::new(), wrap: false, follow: true }
+    }
 }
 
 /// Start-up: pick a library, then servers, then the main window.
@@ -1049,6 +1249,8 @@ pub struct ServerDialog {
     pub draft: ServerPreset,
     /// `sd-server --list-devices`, once asked.
     pub devices: Option<Result<Vec<String>, String>>,
+    /// `koboldcpp --version` for this binary, once asked.
+    pub kobold_version: Option<(String, Result<String, String>)>,
     /// Per server of the draft while opening and after.
     pub progress: Vec<ServerProgress>,
     pub opening: bool,
@@ -1057,15 +1259,103 @@ pub struct ServerDialog {
     /// The setup wizard (no presets yet): builds `draft` from the listed
     /// devices, or a server to connect to.
     pub wizard: bool,
+    /// The wizard's KoboldCpp page (the sd-server one without).
+    pub kobold: Option<Box<KoboldWizard>>,
     /// Opened from the main window: it can be closed again, keeping the
     /// servers in use.
     pub from_main: bool,
-    /// The sd-server settings window (binary, models, devices).
+    /// The server settings window (KoboldCpp, sd-server, models folder).
     pub settings: bool,
     /// Why the command line's `--servers` didn't skip this screen.
     pub notice: Option<String>,
     /// The **Continue without servers** dialog.
     pub without: Option<Box<Without>>,
+}
+
+/// The setup wizard's KoboldCpp page: a preset by VRAM per GPU
+/// (`increart_core::tiers`), its models downloaded, then saved as a
+/// server preset and a recipe and opened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KoboldWizard {
+    pub binary: String,
+    /// Where the models go (in `koboldcpp/`); added to the model folders.
+    pub models_dir: String,
+    /// The GPUs listed; None while listing.
+    pub gpus: Option<Result<Vec<WizardGpu>, String>>,
+    /// "Choose presets myself": each GPU's `preset` counts.
+    pub choose: bool,
+    /// The RAM available, for the offloaded weights (GiB).
+    pub ram_gib: Option<f64>,
+    pub layout: increart_core::tiers::Layout,
+    /// The GPUs for prompt enhance (by number), when ticked by hand.
+    pub pe_gpus: Vec<u32>,
+    /// `pe_gpus` was ticked by hand; else [`KoboldWizard::default_pe_gpus`].
+    pub pe_by_hand: bool,
+    /// How KoboldCpp reaches the GPUs (and how they're numbered).
+    pub runtime: increart_core::pe::GpuRuntime,
+    /// Downloading the models for this plan.
+    pub downloading: Option<(increart_core::tiers::Plan, WizardDownload)>,
+    pub error: Option<String>,
+}
+
+/// A GPU in the wizard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WizardGpu {
+    pub gpu: increart_core::tiers::Gpu,
+    pub on: bool,
+    /// The preset chosen (card size, GB); None: by its memory.
+    pub preset: Option<u32>,
+    /// Added by hand: its memory is typed in.
+    pub by_hand: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WizardDownload {
+    /// Index into the plan's downloads.
+    pub file: usize,
+    pub done: u64,
+    pub total: Option<u64>,
+}
+
+impl KoboldWizard {
+    /// The ticked GPUs, each with the preset chosen (if choosing).
+    pub fn ticked(&self) -> Vec<(increart_core::tiers::Gpu, Option<u32>)> {
+        match &self.gpus {
+            Some(Ok(list)) => {
+                list.iter().filter(|g| g.on).map(|g| (g.gpu.clone(), g.preset.filter(|_| self.choose))).collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    pub fn plan(&self) -> Result<increart_core::tiers::Plan, String> {
+        self.plan_as(self.layout)
+    }
+
+    /// The plan with `layout` (for showing each choice).
+    pub fn plan_as(&self, layout: increart_core::tiers::Layout) -> Result<increart_core::tiers::Plan, String> {
+        let binary = if self.binary.trim().is_empty() { "koboldcpp" } else { self.binary.trim() };
+        let dir = std::path::Path::new(self.models_dir.trim());
+        let pe =
+            if self.pe_by_hand && layout == self.layout { self.pe_gpus.clone() } else { self.default_pe_gpus(layout) };
+        increart_core::tiers::plan(&self.ticked(), layout, &pe, self.runtime, binary, dir, self.ram_gib)
+    }
+
+    /// Prompt enhance's GPUs unless ticked by hand: with images on every
+    /// GPU, each whose preset has room to keep the chat model loaded beside
+    /// the image model; none listed (the layout's default: the biggest card,
+    /// or the next) when none has, or with a GPU of its own.
+    pub fn default_pe_gpus(&self, layout: increart_core::tiers::Layout) -> Vec<u32> {
+        use increart_core::tiers::{Layout, tier, tier_for};
+        if layout != Layout::ImagePerCard {
+            return vec![];
+        }
+        self.ticked()
+            .iter()
+            .filter(|(g, chosen)| chosen.and_then(tier).or_else(|| tier_for(g.vram_gib)).is_some_and(|t| !t.swap))
+            .map(|(g, _)| g.number)
+            .collect()
+    }
 }
 
 /// **Continue without servers**: the chat server to use meanwhile, if any.
@@ -1168,6 +1458,19 @@ pub struct GenerateForm {
 pub enum ReviewRun<'a> {
     Single(&'a increart_core::model::Run),
     Sweep(&'a str),
+}
+
+/// A run's start image, then its references, added to `v` unless there.
+fn run_inputs(run: &increart_core::model::Run, v: &mut Vec<ImageRef>) {
+    let init = match &run.mode {
+        increart_core::model::Mode::Edit { init, .. } => init.clone(),
+        increart_core::model::Mode::Generate => None,
+    };
+    for i in init.into_iter().chain(run.refs.iter().cloned()) {
+        if !v.contains(&i) {
+            v.push(i);
+        }
+    }
 }
 
 fn in_sweep(p: &ProjectEntry, run: &Id, sweep: &str) -> bool {
@@ -1301,7 +1604,12 @@ pub struct PeState {
     /// The chat server in use: the open preset's, or the one picked to
     /// continue without sd-servers.
     pub server: Option<increart_core::pe::PeServer>,
+    /// More chat servers sharing the asks with `server` (the preset's
+    /// [`chat_pool`](increart_core::config::ServerPreset::chat_pool)).
+    pub more: Vec<increart_core::pe::PeServer>,
     pub status: PeStatus,
+    /// Of `server` and `more`: how many are ready (when more than one).
+    pub ready: usize,
     /// Blanks asked to reroll: their answer replaces the values offered,
     /// rather than adding to them.
     pub rerolls: BTreeSet<BlankKey>,
@@ -1333,8 +1641,9 @@ pub struct PeState {
     pub added_blanks: Vec<(increart_core::prompts::PresetKey, Vec<String>)>,
     /// The batch ended with blanks added: keep them, or make them words?
     pub added_blanks_ask: bool,
-    /// The GPUs listed for it (`vulkaninfo`), once asked.
+    /// The GPUs listed for it, once asked, and the runtime that listed them.
     pub gpus: Option<Result<Vec<(u32, String)>, String>>,
+    pub gpus_runtime: increart_core::pe::GpuRuntime,
     /// The asks not answered yet, in the order they're worked on (the
     /// first is the one being worked on, unless it's still queued).
     pub jobs: Vec<PeJobState>,
@@ -1371,7 +1680,18 @@ impl PeState {
 
     /// How many asks are ahead of this one.
     pub fn ahead(&self, id: u64) -> usize {
-        self.jobs.iter().position(|j| j.id == id).unwrap_or(0)
+        self.jobs.iter().take_while(|j| j.id != id).filter(|j| matches!(j.step, PeStep::Queued)).count()
+    }
+
+    /// How many PE servers share the asks.
+    pub fn pool_size(&self) -> usize {
+        self.server.iter().count() + self.more.len()
+    }
+
+    /// The ask to show as "the one being worked on": the first answered,
+    /// else the first.
+    pub fn working(&self) -> Option<&PeJobState> {
+        self.jobs.iter().find(|j| !matches!(j.step, PeStep::Queued)).or(self.jobs.first())
     }
 
     /// How many times a blank waiting has been asked again.
@@ -1464,6 +1784,8 @@ pub struct PeJobState {
     /// Tokens a second while writing, and when worked out: kept for half a
     /// second so the figure can be read.
     pub rate: Option<(f64, f64)>,
+    /// The chat server answering it (once taken).
+    pub on: Option<String>,
 }
 
 /// Where an ask is.
@@ -1963,12 +2285,19 @@ pub enum PickKind {
     GenerateRefs,
     /// The Export dialog's destination folder.
     ExportDir,
-    /// Where Tile… saves its PNG.
-    TileFile,
+    /// Where Tile… saves its image, in this format.
+    TileFile(increart_core::config::TileFormat),
     SdServerBinary,
+    KoboldBinary,
     ModelDir,
     /// A file for the PE server being edited.
     Pe(PeFile),
+    /// A file for the preset editor's KoboldCpp entry (its index).
+    Kobold(usize, PeFile),
+    /// The KoboldCpp wizard's binary.
+    WizardBinary,
+    /// The KoboldCpp wizard's models folder.
+    WizardModels,
 }
 
 /// Which of a KoboldCpp PE server's files is picked.
@@ -1977,6 +2306,8 @@ pub enum PeFile {
     Binary,
     Model,
     Mmproj,
+    /// A `.kcpps` settings file.
+    Config,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2083,9 +2414,84 @@ pub struct NavHistory {
     pub(crate) restoring: bool,
 }
 
+/// Seconds the finished usage check stays in the status bar.
+pub const USAGE_CHECKED_SHOWN: f64 = 5.0;
+
+/// Where Review's **Generate ›** goes ([`AppState::review_generate`]).
+pub struct ReviewGenerate {
+    pub project: Id,
+    pub name: String,
+    pub image: Option<ImageRef>,
+    pub run: Option<Id>,
+}
+
+/// Review's Follow, as it goes.
+#[derive(Clone, Debug, Default)]
+pub struct Follow {
+    /// The image being shown, and seconds it has been on (not counting
+    /// paused, held or away).
+    pub shown: Option<ImageRef>,
+    pub elapsed: f64,
+    /// When `elapsed` was last brought up to date.
+    pub at: f64,
+    /// Paused from its button; held while the pointer is over the image
+    /// (with `pause_on_hover`).
+    pub paused: bool,
+    pub held: bool,
+    /// When images came, over the last [`Follow::WINDOW`] seconds.
+    pub arrivals: Vec<f64>,
+    /// The newest image seen, for telling the new ones.
+    pub newest: Option<Id>,
+    /// The last move on (when, and from which image): a rating just after
+    /// it is for the image that was there.
+    pub moved: Option<(f64, ImageRef)>,
+}
+
+impl Follow {
+    pub const WINDOW: f64 = 600.0;
+    /// A rating this soon after moving on rates the image before.
+    pub const GRACE: f64 = 0.4;
+
+    /// Seconds between images lately, if two or more came.
+    pub fn interval(&self, now: f64) -> Option<f64> {
+        let (first, n) = (self.arrivals.first()?, self.arrivals.len());
+        (n >= 2).then(|| (now - first).max(0.0) / (n - 1) as f64)
+    }
+}
+
+pub struct FollowCountdown {
+    /// Seconds to the next image, of `secs` an image.
+    pub left: f64,
+    pub secs: f64,
+    /// Images after the one shown.
+    pub ahead: usize,
+    pub paused: bool,
+    /// Held by the pointer, or not on Review's queue.
+    pub held: bool,
+}
+
+/// The Settings window's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsTab {
+    #[default]
+    Notifications,
+    /// This library's own settings (its image storage).
+    Library,
+}
+
+/// The open library's store format and what its stores hold now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreInfo {
+    pub format: increart_core::model::StoreFormat,
+    pub counts: increart_core::library::StoreCounts,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub config: Config,
+    /// The GPU runtime new KoboldCpp entries and the wizard start with
+    /// (CUDA when an NVIDIA driver is found, else Vulkan).
+    pub gpu_runtime: increart_core::pe::GpuRuntime,
     /// Where `config` is saved (`None`: not saved, e.g. in tests).
     pub config_path: Option<PathBuf>,
     pub phase: Phase,
@@ -2113,6 +2519,8 @@ pub struct AppState {
     pub proj_scope_kept: Option<PathBuf>,
     pub generate: GenerateForm,
     pub servers: Vec<ServerStatus>,
+    /// What each server can load, by name (asked once it's open).
+    pub server_models: BTreeMap<String, increart_core::sdserver::Loadable>,
     /// The shared sd-server settings `servers` were opened with.
     pub servers_opened_with: Option<increart_core::config::SdServerConfig>,
     pub engine_running: bool,
@@ -2159,12 +2567,18 @@ pub struct AppState {
     /// form it was queued with).
     pub new_sweep: Option<NewSweepAsk>,
     pub review_cursor: usize,
-    /// Review stays on the newest unreviewed image as they come (Single,
-    /// Grid, and Compare's B); going to another image turns it off.
+    /// Review moves on through the unreviewed images by itself, paced by
+    /// [`FollowPace`](increart_core::config::FollowPace), up to the newest
+    /// (Single, Grid, and Compare's B); going back turns it off.
     pub review_follow: bool,
+    pub follow: Follow,
     pub review_view: ReviewView,
     /// A/B compare: the pinned image (A).
     pub review_pinned: Option<ImageRef>,
+    /// A/B compare (Review's and the Output library's) with the pinned A
+    /// on the left and B, the image the arrows change, on the right (Swap
+    /// sides); B is on the left by default.
+    pub compare_flipped: bool,
     pub output_tab: OutputTab,
     pub output_source: OutputSource,
     /// Set by Show outputs: the Grid warns that filters hide images, or that
@@ -2175,6 +2589,8 @@ pub struct AppState {
     pub server_status: bool,
     /// "No server is connected" showing, after Queue.
     pub no_server_warning: bool,
+    /// The log viewer (**Logs…**), when open.
+    pub logs: Option<LogsView>,
     /// That warning was shown this session (it shows once per start).
     pub no_server_warned: bool,
     /// Queueing a sweep while the jobs go one at a time: asking whether to
@@ -2212,11 +2628,16 @@ pub struct AppState {
     pub startup_servers: Option<StartupServers>,
     /// Output library image whose lineage and recipe are shown.
     pub output_selected: Option<ImageRef>,
+    /// The Output library's Grid comparing against this (A), the selected
+    /// image being B.
+    pub output_compare: Option<ImageRef>,
     pub export: Option<ExportDialog>,
     /// Images picked in Review or the Output library's Grid, in the order
     /// picked: rated together, or tiled (DESIGN.md, Tiling).
     pub picked: Vec<ImageRef>,
     pub tile: Option<TileDialog>,
+    pub markup: Option<Markup>,
+    pub mark_tools: MarkTools,
     /// A composed image for the GUI to put on the clipboard.
     pub clipboard_image: Option<crate::tile::TileImage>,
     pub history_view: Option<HistoryView>,
@@ -2226,6 +2647,8 @@ pub struct AppState {
     pub idea_edit_dirty: Option<f64>,
     /// The resolution editor's working copy.
     pub res_editor: Option<Vec<Resolution>>,
+    /// The model presets editor, while open.
+    pub recipe_editor: Option<RecipeEditor>,
     pub scale: Option<ScaleDialog>,
     /// An image shown large over everything (double-click a reference or
     /// the start image in Generate).
@@ -2240,6 +2663,11 @@ pub struct AppState {
     pub job_info: Option<Id>,
     /// The Settings window.
     pub settings_open: bool,
+    pub settings_tab: SettingsTab,
+    /// For Settings ▸ Library, asked for when it shows.
+    pub store: Option<StoreInfo>,
+    /// A store conversion going on: images done, of how many.
+    pub converting: Option<(usize, usize)>,
     pub alerts: Alerts,
     /// How the library is watched for outside changes (Import tab).
     pub watch_status: String,
@@ -2288,6 +2716,9 @@ pub struct AppState {
     pub busy: usize,
     /// The usage check after opening, while it runs: images done, of how many.
     pub usage_check: Option<(usize, usize)>,
+    /// Once it's done: how many images it checked, and when (`now`), shown
+    /// for [`USAGE_CHECKED_SHOWN`] seconds.
+    pub usage_checked: Option<(usize, f64)>,
     /// Seconds, from `Msg::Tick` (the GUI's clock).
     pub now: f64,
     /// When the Generate form was last edited, while not yet autosaved.
@@ -2302,9 +2733,74 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// What the open servers can load (those that have said).
+    fn open_loadable(&self) -> impl Iterator<Item = &increart_core::sdserver::Loadable> {
+        self.servers.iter().filter_map(|s| self.server_models.get(&s.name))
+    }
+
+    /// The open servers that can run these files.
+    pub fn servers_running(&self, files: &BTreeMap<String, String>) -> Vec<&str> {
+        self.servers
+            .iter()
+            .filter(|s| self.server_models.get(&s.name).is_some_and(|l| l.runs(files)))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Why no open server can run these files, one line per server
+    /// ("kcpp-gpu1: …"); `None` when one can, or none has said.
+    pub fn why_no_server_runs(&self, files: &BTreeMap<String, String>) -> Option<Vec<String>> {
+        let known: Vec<_> =
+            self.servers.iter().filter_map(|s| self.server_models.get(&s.name).map(|l| (&s.name, l))).collect();
+        if known.is_empty() {
+            return None;
+        }
+        let why: Vec<String> =
+            known.iter().map(|(name, l)| l.why_not(files).map(|w| format!("{name}: {w}"))).collect::<Option<_>>()?;
+        Some(why)
+    }
+
+    /// Every model file the open servers list (KoboldCpp started elsewhere
+    /// lists none).
+    pub fn server_files(&self) -> BTreeSet<&str> {
+        use increart_core::sdserver::Loadable;
+        self.open_loadable()
+            .flat_map(|l| match l {
+                Loadable::Files { ids, .. } => ids.iter().map(String::as_str).collect(),
+                Loadable::Only(_) => vec![],
+            })
+            .collect()
+    }
+
+    /// The model presets (indices into `config.recipes`) an open server
+    /// can run; all of them until one has said what it can load.
+    pub fn runnable_recipes(&self) -> Vec<usize> {
+        let all = 0..self.config.recipes.len();
+        if self.open_loadable().next().is_none() {
+            return all.collect();
+        }
+        all.filter(|&i| self.open_loadable().any(|l| l.runs(&self.config.recipes[i].files))).collect()
+    }
+
+    /// Image models a KoboldCpp started elsewhere runs that no model preset
+    /// uses: (server, file name).
+    pub fn models_without_preset(&self) -> Vec<(&str, &str)> {
+        use increart_core::sdserver::Loadable;
+        self.servers
+            .iter()
+            .filter_map(|s| match self.server_models.get(&s.name) {
+                Some(l @ Loadable::Only(Some(file))) if !self.config.recipes.iter().any(|r| l.runs(&r.files)) => {
+                    Some((s.name.as_str(), file.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Fresh state: asks for a library (a recent one, or another folder).
     pub fn new(config: Config, config_path: Option<PathBuf>) -> AppState {
         AppState {
+            gpu_runtime: Default::default(),
             generate: GenerateForm::new(&config),
             config,
             config_path,
@@ -2325,6 +2821,7 @@ impl AppState {
             proj_folder: None,
             proj_scope_kept: None,
             servers: vec![],
+            server_models: BTreeMap::new(),
             servers_opened_with: None,
             engine_running: false,
             open_attempt: 0,
@@ -2347,14 +2844,17 @@ impl AppState {
             new_sweep: None,
             review_cursor: 0,
             review_follow: false,
+            follow: Follow::default(),
             review_view: ReviewView::Single,
             review_pinned: None,
+            compare_flipped: false,
             output_tab: OutputTab::Grid,
             output_source: OutputSource::AllProjects,
             output_notice: false,
             confirm: None,
             server_status: false,
             no_server_warning: false,
+            logs: None,
             no_server_warned: false,
             folder_view: FolderView::new(FvPlace::Projects),
             parked_folder_views: FvPlace::ALL[1..].iter().map(|p| FolderView::new(*p)).collect(),
@@ -2371,15 +2871,19 @@ impl AppState {
             project_search: String::new(),
             startup_servers: None,
             output_selected: None,
+            output_compare: None,
             export: None,
             picked: vec![],
             tile: None,
+            markup: None,
+            mark_tools: MarkTools::default(),
             clipboard_image: None,
             history_view: None,
             history_last: HashMap::new(),
             idea_edit: None,
             idea_edit_dirty: None,
             res_editor: None,
+            recipe_editor: None,
             scale: None,
             preview: None,
             ref_picker: None,
@@ -2389,6 +2893,9 @@ impl AppState {
             promote_last: None,
             job_info: None,
             settings_open: false,
+            settings_tab: SettingsTab::Notifications,
+            store: None,
+            converting: None,
             alerts: Alerts { focused: true, ..Default::default() },
             retag: None,
             new_project: None,
@@ -2414,6 +2921,7 @@ impl AppState {
             renaming: None,
             busy: 0,
             usage_check: None,
+            usage_checked: None,
             now: 0.0,
             generate_dirty: None,
             idea_dirty: None,
@@ -2460,6 +2968,7 @@ impl AppState {
             .filter(|e| match (&e.loc, &self.lib_folder) {
                 (IdeaLoc::Library(_), None) => true,
                 (IdeaLoc::Library(f), Some(sel)) => f.starts_with(sel),
+                (IdeaLoc::Edited, None) => self.lib_filter.show_hidden,
                 _ => false,
             })
             .collect();
@@ -2731,14 +3240,43 @@ impl AppState {
         let has = |s: &str| s.to_lowercase().contains(&q);
         let mut seen = std::collections::HashSet::new();
         let v: Vec<RefCandidate> = match &p.source {
-            RefSource::Inputs(folder) => {
+            RefSource::TileInputs | RefSource::ImageInputs(_) | RefSource::ProjectInputs(_) => {
+                let images: Vec<ImageRef> = match &p.source {
+                    RefSource::ImageInputs(i) => self.image_inputs(i),
+                    RefSource::ProjectInputs(id) => self.project_inputs(id),
+                    _ => self.tile.iter().flat_map(|t| t.layout.images()).flat_map(|i| self.image_inputs(i)).collect(),
+                };
+                images
+                    .into_iter()
+                    .map(|image| {
+                        let link = self.output_link(&image).and_then(|o| self.index.run(&o.name.run).map(|r| (o, r)));
+                        let (title, text) = match link {
+                            Some((o, (proj, run))) => {
+                                (format!("{} · {} · seed {}", proj.name(), run.label, o.name.seed), run.prompt.clone())
+                            }
+                            None => {
+                                let idea = self.index.ideas.iter().find(|e| e.idea.images.contains(&image.id));
+                                let title = idea.map(|e| e.idea.title.clone()).filter(|t| !t.is_empty());
+                                (
+                                    title.unwrap_or_else(|| "(untitled)".into()),
+                                    idea.map(|e| e.idea.text.clone()).unwrap_or_default(),
+                                )
+                            }
+                        };
+                        RefCandidate { image, title, text, verdict: None }
+                    })
+                    .filter(|c| q.is_empty() || has(&c.title) || has(&c.text))
+                    .collect()
+            }
+            RefSource::Inputs(_) | RefSource::Inbox | RefSource::Edited => {
                 let mut ideas: Vec<&IdeaEntry> = self
                     .index
                     .ideas
                     .iter()
-                    .filter(|e| match (&e.loc, folder) {
-                        (IdeaLoc::Library(_), None) => true,
-                        (IdeaLoc::Library(f), Some(sel)) => f.starts_with(sel),
+                    .filter(|e| match (&e.loc, &p.source) {
+                        (IdeaLoc::Unreviewed, RefSource::Inbox) | (IdeaLoc::Edited, RefSource::Edited) => true,
+                        (IdeaLoc::Library(_), RefSource::Inputs(None)) => true,
+                        (IdeaLoc::Library(f), RefSource::Inputs(Some(sel))) => f.starts_with(sel),
                         _ => false,
                     })
                     .filter(|e| {
@@ -2809,6 +3347,22 @@ impl AppState {
         let p = self.preview.as_ref()?;
         let list = self.preview_list()?;
         list.iter().position(|o| &o.image == p).map(|i| (i, list.len()))
+    }
+
+    /// Follow's countdown on the image shown, while it is on.
+    pub fn follow_countdown(&self) -> Option<FollowCountdown> {
+        if !self.review_follow {
+            return None;
+        }
+        let ahead = self.review_queue().len().saturating_sub(self.review_cursor + 1);
+        let secs = self.config.review_follow.secs(ahead, self.follow.interval(self.now));
+        Some(FollowCountdown {
+            left: (secs - self.follow.elapsed).max(0.0),
+            secs,
+            ahead,
+            paused: self.follow.paused,
+            held: self.follow.held || self.tab != Tab::Review || self.review_view == ReviewView::Sheet,
+        })
     }
 
     /// Unreviewed outputs in the review scope, oldest first.
@@ -2888,7 +3442,14 @@ impl AppState {
 
     /// An output image's caption.
     pub fn caption(&self, image: &ImageRef, fill: CaptionFill) -> String {
-        let Some(o) = self.output_link(image) else { return String::new() };
+        // an input: its title, else "input"
+        let Some(o) = self.output_link(image) else {
+            return match fill {
+                CaptionFill::Clear => String::new(),
+                CaptionFill::Title => self.input_title(image).unwrap_or_default().to_string(),
+                _ => self.input_kind(image).into(),
+            };
+        };
         let run = self.index.run(&o.name.run).map(|(_, r)| r);
         match fill {
             CaptionFill::Clear => String::new(),
@@ -2929,7 +3490,16 @@ impl AppState {
                     Some(increart_core::model::Mode::Edit { strength, init: Some(_) }) => fmt(*strength),
                     _ => String::new(),
                 },
-                "title" => image.and_then(|i| self.image_title(i)).unwrap_or_default().to_string(),
+                "title" => {
+                    image.and_then(|i| self.image_title(i).or(self.input_title(i))).unwrap_or_default().to_string()
+                }
+                "kind" => match image {
+                    None => "pasted",
+                    Some(i) if self.input_kind(i) == "start" => "start",
+                    Some(_) if o.is_some() => "output",
+                    Some(_) => "input",
+                }
+                .to_string(),
                 "run" => run.map(|r| r.label.clone()).unwrap_or_default(),
                 "prompt" => run.map(|r| r.prompt.clone()).unwrap_or_default(),
                 "project" => found.map(|(p, _)| p.name().to_string()).unwrap_or_default(),
@@ -3020,6 +3590,7 @@ impl AppState {
             ZoomGrid::Review => self.config.review_grid_cell,
             ZoomGrid::Output => self.config.output_grid_cell,
             ZoomGrid::Library => self.config.library_grid_cell,
+            ZoomGrid::Inbox => self.config.inbox_grid_cell,
         };
         if n == 0 { grid.default_size() } else { n.clamp(GRID_CELL_MIN, GRID_CELL_MAX) }
     }
@@ -3030,6 +3601,30 @@ impl AppState {
             0 => SHEET_CELL_DEFAULT,
             n => n.clamp(SHEET_CELL_MIN, SHEET_CELL_MAX),
         }
+    }
+
+    /// What Review's **Generate ›** opens: the project of the image shown
+    /// (the cursor's; on the contact sheet, its row's), else the scope's
+    /// project; with that image and its run, when there is one.
+    pub fn review_generate(&self) -> Option<ReviewGenerate> {
+        let (image, run) = if self.review_view == ReviewView::Sheet {
+            let sheet = self.sheet();
+            let row = sheet.as_ref().and_then(|sh| sh.rows.get(self.sheet_cell.0));
+            let image = row.and_then(|r| match r.cells.get(self.sheet_cell.1) {
+                Some(SheetCell::Image(o)) => Some(o.image.clone()),
+                _ => None,
+            });
+            (image, row.map(|r| r.run.id.clone()))
+        } else {
+            let o = self.review_queue().get(self.review_cursor).map(|o| (o.image.clone(), o.name.run.clone()));
+            (o.as_ref().map(|o| o.0.clone()), o.map(|o| o.1))
+        };
+        let project = match run.as_ref().and_then(|r| self.index.run(r)) {
+            Some((p, _)) => p.project.id.clone(),
+            None => self.review_scope.clone()?,
+        };
+        let name = self.index.project(&project)?.name();
+        Some(ReviewGenerate { project, name, image, run })
     }
 
     /// The Review scope's sweep as a contact sheet.
@@ -3086,6 +3681,83 @@ impl AppState {
     }
 
     /// An output image's title (project.rsn `titles`), if it has one.
+    /// What an output was made from: its start image, then its references
+    /// (none for other images).
+    pub fn image_inputs(&self, image: &ImageRef) -> Vec<ImageRef> {
+        let Some((_, run)) = self.output_link(image).and_then(|o| self.index.run(&o.name.run)) else { return vec![] };
+        let mut v = vec![];
+        run_inputs(run, &mut v);
+        v
+    }
+
+    /// What `input` was to the output `image`'s run: `Some(None)` its start
+    /// image, `Some(Some(n))` its reference `<imageN>`.
+    pub fn input_role(&self, image: &ImageRef, input: &ImageRef) -> Option<Option<usize>> {
+        let (_, run) = self.output_link(image).and_then(|o| self.index.run(&o.name.run))?;
+        if let Some(n) = run.refs.iter().position(|r| r == input) {
+            return Some(Some(n + 1));
+        }
+        match &run.mode {
+            increart_core::model::Mode::Edit { init: Some(i), .. } if i == input => Some(None),
+            _ => None,
+        }
+    }
+
+    /// What a project's runs were made from, the newest run's first, each
+    /// image once.
+    pub fn project_inputs(&self, project: &Id) -> Vec<ImageRef> {
+        let mut v = vec![];
+        if let Some(p) = self.index.projects.iter().find(|p| &p.project.id == project) {
+            for run in p.runs.iter().rev() {
+                run_inputs(run, &mut v);
+            }
+        }
+        v
+    }
+
+    /// What Compare with… compares against: Review's image, or the Output
+    /// library's selected one.
+    pub fn compare_b(&self) -> Option<ImageRef> {
+        if self.tab == Tab::OutputLibrary {
+            return self.output_selected.clone();
+        }
+        let queue = self.review_queue();
+        queue.get(self.review_cursor.min(queue.len().saturating_sub(1))).map(|o| o.image.clone())
+    }
+
+    /// A tiled input's `{kind}`: Generate's start image, else "input".
+    fn input_kind(&self, image: &ImageRef) -> &'static str {
+        if self.tile.as_ref().and_then(|t| t.start.as_ref()) == Some(image) { "start" } else { "input" }
+    }
+
+    /// An input image's idea's title.
+    /// What an edited copy (Crop / mark…) was made from, and how.
+    pub fn edited_source(&self, image: &ImageRef) -> Option<(&ImageRef, &ImageEdits)> {
+        self.index.ideas.iter().filter(|e| e.loc == IdeaLoc::Edited && e.idea.images.contains(&image.id)).find_map(
+            |e| match &e.idea.source {
+                IdeaSource::Edited { image, edits } => Some((image, edits)),
+                _ => None,
+            },
+        )
+    }
+
+    /// The edited copies made from an image, newest first.
+    pub fn edited_copies(&self, image: &ImageRef) -> Vec<&IdeaEntry> {
+        let mut v: Vec<_> = self
+            .index
+            .ideas
+            .iter()
+            .filter(|e| e.loc == IdeaLoc::Edited)
+            .filter(|e| matches!(&e.idea.source, IdeaSource::Edited { image: i, .. } if i == image))
+            .collect();
+        v.sort_by(|a, b| b.idea.id.cmp(&a.idea.id));
+        v
+    }
+
+    pub fn input_title(&self, image: &ImageRef) -> Option<&str> {
+        self.index.ideas.iter().find(|e| e.idea.images.contains(&image.id)).map(|e| e.idea.title.as_str())
+    }
+
     pub fn image_title(&self, image: &ImageRef) -> Option<&str> {
         let p = self.project_of_link(self.output_link(image)?)?;
         p.project.titles.get(&image.id).map(String::as_str)

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use increart_core::config::{Config, ReviewOrder, ServerConfig, ServerPreset, TreeOrder};
+use increart_core::pe::GpuRuntime;
 use increart_core::{IdeaLoc, Verdict};
 use increart_gui_core::*;
 
@@ -300,6 +301,46 @@ fn trees_create_rename_move_delete() {
 }
 
 #[test]
+fn library_settings_convert_the_stores() {
+    use increart_core::model::StoreFormat;
+    use increart_gui_core::state::SettingsTab;
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::Settings(true));
+    h.send(Msg::SettingsTab(SettingsTab::Library));
+    h.settle();
+    let info = h.state.store.unwrap();
+    assert_eq!((info.format, info.counts.png.0, info.counts.webp.0), (StoreFormat::Png, 2, 0));
+    h.send(Msg::SetStoreFormat(StoreFormat::Webp));
+    h.settle();
+    assert_eq!(h.state.store.unwrap().format, StoreFormat::Webp);
+    // asks first
+    h.send(Msg::ConvertStore);
+    assert!(h.state.confirm.is_some());
+    h.send(Msg::ConvertStoreConfirmed);
+    assert!(h.state.converting.is_some());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while h.state.converting.is_some() {
+        assert!(std::time::Instant::now() < deadline, "conversion still going");
+        h.settle();
+    }
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    let info = h.state.store.unwrap();
+    assert_eq!((info.counts.png.0, info.counts.webp.0), (0, 2));
+    let links = h.state.review_queue();
+    assert_eq!(links.len(), 2);
+    assert!(links.iter().all(|o| o.path.extension().unwrap() == "webp"), "the index follows the new names");
+    assert!(h.state.messages.iter().any(|m| m.text.starts_with("Converted 2 image(s)")));
+}
+
+#[test]
 fn review_and_undo() {
     let mut h = Harness::new();
     h.send(Msg::NewProject(PathBuf::new()));
@@ -387,13 +428,23 @@ impl Library_ {
     /// A run with two seeds and their output files and links, made with
     /// a throwaway copy of the library opened elsewhere.
     fn write_two(&self, project: &increart_core::Id) -> increart_core::Id {
+        self.write_two_with(project, "r01", vec![])
+    }
+
+    /// A run `label` made from `refs`, with outputs for seeds 0 and 1.
+    fn write_two_with(
+        &self,
+        project: &increart_core::Id,
+        label: &str,
+        refs: Vec<increart_core::ImageRef>,
+    ) -> increart_core::Id {
         self.in_copy(|lib| {
             let mut cfg = Config::default();
             cfg.normalize();
             let form = GenerateForm::new(&cfg);
             let run = increart_core::NewRun {
                 sweep: None,
-                label: "r01".into(),
+                label: label.into(),
                 prompt: "x".into(),
                 negative_prompt: String::new(),
                 alpha: false,
@@ -408,7 +459,7 @@ impl Library_ {
                     custom_sigmas: vec![],
                 },
                 mode: increart_core::model::Mode::Generate,
-                refs: vec![],
+                refs,
                 model: increart_core::model::ModelSelection {
                     recipe: "qwen-image-21".into(),
                     files: Default::default(),
@@ -674,8 +725,11 @@ fn server_dialog_save_and_open_then_partial_failure() {
 fn server_wizard_ticks_the_gpus_and_opens_them() {
     let mut s = dialog_state(vec![], None);
     let fx = update(&mut s, Msg::ServerWizard(true));
+    assert_eq!(fx, [Effect::DetectGpus(GpuRuntime::Vulkan)], "KoboldCpp first");
+    assert!(dialog(&s).wizard && dialog(&s).kobold.is_some());
+    let fx = update(&mut s, Msg::WizardKobold(false));
     assert!(matches!(fx[..], [Effect::ListDevices(_)]), "lists the devices at once");
-    assert!(dialog(&s).wizard);
+    assert!(dialog(&s).wizard && dialog(&s).kobold.is_none());
     let listed = ["ROCm0\tAMD Radeon AI PRO R9700", "ROCm1\tAMD Radeon AI PRO R9700", "CPU\tIntel"];
     update(&mut s, Msg::Devices(Ok(listed.iter().map(|l| l.to_string()).collect())));
     let ports: Vec<_> = dialog(&s)
@@ -703,15 +757,200 @@ fn server_wizard_ticks_the_gpus_and_opens_them() {
     // connections only; Cancel leaves nothing behind
     let mut s = dialog_state(vec![], None);
     update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::WizardKobold(false));
     update(&mut s, Msg::AddConnectServer);
     update(&mut s, Msg::FinishServerWizard);
     assert_eq!(s.config.server_presets[0].name, "Running server");
     let mut s = dialog_state(vec![], None);
     update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::WizardKobold(false));
     update(&mut s, Msg::AddConnectServer);
     update(&mut s, Msg::ServerWizard(false));
     assert!(dialog(&s).draft.servers.is_empty() && !dialog(&s).wizard);
     assert!(update(&mut s, Msg::FinishServerWizard).is_empty(), "only from the wizard");
+
+    // KoboldCpp generating images, and prompt enhance's chat server too
+    let mut s = dialog_state(vec![], None);
+    update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::AddKoboldServer);
+    let ServerConfig::Kobold(mut k) = dialog(&s).draft.servers[0].clone() else { panic!("a KoboldCpp entry") };
+    assert_eq!(k.base_url(), "http://127.0.0.1:5001");
+    k.chat = Some(Default::default());
+    update(&mut s, Msg::EditServer(0, ServerConfig::Kobold(k)));
+    let fx = update(&mut s, Msg::FinishServerWizard);
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 1));
+    assert_eq!(s.config.server_presets[0].name, "KoboldCpp");
+    let chat = s.pe.server.clone().expect("its chat server in use");
+    assert_eq!((chat.name.as_str(), chat.base_url().as_str()), ("kcpp0", "http://127.0.0.1:5001"));
+}
+
+#[test]
+fn the_shared_koboldcpp_binary_starts_new_entries_and_is_checked() {
+    let mut s = dialog_state(vec![], None);
+    let fx = update(&mut s, Msg::ServerSettings(true));
+    assert!(fx.contains(&Effect::KoboldVersion("koboldcpp".into())), "{fx:?}");
+    let fx = update(&mut s, Msg::SetKoboldBinary("/opt/kcpp/koboldcpp".into()));
+    assert!(matches!(fx[..], [Effect::SaveConfig(..)]), "not checked on every key: {fx:?}");
+    assert_eq!(update(&mut s, Msg::CheckKoboldVersion), [Effect::KoboldVersion("/opt/kcpp/koboldcpp".into())]);
+    update(&mut s, Msg::KoboldVersion("/opt/kcpp/koboldcpp".into(), Ok("1.123.1".into())));
+    assert!(update(&mut s, Msg::CheckKoboldVersion).is_empty(), "known");
+    update(&mut s, Msg::ServerSettings(false));
+    update(&mut s, Msg::NewPreset);
+    update(&mut s, Msg::AddKoboldServer);
+    let ServerConfig::Kobold(k) = &dialog(&s).draft.servers[0] else { panic!() };
+    let increart_core::kobold::KoboldRun::Start { binary, .. } = &k.run else { panic!() };
+    assert_eq!(binary, "/opt/kcpp/koboldcpp");
+
+    // picked: the entry's files, starting by what's there
+    let dir = tempfile::tempdir().unwrap();
+    let mut k = k.clone();
+    k.chat = Some(increart_core::kobold::KoboldChat::default());
+    s.config.sdserver.model_dirs = vec![dir.path().to_string_lossy().into()];
+    update(&mut s, Msg::EditServer(0, ServerConfig::Kobold(k)));
+    let fx = update(&mut s, Msg::Pick(PickKind::Kobold(0, PeFile::Model)));
+    assert_eq!(fx, [Effect::Pick { kind: PickKind::Kobold(0, PeFile::Model), start: Some(dir.path().into()) }]);
+    update(&mut s, Msg::Picked(PickKind::Kobold(0, PeFile::Model), vec!["/m/chat.gguf".into()]));
+    update(&mut s, Msg::Picked(PickKind::Kobold(0, PeFile::Config), vec!["/m/k.kcpps".into()]));
+    let ServerConfig::Kobold(k) = &dialog(&s).draft.servers[0] else { panic!() };
+    assert_eq!(k.chat.as_ref().unwrap().model, "/m/chat.gguf");
+    let increart_core::kobold::KoboldRun::Start { config, .. } = &k.run else { panic!() };
+    assert_eq!(config, "/m/k.kcpps");
+    let fx = update(&mut s, Msg::Pick(PickKind::Kobold(0, PeFile::Mmproj)));
+    assert!(matches!(&fx[..], [Effect::Pick { start: Some(p), .. }] if p == dir.path()), "/m isn't there: {fx:?}");
+}
+
+#[test]
+fn koboldcpp_named_by_any_entry_is_the_one_used() {
+    let mut s = dialog_state(vec![], None);
+    assert_eq!(increart_gui_core::kobold_binary(&s), "koboldcpp");
+    update(&mut s, Msg::NewPreset);
+    update(&mut s, Msg::AddKoboldServer);
+    let ServerConfig::Kobold(mut k) = dialog(&s).draft.servers[0].clone() else { panic!() };
+    if let increart_core::kobold::KoboldRun::Start { binary, .. } = &mut k.run {
+        *binary = "/x/koboldcpp-linux-x64".into();
+    }
+    s.config.server_presets.push(ServerPreset { name: "k".into(), servers: vec![ServerConfig::Kobold(k)] });
+    assert_eq!(increart_gui_core::kobold_binary(&s), "/x/koboldcpp-linux-x64");
+}
+
+#[test]
+fn kobold_wizard_plans_by_vram_downloads_then_opens() {
+    use increart_core::pe::{PeDevice, PeRun};
+    use increart_core::tiers::{Gpu, Layout};
+    let gpu = |number, vram_gib, integrated| Gpu { number, name: format!("gpu{number}"), vram_gib, integrated };
+    let mut s =
+        dialog_state(vec![ServerPreset { name: "KoboldCpp Vulkan1".into(), servers: vec![start("x", 1)] }], None);
+    s.config.sdserver.model_dirs = vec![];
+    update(&mut s, Msg::ServerWizard(true));
+    update(&mut s, Msg::WizardGpus(Ok(vec![gpu(0, 94.2, true), gpu(1, 29.9, false), gpu(2, 11.9, false)]), Some(64.0)));
+    let mut k = *dialog(&s).kobold.clone().unwrap();
+    let ticks: Vec<bool> = k.gpus.as_ref().unwrap().as_ref().unwrap().iter().map(|g| g.on).collect();
+    assert_eq!(ticks, [false, true, true], "not the integrated one");
+    assert_eq!(update(&mut s, Msg::WizardKobold(true)), [Effect::DetectGpus(GpuRuntime::Vulkan)], "detect again");
+    update(&mut s, Msg::WizardGpus(Ok(vec![gpu(0, 94.2, true), gpu(1, 29.9, false), gpu(2, 11.9, false)]), Some(64.0)));
+    // another runtime numbers them its own way: listed again
+    assert_eq!(update(&mut s, Msg::WizardRuntime(GpuRuntime::Rocm)), [Effect::DetectGpus(GpuRuntime::Rocm)]);
+    assert!(dialog(&s).kobold.as_ref().unwrap().gpus.is_none());
+    update(&mut s, Msg::WizardGpus(Ok(vec![gpu(0, 31.9, false), gpu(1, 29.9, false)]), Some(64.0)));
+    let rocm = dialog(&s).kobold.as_ref().unwrap().plan().unwrap();
+    // two 32 GB cards: room for prompt enhance beside the images on both
+    assert_eq!(rocm.pe_cards().iter().map(|c| c.gpu).collect::<Vec<_>>(), [0, 1]);
+    // unticking one is by hand; the other layout goes back to its default
+    let mut w = *dialog(&s).kobold.clone().unwrap();
+    w.pe_gpus = vec![1];
+    update(&mut s, Msg::EditKoboldWizard(w.clone()));
+    let w2 = dialog(&s).kobold.clone().unwrap();
+    assert!(w2.pe_by_hand);
+    assert_eq!(w2.plan().unwrap().pe_cards().iter().map(|c| c.gpu).collect::<Vec<_>>(), [1]);
+    w.layout = Layout::PeOwnCard;
+    update(&mut s, Msg::EditKoboldWizard(w));
+    let w3 = dialog(&s).kobold.clone().unwrap();
+    assert!(!w3.pe_by_hand && w3.plan().is_ok());
+    for c in &rocm.servers {
+        match c {
+            ServerConfig::Kobold(k) => assert!(k.device().starts_with("ROCm"), "{}", k.device()),
+            ServerConfig::Chat(c) => assert!(
+                matches!(&c.run, PeRun::KoboldCpp { device: PeDevice::Gpu { runtime: GpuRuntime::Rocm, .. }, .. }),
+                "{c:?}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+    update(&mut s, Msg::WizardRuntime(GpuRuntime::Vulkan));
+    update(&mut s, Msg::WizardGpus(Ok(vec![gpu(0, 94.2, true), gpu(1, 29.9, false), gpu(2, 11.9, false)]), Some(64.0)));
+
+    // picked
+    update(&mut s, Msg::Picked(PickKind::WizardModels, vec!["/picked".into()]));
+    update(&mut s, Msg::Picked(PickKind::WizardBinary, vec!["/opt/k/koboldcpp".into()]));
+    let picked = dialog(&s).kobold.clone().unwrap();
+    assert_eq!((picked.models_dir.as_str(), picked.binary.as_str()), ("/picked", "/opt/k/koboldcpp"));
+
+    // a relative folder, then a card too small: said, nothing fetched
+    k.models_dir = "models".into();
+    update(&mut s, Msg::EditKoboldWizard(k.clone()));
+    assert!(update(&mut s, Msg::FinishKoboldWizard).is_empty());
+    assert!(dialog(&s).kobold.as_ref().unwrap().error.as_ref().unwrap().contains("full path"));
+    k.models_dir = "/m".into();
+    k.gpus.as_mut().unwrap().as_mut().unwrap()[2].gpu.vram_gib = 6.0;
+    update(&mut s, Msg::EditKoboldWizard(k.clone()));
+    assert!(update(&mut s, Msg::FinishKoboldWizard).is_empty());
+    assert!(dialog(&s).kobold.as_ref().unwrap().error.as_ref().unwrap().contains("8 GB"));
+
+    // a preset chosen counts only while choosing
+    k.gpus.as_mut().unwrap().as_mut().unwrap()[2].gpu.vram_gib = 11.9;
+    k.layout = Layout::ImagePerCard;
+    k.gpus.as_mut().unwrap().as_mut().unwrap()[2].preset = Some(16);
+    let presets = |p: increart_core::tiers::Plan| p.cards.iter().map(|c| c.preset).collect::<Vec<_>>();
+    assert_eq!(presets(k.plan().unwrap()), [Some(32), Some(12)]);
+    k.choose = true;
+    let chosen = k.plan().unwrap();
+    assert_eq!(presets(chosen.clone()), [Some(32), Some(16)]);
+    assert!(chosen.notes.iter().any(|n| matches!(n, increart_core::tiers::Note::Warn(_))), "bigger: warned");
+    assert_eq!(k.ram_gib, Some(64.0));
+
+    // prompt enhance by default where there's room beside the images: the
+    // 32 GB card keeps the chat model loaded, the 12 GB one would swap
+    let pe = |p: increart_core::tiers::Plan| p.pe_cards().iter().map(|c| c.gpu).collect::<Vec<_>>();
+    assert_eq!(pe(k.plan().unwrap()), [1]);
+    // where asked
+    (k.pe_gpus, k.pe_by_hand) = (vec![2], true);
+    assert_eq!(pe(k.plan().unwrap()), [2]);
+    assert_eq!(
+        k.plan_as(Layout::PeOwnCard).unwrap().summary,
+        "1 image at a time; prompt enhance always loaded on GPU 2."
+    );
+    (k.pe_gpus, k.pe_by_hand) = (vec![], false);
+
+    // both making images: Q4_K for the 12 GB card, the chat model beside the 32 GB one's
+    k.choose = false;
+    update(&mut s, Msg::EditKoboldWizard(k));
+    let fx = update(&mut s, Msg::FinishKoboldWizard);
+    let [Effect::DownloadModels { dir, files, .. }] = &fx[..] else { panic!("{fx:?}") };
+    assert_eq!((dir.as_str(), files.len()), ("/m", 4));
+    assert!(files[0].file.ends_with("qwen_image_2.1-Q4_K.gguf"));
+    update(&mut s, Msg::WizardDownload(WizardDownload { file: 1, done: 5, total: Some(10) }));
+    assert_eq!(dialog(&s).kobold.as_ref().unwrap().downloading.as_ref().unwrap().1.file, 1);
+    assert!(update(&mut s, Msg::FinishKoboldWizard).is_empty(), "once");
+
+    // cancelled: kept open to try again
+    assert_eq!(update(&mut s, Msg::CancelWizardDownload), [Effect::CancelDownload]);
+    update(&mut s, Msg::WizardDownloaded(Err("cancelled".into())));
+    let k = dialog(&s).kobold.clone().unwrap();
+    assert!(k.downloading.is_none() && k.error.unwrap().contains("cancelled"));
+    assert!(s.config.recipes.iter().all(|r| !r.name.contains("GGUF Q4_K")));
+
+    update(&mut s, Msg::FinishKoboldWizard);
+    let fx = update(&mut s, Msg::WizardDownloaded(Ok(())));
+    assert!(matches!(fx[0], Effect::SaveConfig(..)));
+    assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 2));
+    assert_eq!(s.config.sdserver.model_dirs, ["/m"]);
+    assert_eq!(s.config.koboldcpp, "koboldcpp", "the wizard's binary kept");
+    let recipe = s.config.recipes.iter().find(|r| r.name.contains("GGUF Q4_K")).expect("the recipe");
+    assert_eq!(recipe.files["vae"], "koboldcpp/qwen_image_2.1_vae_bf16.safetensors");
+    let preset = s.config.server_presets.last().unwrap();
+    assert_eq!(preset.name, "KoboldCpp Vulkan1 + KoboldCpp Vulkan2", "{:?}", s.config.server_presets);
+    let chat = s.pe.server.clone().expect("prompt enhance in the first one");
+    assert_eq!(chat.base_url(), "http://127.0.0.1:5001");
 }
 
 #[test]
@@ -780,7 +1019,8 @@ fn editor_and_settings_list_the_devices_once() {
         matches!(&dialog(&s).draft.servers[..], [ServerConfig::Start { device, port: 1234, .. }] if device == "ROCm1")
     );
     update(&mut s, Msg::CancelEdit);
-    assert!(update(&mut s, Msg::ServerSettings(true)).is_empty(), "listed already");
+    let fx = update(&mut s, Msg::ServerSettings(true));
+    assert!(matches!(&fx[..], [Effect::KoboldVersion(_)]), "listed already: only KoboldCpp checked");
     assert!(dialog(&s).settings);
     update(&mut s, Msg::ServerSettings(false));
     assert!(!dialog(&s).settings);
@@ -1007,6 +1247,57 @@ fn job_progress() {
 }
 
 #[test]
+fn compare_with_an_image_from_the_references_or_libraries() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    let lib = Library_::steal(&h.root);
+    let r01 = lib.write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    let first = h.state.review_queue().iter().find(|o| o.name.run == r01).unwrap().image.clone();
+    let r02 = lib.write_two_with(&project, "r02", vec![first.clone()]);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+
+    // Review, on an image of r02: the picker opens on its references
+    h.send(Msg::Tab(Tab::Review));
+    let b = h.state.review_queue().iter().find(|o| o.name.run == r02).unwrap().image.clone();
+    h.send(Msg::CompareWith(Some(b.clone())));
+    let p = h.state.ref_picker.as_ref().unwrap();
+    assert_eq!((&p.source, &p.target), (&RefSource::ImageInputs(b.clone()), &PickTarget::Compare));
+    let found: Vec<_> = h.state.ref_candidates().into_iter().map(|c| c.image).collect();
+    assert_eq!(found, std::slice::from_ref(&first));
+    assert_eq!(h.state.input_role(&b, &first), Some(Some(1)), "B's reference 1");
+    // one click: A, B stays, and the source isn't remembered for Generate
+    h.send(Msg::RefPickerSource(RefSource::ProjectInputs(project.clone())));
+    h.send(Msg::RefPickerToggle(first.clone()));
+    assert!(h.state.ref_picker.is_none());
+    assert_eq!((h.state.review_view, h.state.review_pinned.as_ref()), (ReviewView::Compare, Some(&first)));
+    assert_eq!(h.state.compare_b(), Some(b));
+    assert!(h.state.ref_picker_source.is_none());
+
+    // the Output library: on an image made from text only, its project's references
+    h.send(Msg::Tab(Tab::OutputLibrary));
+    h.send(Msg::OutputSource(OutputSource::AllProjects));
+    let second = h.state.index.projects[0].outputs.iter().find(|o| o.name.run == r01 && o.image != first).unwrap();
+    let second = second.image.clone();
+    h.send(Msg::CompareWith(Some(second.clone())));
+    assert_eq!(h.state.output_selected.as_ref(), Some(&second));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().source, RefSource::ProjectInputs(project.clone()));
+    h.send(Msg::RefPickerToggle(first.clone()));
+    assert_eq!(h.state.output_compare.as_ref(), Some(&first));
+    // swap: the sides change places, A stays A
+    h.send(Msg::SwapCompare);
+    assert!(h.state.compare_flipped);
+    assert_eq!((h.state.output_compare.as_ref(), h.state.output_selected.as_ref()), (Some(&first), Some(&second)));
+    h.send(Msg::OutputCompare(None));
+    assert_eq!(h.state.output_compare, None);
+}
+
+#[test]
 fn review_views_compare_and_rejected() {
     let mut h = Harness::new();
     h.send(Msg::NewProject(PathBuf::new()));
@@ -1031,16 +1322,20 @@ fn review_views_compare_and_rejected() {
     assert_eq!(h.state.review_view, ReviewView::Compare);
     assert_eq!(h.state.review_pinned.as_ref(), Some(&first));
     assert_eq!(h.state.review_queue()[h.state.review_cursor].image, second);
+    // swap: the sides change places, A stays pinned
     h.send(Msg::SwapCompare);
-    assert_eq!(h.state.review_pinned.as_ref(), Some(&second));
-    assert_eq!(h.state.review_queue()[h.state.review_cursor].image, first);
+    assert!(h.state.compare_flipped);
+    assert_eq!(h.state.review_pinned.as_ref(), Some(&first));
+    assert_eq!(h.state.review_queue()[h.state.review_cursor].image, second);
+    h.send(Msg::SwapCompare);
+    assert!(!h.state.compare_flipped);
     // rate B (keys) and A (its own buttons)
     h.send(Msg::ReviewCurrent(Verdict::Bad));
     h.settle();
     h.send(Msg::ReviewPinned(Verdict::Good));
     h.settle();
     assert!(h.state.review_queue().is_empty());
-    assert_eq!(h.state.output_link(&second).unwrap().verdict, Some(Verdict::Good), "A still shown after rating");
+    assert_eq!(h.state.output_link(&first).unwrap().verdict, Some(Verdict::Good), "A still shown after rating");
     h.send(Msg::Compare);
     assert_eq!((h.state.review_view, h.state.review_pinned.clone()), (ReviewView::Single, None));
 
@@ -1063,13 +1358,13 @@ fn review_views_compare_and_rejected() {
     h.send(Msg::OutputSource(OutputSource::ProjectFolder("no such folder".into())));
     assert!(h.state.output_source_images().is_empty(), "Rejected follows the source");
     h.send(Msg::OutputSource(OutputSource::AllProjects));
-    h.send(Msg::Ask("Delete these rejected?".into(), Box::new(Msg::DeleteShownRejected)));
+    h.send(Msg::Ask(Confirm::new("Delete these rejected?", "Delete", Msg::DeleteShownRejected)));
     assert!(h.state.confirm.is_some());
     h.send(Msg::ConfirmYes);
     h.settle();
     assert!(h.state.confirm.is_none());
     assert!(h.state.output_source_images().is_empty(), "{:?}", h.errors());
-    assert!(h.root.join(first.rel_path()).is_file(), "the image itself stays until Clean up");
+    assert!(first.path(&h.root).is_file(), "the image itself stays until Clean up");
 }
 
 #[test]
@@ -1191,6 +1486,9 @@ fn outputs_as_inputs() {
     f.seeds = 1;
     h.send(Msg::Generate(f));
     h.send(Msg::QueueGenerate);
+    // neither reference is named: asked first
+    assert!(h.state.confirm.as_ref().is_some_and(|c| c.text.starts_with("<image1> and <image2> aren't named")));
+    h.send(Msg::ConfirmYes);
     h.settle();
     let run = h.state.project_entry().unwrap().runs.iter().find(|r| r.prompt == "make it night").unwrap().clone();
     assert_eq!(run.mode, Mode::Edit { init: Some(second.clone()), strength: 0.6 });
@@ -2139,6 +2437,18 @@ fn prompt_presets_apply_insert_save_and_edit() {
     h.send(Msg::QueueGenerate);
     assert!(h.errors().last().unwrap().contains("Fill in {colour}"), "{:?}", h.errors());
     assert!(h.state.prompt_select.is_some(), "the slot selected again");
+    // filled in the blanks table: queued with the value in, the form's
+    // prompt keeping its blank
+    let mut f = h.state.generate.clone();
+    f.sweep.slots.insert("colour".into(), "teal".into());
+    h.send(Msg::Generate(f));
+    let errors = h.errors().len();
+    h.send(Msg::QueueGenerate);
+    h.settle();
+    assert_eq!(h.errors().len(), errors, "{:?}", h.errors());
+    let want = prompt.replace("{colour}", "teal");
+    assert!(h.state.project_entry().unwrap().runs.iter().any(|r| r.prompt == want), "queued filled");
+    assert!(h.state.generate.prompt.contains("{colour}"));
 
     // favourites; not saved without a presets folder
     assert!(h.send(Msg::PresetFavourite(0, cel)).is_empty());
@@ -2217,6 +2527,11 @@ fn switching_libraries_keeps_the_servers_and_can_go_back() {
         worked: false,
     }];
     let presets = h.state.prompt_presets.clone();
+    // prompt enhance's chat servers, one answering
+    let chat = |name: &str| increart_core::pe::PeServer { name: name.into(), ..Default::default() };
+    h.state.pe.server = Some(chat("A"));
+    h.state.pe.more = vec![chat("B")];
+    (h.state.pe.status, h.state.pe.ready, h.state.pe.asks) = (PeStatus::Ready, 2, 7);
 
     // the library screen, then back: nothing changes
     h.send(Msg::OtherLibrary(None));
@@ -2234,6 +2549,8 @@ fn switching_libraries_keeps_the_servers_and_can_go_back() {
     assert!(h.state.index.projects.is_empty() && h.state.project.is_none());
     assert_eq!(h.state.servers.len(), 1);
     assert_eq!(h.state.prompt_presets, presets);
+    assert_eq!((h.state.pe.server.clone(), h.state.pe.more.clone()), (Some(chat("A")), vec![chat("B")]), "chat kept");
+    assert_eq!((h.state.pe.status.clone(), h.state.pe.ready, h.state.pe.asks), (PeStatus::Ready, 2, 7));
     assert!(h.state.switching.is_none() && h.state.nav.back.is_empty());
 
     // and back to the first from the menu (the open one is ignored)
@@ -2248,6 +2565,7 @@ fn switching_libraries_keeps_the_servers_and_can_go_back() {
     h.state.active_runs.insert(h.state.index.projects[0].project.id.clone());
     h.send(Msg::SwitchLibrary(second.to_string_lossy().into()));
     assert!(h.state.confirm.as_ref().unwrap().text.contains("1 run(s) are generating"));
+    assert_eq!(h.state.confirm.as_ref().unwrap().verb, "Switch library", "the button says what it does");
     assert_eq!(h.state.phase, Phase::Main);
 }
 
@@ -2623,16 +2941,57 @@ fn style_sweeps_queue_review_on_a_contact_sheet_and_reuse_a_style() {
     assert_eq!(shown, format!("#2 Clay · seed {seed} {{nope}}"));
     let out = tempfile::tempdir().unwrap();
     let file = out.path().join("tiles");
-    h.send(Msg::Picked(PickKind::TileFile, vec![file.clone()]));
+    h.send(Msg::Picked(PickKind::TileFile(increart_core::config::TileFormat::Png), vec![file.clone()]));
     h.settle();
     let png = image::open(file.with_extension("png")).unwrap();
     assert!(png.width() > 0 && png.height() > 0, "{:?}", h.errors());
+    // lossy JPEG at the default 70 %: a .png name becomes .jpg
+    use increart_core::config::TileFormat;
+    assert_eq!(h.state.config.tile.save_quality, 70);
+    h.send(Msg::TileSettings(increart_core::config::TileSettings {
+        save_format: TileFormat::Jpeg,
+        ..h.state.config.tile.clone()
+    }));
+    h.send(Msg::Picked(PickKind::TileFile(TileFormat::Jpeg), vec![file.with_extension("png")]));
+    h.settle();
+    let jpg = std::fs::read(file.with_extension("jpg")).unwrap();
+    assert_eq!(image::guess_format(&jpg).unwrap(), image::ImageFormat::Jpeg, "{:?}", h.errors());
+    assert_eq!(image::load_from_memory(&jpg).unwrap().width(), png.width());
     h.send(Msg::TileOut(TileTarget::Library));
     h.settle();
     use increart_core::model::IdeaSource;
     let tiled = h.state.index.ideas.iter().find(|e| matches!(e.idea.source, IdeaSource::Tiled { .. })).unwrap();
     assert_eq!(tiled.idea.source, IdeaSource::Tiled { images: h.state.picked.clone() });
     assert_eq!(tiled.idea.images.len(), 1);
+    // images from the libraries, from a cell on: the picker's, for the tiling
+    let input = increart_core::ImageRef::input(tiled.idea.images[0].clone());
+    h.send(Msg::TilePicker(Some((1, 1))));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().target, PickTarget::Tile(Some((1, 1))));
+    h.send(Msg::RefPickerSource(RefSource::Inputs(None)));
+    assert!(h.state.ref_candidates().iter().any(|c| c.image == input));
+    h.send(Msg::RefPickerToggle(input.clone()));
+    h.send(Msg::RefPickerAdd);
+    let t = h.state.tile.as_ref().unwrap();
+    let i = t.layout.tiles.iter().position(|x| x.image() == Some(&input)).unwrap();
+    assert_eq!((t.layout.tiles[i].col, t.layout.tiles[i].row), (0, 2), "the text has (1, 1): the next free");
+    // pasted: a tile, captioned as such, composed but not a source
+    let pasted = increart_gui_core::tile::TileImage(std::sync::Arc::new(image::RgbaImage::new(8, 8)));
+    h.send(Msg::TileAdd(vec![increart_gui_core::tile::TileContent::Pasted(pasted)], None));
+    h.send(Msg::TileCaptionFormat("{kind}".into()));
+    let t = h.state.tile.as_ref().unwrap();
+    let kinds: Vec<_> =
+        t.layout.tiles.iter().enumerate().map(|(n, x)| h.state.caption_text(&x.caption, x.image(), n + 1)).collect();
+    assert_eq!(kinds, ["output", "output", "output", "", "input", "pasted"]);
+    let errors = h.errors().len();
+    h.send(Msg::Picked(PickKind::TileFile(increart_core::config::TileFormat::Png), vec![file.clone()]));
+    h.settle();
+    assert_eq!(h.errors().len(), errors, "{:?}", h.errors());
+    // the Generate picker doesn't open on the tiling's inputs
+    h.send(Msg::RefPickerSource(RefSource::TileInputs));
+    h.send(Msg::RefPicker(false));
+    h.send(Msg::RefPicker(true));
+    assert_eq!(h.state.ref_picker.as_ref().unwrap().source, RefSource::Inputs(None));
+    h.send(Msg::RefPicker(false));
     h.send(Msg::CloseTile);
 
     // rated together, in one op; the sheet keeps them picked, another tab drops them
@@ -2804,7 +3163,7 @@ fn generate_history_keeps_settings_and_runs() {
     h.send(Msg::CloseHistory);
 
     // an image gone from the library is left out of a restore
-    std::fs::remove_file(h.root.join(imgs[0].rel_path())).unwrap();
+    std::fs::remove_file(imgs[0].path(&h.root)).unwrap();
     std::fs::remove_file(&file).unwrap();
     h.send(Msg::Tick(300.0));
     h.send(Msg::QueueGenerate);
@@ -2854,7 +3213,7 @@ fn prompt_enhance_asking_holds_the_gpu_idle_alert() {
 
     // asking from 2 to 8 min: not idle then, and idle again from 8
     let key = PeKey::Text(1);
-    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 120.0, since: 120.0, rate: None });
+    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 120.0, since: 120.0, rate: None, on: None });
     assert_eq!(at(&mut s, 6.0), 0);
     assert_eq!(at(&mut s, 8.0), 0);
     s.pe.jobs.clear();
@@ -2869,7 +3228,7 @@ fn prompt_enhance_asking_holds_the_gpu_idle_alert() {
     idle_server(&mut s2, 0, false);
     idle_server(&mut s2, 0, true);
     let key = PeKey::Text(2);
-    s2.pe.jobs.push(PeJobState { id: 2, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None });
+    s2.pe.jobs.push(PeJobState { id: 2, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None, on: None });
     assert_eq!(at(&mut s2, 18.0), 1, "sounds while asking");
 }
 
@@ -4177,6 +4536,7 @@ fn chat_servers_go_with_their_preset() {
         binary: "/bin/kcpp".into(),
         model: "/m/a.gguf".into(),
         mmproj: String::new(),
+        config: String::new(),
         host: "127.0.0.1".into(),
         port,
         device: PeDevice::Cpu { threads: 8 },
@@ -4215,7 +4575,7 @@ fn chat_servers_go_with_their_preset() {
     assert!(!fx.iter().any(|f| matches!(f, Effect::OpenServers { .. } | Effect::StopServers)), "{fx:?}");
     assert_eq!((asks(&fx), stops(&fx)), (1, 1));
     let i = fx.iter().position(|f| matches!(f, Effect::PeShutdown)).unwrap();
-    let j = fx.iter().position(|f| matches!(f, Effect::PeAsk { server, .. } if server.name == "B")).unwrap();
+    let j = fx.iter().position(|f| matches!(f, Effect::PeAsk { servers, .. } if servers[0].name == "B")).unwrap();
     assert!(i < j, "started after the stop");
     assert_eq!((&s.phase, s.servers.len()), (&Phase::Main, 1));
 
@@ -4255,8 +4615,32 @@ fn the_chat_server_editor_edits_the_presets_draft() {
     // a new one starts like the presets' first; a preset has one
     update(&mut s, Msg::EditPreset(1));
     let fx = update(&mut s, Msg::PeEditorOpen(None));
-    assert!(fx.iter().any(|f| matches!(f, Effect::PeListGpus)), "the GPUs to tick are listed");
+    assert!(fx.is_empty(), "connected to: no GPUs to list");
     assert_eq!(s.pe.editor.as_ref().unwrap().draft, a);
+    // on GPUs: listed by its runtime, and again for another
+    let gpus = |runtime| PeServer {
+        run: PeRun::KoboldCpp {
+            binary: "k".into(),
+            model: "m".into(),
+            mmproj: String::new(),
+            config: String::new(),
+            host: "127.0.0.1".into(),
+            port: 5001,
+            device: increart_core::pe::PeDevice::Gpu { devices: vec![], runtime },
+            context: 0,
+            args: vec![],
+        },
+        ..a.clone()
+    };
+    let fx = update(&mut s, Msg::PeEditorEdit(gpus(GpuRuntime::Vulkan)));
+    assert_eq!(fx, [Effect::PeListGpus(GpuRuntime::Vulkan)]);
+    update(&mut s, Msg::PeGpus(GpuRuntime::Vulkan, Ok(vec![(1, "R9700".into())])));
+    assert!(update(&mut s, Msg::PeEditorEdit(gpus(GpuRuntime::Vulkan))).is_empty(), "listed already");
+    let fx = update(&mut s, Msg::PeEditorEdit(gpus(GpuRuntime::Rocm)));
+    assert_eq!(fx, [Effect::PeListGpus(GpuRuntime::Rocm)]);
+    update(&mut s, Msg::PeGpus(GpuRuntime::Vulkan, Ok(vec![])));
+    assert!(s.pe.gpus.is_none(), "a stale list is dropped");
+    update(&mut s, Msg::PeEditorEdit(a.clone()));
     let mut d = a.clone();
     (d.name, d.run) = (" C ".into(), PeRun::Connect { url: String::new() });
     update(&mut s, Msg::PeEditorEdit(d.clone()));
@@ -4268,9 +4652,15 @@ fn the_chat_server_editor_edits_the_presets_draft() {
     assert!(s.pe.editor.is_none());
     assert_eq!(dialog(&s).draft.chat().unwrap().name, "C");
     assert!(s.config.server_presets[1].chat().is_none());
+    // another: added, the asks shared among them
     update(&mut s, Msg::PeEditorOpen(None));
     update(&mut s, Msg::PeEditorSave);
-    assert_eq!(dialog(&s).draft.servers.len(), 2, "replaced: one per preset");
+    assert_eq!(dialog(&s).draft.servers.len(), 3, "added");
+    assert_eq!(dialog(&s).draft.servers[2], ServerConfig::Chat(PeServer { name: "A 2".into(), ..a.clone() }));
+    update(&mut s, Msg::RemoveServer(1));
+    update(&mut s, Msg::PeEditorOpen(Some(1)));
+    update(&mut s, Msg::PeEditorEdit(a.clone()));
+    update(&mut s, Msg::PeEditorSave);
     assert_eq!(dialog(&s).draft.chat(), Some(&a));
     update(&mut s, Msg::SavePreset);
     assert_eq!(s.config.server_presets[1].chat(), Some(&a));
@@ -4283,6 +4673,7 @@ fn the_chat_server_editor_edits_the_presets_draft() {
         binary: "/bin/k".into(),
         model: "/m/a.gguf".into(),
         mmproj: String::new(),
+        config: String::new(),
         host: "127.0.0.1".into(),
         port: 5001,
         device: Default::default(),
@@ -4295,6 +4686,20 @@ fn the_chat_server_editor_edits_the_presets_draft() {
     let chat = dialog(&s).draft.chat().unwrap().clone();
     assert!(matches!(&chat.run, PeRun::KoboldCpp { mmproj, .. } if mmproj == "/m/mm.gguf"));
     assert_eq!(dialog(&s).draft.servers.len(), 2);
+    // a settings file stands in for the model
+    update(&mut s, Msg::PeEditorOpen(Some(1)));
+    let mut d = s.pe.editor.as_ref().unwrap().draft.clone();
+    if let PeRun::KoboldCpp { model, .. } = &mut d.run {
+        model.clear();
+    }
+    update(&mut s, Msg::PeEditorEdit(d));
+    update(&mut s, Msg::PeEditorSave);
+    assert!(s.pe.editor.as_ref().unwrap().error.as_deref().unwrap().contains("a model or a settings file"));
+    update(&mut s, Msg::Picked(PickKind::Pe(PeFile::Config), vec!["/m/q.kcpps".into()]));
+    update(&mut s, Msg::PeEditorSave);
+    assert!(s.pe.editor.is_none());
+    let chat = dialog(&s).draft.chat().unwrap().clone();
+    assert!(matches!(&chat.run, PeRun::KoboldCpp { model, config, .. } if model.is_empty() && config == "/m/q.kcpps"));
 }
 
 #[test]
@@ -4345,6 +4750,7 @@ fn reopening_keeps_the_sd_servers_still_wanted() {
 }
 
 #[test]
+#[cfg(unix)] // the KoboldCpp that never answers is a shell script
 fn pe_server_stopped_while_starting_is_off_not_failed() {
     use increart_core::pe::{PeDevice, PeRun, PeServer};
     use std::os::unix::fs::PermissionsExt;
@@ -4360,9 +4766,10 @@ fn pe_server_stopped_while_starting_is_off_not_failed() {
             binary: bin.to_string_lossy().into(),
             model: "m.gguf".into(),
             mmproj: String::new(),
+            config: String::new(),
             host: "127.0.0.1".into(),
             port,
-            device: PeDevice::Gpu { devices: vec![] },
+            device: PeDevice::Gpu { devices: vec![], runtime: Default::default() },
             context: 0,
             args: vec![],
         },
@@ -4612,7 +5019,7 @@ fn styles_own_values_become_their_prompts() {
 fn pe_asks_are_batched_by_kind_for_jobs() {
     use increart_core::prompts::PresetKey;
     use increart_gui_core::{BlankKey, PeBatchKind, PeJobState, PeKey, PeState, PeStep};
-    let job = |id, key| PeJobState { id, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None };
+    let job = |id, key| PeJobState { id, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None, on: None };
     let blank = |s: &str| PeKey::Blank(BlankKey { style: None, slot: s.into() });
     let style = |s: &str| PeKey::Style(PresetKey { task: "Becomes".into(), name: s.into() });
     let mut pe = PeState {
@@ -4638,7 +5045,15 @@ fn blanks_pe_added_are_asked_about() {
     let key = |name: &str| PresetKey { task: "Becomes".into(), name: name.into() };
     for (id, name) in [(1, "Machine"), (2, "Plain")] {
         let step = PeStep::Queued;
-        s.pe.jobs.push(PeJobState { id, key: PeKey::Style(key(name)), step, asked: 0.0, since: 0.0, rate: None });
+        s.pe.jobs.push(PeJobState {
+            id,
+            key: PeKey::Style(key(name)),
+            step,
+            asked: 0.0,
+            since: 0.0,
+            rate: None,
+            on: None,
+        });
         s.pe.style_from.insert(key(name), format!("a {{era}} {name}"));
     }
     update(&mut s, Msg::PeAnswer(1, Ok("a {era} robot of {scrap_metal} on a {pole}".into())));
@@ -4660,7 +5075,7 @@ fn a_writing_asks_rate_is_worked_out_at_most_twice_a_second() {
     use increart_core::prompts::PresetKey;
     let mut s = AppState::new(Config::default(), None);
     let key = PeKey::Style(PresetKey { task: "T".into(), name: "A".into() });
-    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None });
+    s.pe.jobs.push(PeJobState { id: 1, key, step: PeStep::Queued, asked: 0.0, since: 0.0, rate: None, on: None });
     let token = |s: &mut AppState, now: f64, pieces: u32| {
         s.now = now;
         update(s, Msg::PeProgress(1, PeStep::Writing { pieces, text: String::new() }));
@@ -4798,7 +5213,7 @@ fn picked_images_sweep_their_styles_again() {
 }
 
 #[test]
-fn review_follow_stays_on_the_newest_image_until_moved_off() {
+fn review_follow_moves_on_at_its_pace_until_moved_back() {
     let mut h = Harness::new();
     h.send(Msg::NewProject(PathBuf::new()));
     h.send(Msg::CommitRename);
@@ -4809,26 +5224,506 @@ fn review_follow_stays_on_the_newest_image_until_moved_off() {
     h.settle();
     h.send(Msg::Tab(Tab::Review));
     let shown = |h: &Harness| h.state.review_queue()[h.state.review_cursor].name.seed;
-    assert_eq!(shown(&h), 0);
+    h.send(Msg::Tick(100.0));
     h.send(Msg::ReviewFollow(true));
-    assert_eq!(shown(&h), 1, "on the newest at once");
+    assert_eq!(shown(&h), 0, "starts on the image shown");
+    // nothing made lately: 8 s an image
+    h.send(Msg::Tick(105.0));
+    assert_eq!(shown(&h), 0);
+    let c = h.state.follow_countdown().unwrap();
+    assert_eq!((c.left.round(), c.ahead), (3.0, 1));
+    h.send(Msg::Tick(108.5));
+    assert_eq!(shown(&h), 1);
+    // rated just as it moved on: the image it moved from
+    h.send(Msg::ReviewCurrent(Verdict::Good));
+    h.settle();
+    assert_eq!((h.state.review_queue().len(), shown(&h)), (1, 1));
 
-    // a new image: shown as it arrives
+    // caught up: waits on the newest; a new one comes, but paused it stays
     Library_::steal(&h.root).write_seeds(&run, &[2]);
     h.rt.run(Effect::Rescan);
     h.settle();
+    assert_eq!(h.state.follow.arrivals.len(), 1);
+    h.send(Msg::FollowPause(true));
+    h.send(Msg::Tick(200.0));
+    assert_eq!(shown(&h), 1);
+    // and the paused time isn't counted
+    h.send(Msg::FollowPause(false));
+    h.send(Msg::Tick(204.0));
+    assert_eq!(shown(&h), 1);
+    // nor while away from Review
+    h.send(Msg::Tab(Tab::Projects));
+    h.send(Msg::Tick(300.0));
+    h.send(Msg::Tab(Tab::Review));
+    h.send(Msg::Tick(301.0));
+    assert_eq!(shown(&h), 1);
+    h.send(Msg::Tick(305.0));
     assert_eq!(shown(&h), 2);
-    // rated: the newest left is shown, still following
-    h.send(Msg::ReviewCurrent(Verdict::Good));
-    h.settle();
-    assert_eq!((shown(&h), h.state.review_follow), (1, true));
-    // → at the end keeps following; ← stops it, and the cursor stays put
+
+    // → keeps following; ← (or any pick) stops it, and the cursor stays put
     h.send(Msg::ReviewNext(1));
     assert!(h.state.review_follow);
     h.send(Msg::ReviewNext(-1));
     assert!(!h.state.review_follow);
-    Library_::steal(&h.root).write_seeds(&run, &[3]);
+    h.send(Msg::Tick(400.0));
+    assert_eq!(shown(&h), 1);
+    // started from the newest, when set so
+    h.send(Msg::FollowPace(increart_core::config::FollowPace { start_newest: true, ..Default::default() }));
+    h.send(Msg::ReviewFollow(true));
+    assert_eq!(shown(&h), 2);
+}
+
+#[test]
+fn reviews_generate_button_opens_the_shown_images_project() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    let run = Library_::steal(&h.root).write_two(&project);
     h.rt.run(Effect::Rescan);
     h.settle();
-    assert_eq!(shown(&h), 0);
+    h.send(Msg::Tab(Tab::Review));
+    // all projects in scope: the image's
+    assert_eq!(h.state.review_scope, None);
+    let g = h.state.review_generate().unwrap();
+    assert_eq!((&g.project, g.run.as_ref()), (&project, Some(&run)));
+    assert_eq!(g.image.as_ref(), Some(&h.state.review_queue()[0].image));
+    h.send(Msg::OpenInGenerate(g.project));
+    assert_eq!((h.state.tab, h.state.projects_tab), (Tab::Projects, ProjectsTab::Generate));
+    assert_eq!(h.state.project.as_ref(), Some(&project));
+}
+
+#[test]
+fn generates_images_tile_in_their_order_with_the_start_marked() {
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::OpenInGenerate(project));
+    h.send(Msg::TileGenerateImages);
+    assert!(h.state.tile.is_none(), "no images: nothing to tile");
+    let imgs: Vec<_> = h.state.index.projects[0].outputs.iter().map(|o| o.image.clone()).collect();
+    h.send(Msg::AddRefs(imgs.clone()));
+    h.send(Msg::ImageRoles { index: 1, reference: false, start: true });
+    h.send(Msg::ImageRoles { index: 0, reference: false, start: false });
+    assert!(!h.state.generate.images[0].reference && !h.state.generate.images[0].start, "parked");
+    h.send(Msg::TileGenerateImages);
+    let t = h.state.tile.as_ref().unwrap();
+    assert_eq!(t.layout.images().cloned().collect::<Vec<_>>(), imgs, "the parked one too");
+    assert!(h.state.picked.is_empty(), "the picks aren't touched");
+    h.send(Msg::TileCaptionFormat("{kind}".into()));
+    let t = h.state.tile.as_ref().unwrap();
+    let kinds: Vec<_> = t.layout.tiles.iter().map(|x| h.state.caption_text(&x.caption, x.image(), 1)).collect();
+    assert_eq!(kinds, ["output", "start"]);
+}
+
+#[test]
+fn the_usage_check_is_shown_from_its_start_and_kept_once_done() {
+    let mut s = AppState::new(Config::default(), None);
+    update(&mut s, Msg::Tick(10.0));
+    update(&mut s, Msg::UsageCheck(0, 3));
+    assert_eq!((s.usage_check, s.usage_checked), (Some((0, 3)), None));
+    update(&mut s, Msg::UsageCheck(3, 3));
+    assert_eq!((s.usage_check, s.usage_checked), (None, Some((3, 10.0))));
+}
+
+#[test]
+fn crop_and_mark_makes_a_hidden_copy_next_to_the_image_and_reopens_it() {
+    use increart_core::model::{ImageEdits, Mark, Shape};
+    let mut h = Harness::new();
+    h.send(Msg::NewProject(PathBuf::new()));
+    h.send(Msg::CommitRename);
+    h.settle();
+    let project = h.state.project.clone().unwrap();
+    Library_::steal(&h.root).write_two(&project);
+    h.rt.run(Effect::Rescan);
+    h.settle();
+    h.send(Msg::OpenInGenerate(project));
+    let imgs: Vec<_> = h.state.index.projects[0].outputs.iter().map(|o| o.image.clone()).collect();
+    h.send(Msg::AddRefs(imgs.clone()));
+    h.state.generate.prompt = "make <image1> blue, keep <image2>".into();
+
+    // nothing drawn: nothing to save
+    h.send(Msg::OpenMarkup(imgs[0].clone(), Some(0)));
+    h.send(Msg::MarkupSave(false));
+    assert!(h.state.markup.is_some() && h.state.markup.as_ref().unwrap().undo.is_empty());
+
+    // a crop and a circle, one undo step each; undo, redo
+    let (w, h_) = image::image_dimensions(imgs[0].path(&h.root)).unwrap();
+    let circle = Mark { shape: Shape::Ellipse([1.0, 1.0], [6.0, 6.0]), color: [255, 0, 0, 255], width: 2.0 };
+    let cropped = ImageEdits { crop: Some([0, 0, w / 2, h_ / 2]), marks: vec![] };
+    let edits = ImageEdits { marks: vec![circle], ..cropped.clone() };
+    h.send(Msg::MarkupEdit(cropped.clone()));
+    h.send(Msg::MarkupEdit(edits.clone()));
+    h.send(Msg::MarkupUndo);
+    assert_eq!(h.state.markup.as_ref().unwrap().edits, cropped);
+    h.send(Msg::MarkupRedo);
+    assert_eq!(h.state.markup.as_ref().unwrap().edits, edits);
+    h.send(Msg::MarkupSave(false));
+    h.settle();
+    assert!(h.state.markup.is_none(), "{:?}", h.errors());
+
+    // the copy: below the image, a reference; the prompt follows the numbers
+    let g = &h.state.generate.images;
+    assert_eq!((g.len(), &g[0].image, &g[2].image), (3, &imgs[0], &imgs[1]));
+    let copy = g[1].image.clone();
+    assert!(g[1].reference && !g[1].start);
+    assert_eq!(copy.store, increart_core::Store::Input);
+    assert_eq!(image::image_dimensions(copy.path(&h.root)).unwrap(), (w / 2, h_ / 2));
+    assert_eq!(h.state.retag.as_ref().unwrap().prompt, "make <image1> blue, keep <image3>");
+    h.send(Msg::RetagConfirm);
+    // hidden: in input/edited/, not in the library's lists unless asked for
+    let e = h.state.index.ideas.iter().find(|e| e.idea.images.contains(&copy.id)).unwrap();
+    assert_eq!(e.loc, IdeaLoc::Edited);
+    assert!(h.state.library_ideas().is_empty());
+    h.send(Msg::LibFilter(LibFilter { show_hidden: true, ..Default::default() }));
+    assert_eq!(h.state.library_ideas().len(), 1);
+    assert_eq!(h.state.edited_copies(&imgs[0]).len(), 1);
+    h.send(Msg::RefPicker(true));
+    h.send(Msg::RefPickerSource(RefSource::Edited));
+    assert!(h.state.ref_candidates().iter().any(|c| c.image == copy));
+    h.send(Msg::RefPicker(false));
+
+    // opened again from Generate: the original, as drawn; Save replaces the copy
+    h.send(Msg::OpenMarkup(copy.clone(), Some(1)));
+    let m = h.state.markup.as_ref().unwrap();
+    assert_eq!((&m.image, &m.edits, m.replace), (&imgs[0], &edits, true));
+    h.send(Msg::MarkupEdit(ImageEdits { crop: None, ..edits.clone() }));
+    h.send(Msg::MarkupSave(false));
+    h.settle();
+    let g = &h.state.generate.images;
+    assert_eq!(g.len(), 3, "replaced, not added");
+    assert_ne!(g[1].image, copy);
+    assert!(h.state.retag.is_none(), "the same <image2>");
+    assert_eq!(image::image_dimensions(g[1].image.path(&h.root)).unwrap(), (w, h_));
+    assert_eq!(h.state.edited_copies(&imgs[0]).len(), 2, "the first copy stays");
+
+    // from elsewhere: Save and use in Generate adds it at the end
+    h.send(Msg::OpenMarkup(imgs[1].clone(), None));
+    h.send(Msg::MarkupEdit(ImageEdits { crop: Some([0, 0, 8, 8]), marks: vec![] }));
+    h.send(Msg::MarkupSave(true));
+    h.settle();
+    let g = &h.state.generate.images;
+    assert_eq!(g.len(), 4);
+    assert_eq!(h.state.edited_source(&g[3].image).map(|(i, _)| i), Some(&imgs[1]));
+}
+
+#[test]
+fn queue_asks_about_references_no_prompt_names() {
+    use increart_core::model::GenerateImage;
+    use increart_core::prompts::{PresetKey, PromptPreset, PromptPresets, PromptTask};
+    let mut s = AppState::new(Config::default(), None);
+    let now = increart_core::id::now();
+    let image = |i| GenerateImage {
+        image: increart_core::ImageRef::input(increart_core::Id::new(now, i)),
+        reference: true,
+        start: false,
+    };
+    s.generate.images = vec![image(0), image(1), image(2)];
+    s.generate.prompt = "<image1> in the style of <image3>".into();
+    assert_eq!(update::unnamed_refs(&s), vec![2]);
+    // the confirm comes first; Queue anyway goes on to the usual checks
+    assert!(update(&mut s, Msg::QueueGenerate).is_empty());
+    let c = s.confirm.as_ref().expect("asks");
+    assert!(c.text.starts_with("<image2> isn't named"), "{}", c.text);
+    assert_eq!(*c.then, Msg::QueueChecked);
+
+    // named only by a style the sweep takes: not unnamed
+    s.prompt_presets = PromptPresets {
+        tasks: vec![PromptTask {
+            name: "Becomes".into(),
+            description: String::new(),
+            presets: vec![PromptPreset {
+                name: "Worn".into(),
+                prompt: "<image1> wearing <image2>, {preset}".into(),
+                ..Default::default()
+            }],
+        }],
+    };
+    s.generate.sweep.on = true;
+    s.generate.sweep.selected = vec![PresetKey { task: "Becomes".into(), name: "Worn".into() }];
+    assert!(update::unnamed_refs(&s).is_empty());
+    s.generate.sweep.selected.clear();
+    assert_eq!(update::unnamed_refs(&s), vec![2]);
+
+    // one reference left unnamed is usual: no ask
+    s.generate.images.truncate(1);
+    s.generate.prompt = "a fox".into();
+    assert!(update::unnamed_refs(&s).is_empty());
+}
+
+#[test]
+fn prompt_enhance_shares_its_asks_among_its_servers() {
+    use increart_core::pe::{PeRun, PeServer};
+    use increart_gui_core::update::PeJob;
+    // chat servers answering with their names, a little slowly
+    let fake = |name: &'static str| {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let answer = if req.url().ends_with("/v1/models") {
+                    r#"{"data": []}"#.to_string()
+                } else {
+                    std::thread::sleep(Duration::from_millis(300));
+                    serde_json::json!({"choices": [{"message": {"content": name}}]}).to_string()
+                };
+                let _ = req.respond(tiny_http::Response::from_string(answer));
+            }
+        });
+        PeServer { name: name.into(), run: PeRun::Connect { url }, ..Default::default() }
+    };
+    let servers = vec![fake("A"), fake("B")];
+    let job = |id| PeJob {
+        id,
+        key: PeKey::Text(id),
+        system: "s".into(),
+        sampling: increart_core::pe::Sampling { temperature: 0.9, min_p: 0.0 },
+        text: "t".into(),
+        images: vec![],
+        image_size: 0,
+        max_tokens: 10,
+    };
+    let rt = Runtime::new(|| {});
+    rt.run(Effect::PeAsk { servers: servers.clone(), jobs: (1..=4).map(job).collect() });
+    let (mut on, mut answers, mut ready) = (vec![], vec![], 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while answers.len() < 4 {
+        assert!(std::time::Instant::now() < deadline, "answered {answers:?}");
+        for m in rt.wait(Duration::from_millis(100)) {
+            match m {
+                Msg::PeOn(id, name) => on.push((id, name)),
+                Msg::PeAnswer(id, r) => answers.push((id, r.unwrap())),
+                Msg::PeReady(n) => ready = ready.max(n),
+                Msg::PeStatus(PeStatus::Failed(e)) => panic!("{e}"),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(ready, 2, "both ready");
+    for name in ["A", "B"] {
+        assert!(answers.iter().any(|(_, a)| a == name), "{name} answered some: {answers:?}");
+    }
+    for (id, a) in &answers {
+        assert!(on.contains(&(*id, a.clone())), "each answer from the server it was on: {on:?}");
+    }
+    // one dropped: the other answers alone
+    rt.run(Effect::PeAsk { servers: servers[1..].to_vec(), jobs: vec![job(5)] });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        if let Some(a) = rt.wait(Duration::from_millis(100)).into_iter().find_map(|m| match m {
+            Msg::PeAnswer(5, r) => Some(r.unwrap()),
+            _ => None,
+        }) {
+            assert_eq!(a, "B");
+            break;
+        }
+    }
+    rt.run(Effect::PeShutdown);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !rt.wait(Duration::from_millis(100)).iter().any(|m| matches!(m, Msg::PeStatus(PeStatus::Off))) {
+        assert!(std::time::Instant::now() < deadline, "not off");
+    }
+}
+
+#[test]
+fn another_chat_server_gets_its_own_name_and_port() {
+    use increart_core::pe::{PeRun, PeServer};
+    let kcpp = |port| PeRun::KoboldCpp {
+        binary: "k".into(),
+        model: "m".into(),
+        mmproj: String::new(),
+        config: String::new(),
+        host: "127.0.0.1".into(),
+        port,
+        device: Default::default(),
+        context: 0,
+        args: vec![],
+    };
+    let first = PeServer { name: "Chat".into(), run: kcpp(5001), ..Default::default() };
+    let preset = ServerPreset { name: "P".into(), servers: vec![ServerConfig::Chat(first)] };
+    let mut s = dialog_state(vec![preset], None);
+    update(&mut s, Msg::EditPreset(0));
+    update(&mut s, Msg::PeEditorOpen(None));
+    let d = s.pe.editor.as_ref().unwrap().draft.clone();
+    assert_eq!(d.name, "Chat 2");
+    assert!(matches!(d.run, PeRun::KoboldCpp { port: 5002, .. }), "{:?}", d.run);
+    update(&mut s, Msg::PeEditorSave);
+    let Phase::Servers(dlg) = &s.phase else { panic!() };
+    assert_eq!(dlg.draft.servers.iter().filter(|c| c.is_chat()).count(), 2, "added, not replacing");
+    assert_eq!(dlg.draft.chat_pool().len(), 2);
+}
+
+#[test]
+fn generate_offers_the_model_presets_the_servers_can_run() {
+    use increart_core::config::RecipePreset;
+    use increart_core::sdserver::Loadable;
+    let preset = |name: &str, model: &str| RecipePreset {
+        name: name.into(),
+        recipe: "qwen-image-21".into(),
+        files: [("diffusion_model".to_string(), model.to_string()), ("vae".to_string(), "vae.safetensors".to_string())]
+            .into(),
+        steps: 20,
+        cfg: 2.0,
+        flow_shift: None,
+        custom_sigmas: vec![],
+    };
+    let config = Config {
+        recipes: vec![preset("Int8", "int8.safetensors"), preset("Q8", "koboldcpp/q8.gguf")],
+        ..Default::default()
+    };
+    let mut s = AppState::new(config, None);
+    let server = |name: &str| ServerStatus {
+        config: None,
+        name: name.into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    };
+    s.servers = vec![server("gpu0"), server("gpu1")];
+    // nothing said yet: all of them
+    assert_eq!(s.runnable_recipes(), vec![0, 1]);
+
+    // gpu0 has the Q8 files: chosen, as Int8 is on no server
+    let files = Loadable::files(["koboldcpp/q8.gguf", "vae.safetensors"].map(String::from));
+    update(&mut s, Msg::ServerModels(vec![("gpu0".into(), files)]));
+    assert_eq!(s.runnable_recipes(), vec![1]);
+    assert_eq!(s.generate.preset, 1);
+
+    // a KoboldCpp started elsewhere runs one diffusion model, matched by name
+    update(&mut s, Msg::ServerModels(vec![("gpu1".into(), Loadable::Only(Some("int8.safetensors".into())))]));
+    assert_eq!(s.runnable_recipes(), vec![0, 1]);
+    assert!(s.models_without_preset().is_empty());
+    update(&mut s, Msg::ServerModels(vec![("gpu1".into(), Loadable::Only(Some("other.gguf".into())))]));
+    assert_eq!(s.models_without_preset(), vec![("gpu1", "other.gguf")]);
+
+    // only the open servers count
+    s.servers.retain(|x| x.name == "gpu1");
+    assert!(s.runnable_recipes().is_empty());
+}
+
+#[test]
+fn model_presets_edit_and_generate_keeps_its_model() {
+    use increart_core::config::RecipePreset;
+    let preset = |name: &str, steps: u32| RecipePreset {
+        name: name.into(),
+        recipe: "qwen-image-21".into(),
+        files: [("diffusion_model".to_string(), format!("{name}.gguf"))].into(),
+        steps,
+        cfg: 2.0,
+        flow_shift: None,
+        custom_sigmas: vec![],
+    };
+    let config = Config { recipes: vec![preset("A", 20), preset("B", 30)], ..Default::default() };
+    let mut s = AppState::new(config, None);
+    update(&mut s, Msg::SelectRecipe(1));
+    s.generate.steps = 25; // tweaked in the form
+    s.generate.sweep.models = vec!["A".into(), "B".into()];
+
+    // B moves up and A is renamed: the form keeps B and its own steps
+    update(&mut s, Msg::OpenRecipes);
+    let mut e = s.recipe_editor.clone().unwrap();
+    assert_eq!(e.selected, 1);
+    e.rows.swap(0, 1);
+    e.rows[1].preset.name = "A2".into();
+    update(&mut s, Msg::EditRecipes(e));
+    update(&mut s, Msg::SaveRecipes);
+    assert!(s.recipe_editor.is_none());
+    let names: Vec<_> = s.config.recipes.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["B", "A2"]);
+    assert_eq!((s.generate.preset, s.generate.steps), (0, 25));
+    assert_eq!(s.generate.sweep.models, ["A2", "B"]);
+
+    // B's steps change: the form takes them; sigmas are parsed
+    update(&mut s, Msg::OpenRecipes);
+    let mut e = s.recipe_editor.clone().unwrap();
+    e.rows[0].preset.steps = 8;
+    e.rows[0].sigmas = "1, 0.5 0".into();
+    update(&mut s, Msg::EditRecipes(e));
+    update(&mut s, Msg::SaveRecipes);
+    assert_eq!(s.generate.steps, 8);
+    assert_eq!(s.config.recipes[0].custom_sigmas, [1.0, 0.5, 0.0]);
+
+    // a clash, a missing model or bad sigmas keeps the editor open
+    update(&mut s, Msg::OpenRecipes);
+    let mut e = s.recipe_editor.clone().unwrap();
+    e.rows[1].preset.name = "B ".into();
+    assert_eq!(e.problem().as_deref(), Some("Two model presets are called B"));
+    e.rows[1].preset.name = "C".into();
+    e.rows[1].preset.files.clear();
+    assert_eq!(e.problem().as_deref(), Some("C has no diffusion model file"));
+    e.rows[1].preset.files.insert("model".into(), "c.gguf".into());
+    e.rows[1].sigmas = "1, x".into();
+    update(&mut s, Msg::EditRecipes(e));
+    update(&mut s, Msg::SaveRecipes);
+    assert!(s.recipe_editor.is_some());
+    assert_eq!(s.config.recipes[1].name, "A2");
+    update(&mut s, Msg::CloseRecipes);
+    assert!(s.recipe_editor.is_none());
+
+    // deleting the chosen one picks the first
+    update(&mut s, Msg::OpenRecipes);
+    let mut e = s.recipe_editor.clone().unwrap();
+    e.rows.remove(0);
+    update(&mut s, Msg::EditRecipes(e));
+    update(&mut s, Msg::SaveRecipes);
+    assert_eq!(s.config.recipes.len(), 1);
+    assert_eq!((s.generate.preset, s.generate.steps), (0, 20));
+    assert_eq!(s.generate.sweep.models, ["A2"]);
+}
+
+#[test]
+fn queueing_a_preset_no_server_runs_asks_first() {
+    use increart_core::config::RecipePreset;
+    use increart_core::sdserver::Loadable;
+    let preset = |name: &str, model: &str| RecipePreset {
+        name: name.into(),
+        recipe: "qwen-image-21".into(),
+        files: [("diffusion_model".to_string(), model.to_string())].into(),
+        steps: 20,
+        cfg: 2.0,
+        flow_shift: None,
+        custom_sigmas: vec![],
+    };
+    let mut h = Harness::new();
+    h.state.config.recipes = vec![preset("Int8", "int8.safetensors"), preset("Q8", "q8.gguf")];
+    h.state.servers = vec![ServerStatus {
+        config: None,
+        name: "kcpp".into(),
+        device: String::new(),
+        state: "ready".into(),
+        model: None,
+        idle_since: None,
+        worked: false,
+    }];
+    let kobold = Loadable::Files {
+        ids: ["q8.gguf".to_string()].into(),
+        refused: [("int8.safetensors".to_string(), "is in sd-server's int8 format".to_string())].into(),
+    };
+    update(&mut h.state, Msg::ServerModels(vec![("kcpp".into(), kobold)]));
+    assert_eq!(h.state.runnable_recipes(), vec![1]);
+
+    // chosen anyway (e.g. a draft from before): the warning, with the reason
+    h.state.generate.preset = 0;
+    h.state.generate.prompt = "a fox".into();
+    h.state.project = None;
+    update(&mut h.state, Msg::QueueGenerate);
+    let c = h.state.confirm.clone().expect("asks");
+    assert!(c.text.contains("Int8:\n  kcpp: int8.safetensors is in sd-server's int8 format"), "{}", c.text);
+    assert_eq!(c.verb, "Queue anyway");
+    assert_eq!(*c.then, Msg::QueueModelChecked);
+
+    // one the server runs: straight on
+    h.state.confirm = None;
+    h.state.generate.preset = 1;
+    update(&mut h.state, Msg::QueueGenerate);
+    assert!(h.state.confirm.is_none());
 }

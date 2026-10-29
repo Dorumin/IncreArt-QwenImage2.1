@@ -1,7 +1,7 @@
 //! Blocking client for sd-server's native API, `/sdcpp/v1/...` (DESIGN.md,
 //! Backend). One `Client` per server; it is cheap to clone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -125,6 +125,52 @@ pub struct ModelKey {
 impl From<&ModelSelection> for ModelKey {
     fn from(m: &ModelSelection) -> ModelKey {
         ModelKey { recipe: m.recipe.clone(), models: m.files.iter().map(|(k, f)| (k.clone(), f.id.clone())).collect() }
+    }
+}
+
+/// What a server can load, for the model presets it can run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Loadable {
+    /// Model file IDs (sd-server's `model-files`, or the files in a started
+    /// KoboldCpp's model folders), and those it has but can't load, with why.
+    Files { ids: BTreeSet<String>, refused: BTreeMap<String, String> },
+    /// KoboldCpp started elsewhere: only the diffusion model it runs (its
+    /// file name), if any.
+    Only(Option<String>),
+}
+
+impl Loadable {
+    pub fn files(ids: impl IntoIterator<Item = String>) -> Loadable {
+        Loadable::Files { ids: ids.into_iter().collect(), refused: BTreeMap::new() }
+    }
+
+    /// Whether it can load all of a preset's files (slot → file ID).
+    pub fn runs(&self, files: &BTreeMap<String, String>) -> bool {
+        self.why_not(files).is_none()
+    }
+
+    /// Why it can't load a preset's files, if it can't.
+    pub fn why_not(&self, files: &BTreeMap<String, String>) -> Option<String> {
+        let name = |p: &str| std::path::Path::new(p).file_name().and_then(|f| f.to_str()).unwrap_or(p).to_string();
+        match self {
+            Loadable::Files { ids, refused } => files.values().find_map(|id| {
+                if let Some(why) = refused.get(id) {
+                    Some(format!("{} {why}", name(id)))
+                } else if ids.contains(id) || std::path::Path::new(id).is_absolute() {
+                    None
+                } else {
+                    Some(format!("it doesn't have {id}"))
+                }
+            }),
+            Loadable::Only(running) => {
+                let wanted = files.get("diffusion_model").or(files.get("model")).map(|f| name(f));
+                match (running, wanted) {
+                    (Some(r), Some(w)) if name(r) == w => None,
+                    (Some(r), _) => Some(format!("it runs {} and can't switch (started without admin)", name(r))),
+                    (None, _) => Some("it runs no image model and can't load one (started without admin)".into()),
+                }
+            }
+        }
     }
 }
 
@@ -254,6 +300,8 @@ pub struct Client {
     base: String,
     agent: Agent,
     load_agent: Agent,
+    /// KoboldCpp behind the same calls, instead of sd-server.
+    kobold: Option<std::sync::Arc<crate::kobold_image::KoboldImage>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -274,7 +322,28 @@ fn agent(timeout: Duration) -> Agent {
 impl Client {
     /// `base`: e.g. `http://127.0.0.1:1234` (no trailing `/sdcpp/v1`).
     pub fn new(base: &str) -> Client {
-        Client { base: base.trim_end_matches('/').to_string(), agent: agent(TIMEOUT), load_agent: agent(LOAD_TIMEOUT) }
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            agent: agent(TIMEOUT),
+            load_agent: agent(LOAD_TIMEOUT),
+            kobold: None,
+        }
+    }
+
+    /// A KoboldCpp image server (DESIGN.md, KoboldCpp).
+    pub fn kobold(base: &str, password: &str, admin: Option<crate::kobold_image::Admin>) -> Client {
+        let kobold = crate::kobold_image::KoboldImage::new(base, password, admin);
+        Client { kobold: Some(std::sync::Arc::new(kobold)), ..Client::new(base) }
+    }
+
+    pub fn is_kobold(&self) -> bool {
+        self.kobold.is_some()
+    }
+
+    /// What generates, for recipes, when it isn't the configured sd-server
+    /// (`koboldcpp <version>`).
+    pub fn software(&self) -> Option<String> {
+        self.kobold.as_ref().and_then(|k| k.software())
     }
 
     pub fn base_url(&self) -> &str {
@@ -313,6 +382,9 @@ impl Client {
 
     /// Health check and feature discovery (also reports `runtime` status).
     pub fn capabilities(&self) -> ApiResult<Value> {
+        if let Some(k) = &self.kobold {
+            return k.capabilities();
+        }
         self.get("capabilities")
     }
 
@@ -328,36 +400,76 @@ impl Client {
         Ok(self.get::<Files>("model-files")?.files)
     }
 
+    /// Whether it runs on this machine (its loads share this RAM).
+    pub fn is_local(&self) -> bool {
+        let host = self.base_url().split("://").nth(1).unwrap_or_default();
+        let host = host.split('/').next().unwrap_or_default();
+        let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+        matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0")
+    }
+
+    /// The RAM loading `model` pins beyond what the server holds now, in
+    /// bytes (KoboldCpp offloading its weights; 0 when unknown).
+    pub fn load_ram_need(&self, model: &ModelKey) -> u64 {
+        self.kobold.as_ref().map_or(0, |k| k.load_ram_need(model))
+    }
+
+    /// What it can load (see [`Loadable`]).
+    pub fn loadable(&self) -> ApiResult<Loadable> {
+        if let Some(k) = &self.kobold {
+            return k.loadable();
+        }
+        Ok(Loadable::files(self.model_files()?.into_iter().map(|f| f.id)))
+    }
+
     pub fn refresh_models(&self) -> ApiResult<Value> {
         self.post("models/refresh", &serde_json::json!({}))
     }
 
     pub fn model_status(&self) -> ApiResult<ModelStatus> {
+        if let Some(k) = &self.kobold {
+            return k.model_status();
+        }
         self.get("models/status")
     }
 
     /// Loads a model; blocks until the load has finished.
     pub fn load_model(&self, model: &ModelKey) -> ApiResult<ModelStatus> {
+        if let Some(k) = &self.kobold {
+            return k.load_model(model);
+        }
         let body = serde_json::json!({ "recipe": model.recipe, "models": model.models });
         Self::finish(self.load_agent.post(self.url("models/load")).send_json(&body), false)
     }
 
     pub fn unload_model(&self) -> ApiResult<ModelStatus> {
+        if let Some(k) = &self.kobold {
+            return k.unload_model();
+        }
         Self::finish(self.load_agent.post(self.url("models/unload")).send_json(serde_json::json!({})), false)
     }
 
     /// Submits an `img_gen` job; returns its ID.
     pub fn img_gen(&self, body: &Value) -> ApiResult<String> {
+        if let Some(k) = &self.kobold {
+            return k.img_gen(body);
+        }
         Ok(self.post::<Submitted>("img_gen", body)?.id)
     }
 
     pub fn job(&self, id: &str) -> ApiResult<Job> {
+        if let Some(k) = &self.kobold {
+            return k.job(id);
+        }
         self.get(&format!("jobs/{id}"))
     }
 
     /// Cancels a job (a generating job keeps `generating`, with
     /// `cancel_requested`, until it stops at a checkpoint).
     pub fn cancel(&self, id: &str) -> ApiResult<Job> {
+        if let Some(k) = &self.kobold {
+            return k.cancel(id);
+        }
         self.post(&format!("jobs/{id}/cancel"), &serde_json::json!({}))
     }
 }
@@ -365,6 +477,24 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_servers_and_why_not() {
+        assert!(Client::new("http://127.0.0.1:1234").is_local());
+        assert!(Client::new("http://localhost:5001/").is_local());
+        assert!(!Client::new("http://10.0.0.2:1234").is_local());
+        let files = |m: &str| BTreeMap::from([("diffusion_model".to_string(), m.to_string())]);
+        let l = Loadable::Files {
+            ids: ["q8.gguf".to_string()].into(),
+            refused: [("d/int8.safetensors".to_string(), "is int8".to_string())].into(),
+        };
+        assert!(l.runs(&files("q8.gguf")));
+        assert_eq!(l.why_not(&files("d/int8.safetensors")).as_deref(), Some("int8.safetensors is int8"));
+        assert_eq!(l.why_not(&files("x.gguf")).as_deref(), Some("it doesn't have x.gguf"));
+        let only = Loadable::Only(Some("/m/q8.gguf".into()));
+        assert!(only.runs(&files("koboldcpp/q8.gguf")));
+        assert!(only.why_not(&files("x.gguf")).unwrap().starts_with("it runs q8.gguf"));
+    }
 
     #[test]
     fn error_classification() {

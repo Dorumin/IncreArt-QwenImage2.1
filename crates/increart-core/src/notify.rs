@@ -203,7 +203,8 @@ pub fn play(sound: &Sound, volume: f32, player: &str) -> Result<String, String> 
 
 fn run(template: &str, file: &Path, volume: f32) -> Result<String, String> {
     let args = command_for(template, file, volume)?;
-    let out = std::process::Command::new(&args[0]).args(&args[1..]).output().map_err(|e| {
+    let mut cmd = std::process::Command::new(&args[0]);
+    let out = crate::process::background(&mut cmd, false).args(&args[1..]).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("{}: not found", args[0])
         } else {

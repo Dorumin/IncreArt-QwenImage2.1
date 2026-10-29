@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod fake;
+pub mod fake_kobold;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -8,7 +8,7 @@ use increart_core::prompts::{PresetKey, PromptPreset, PromptPresets, PromptTask}
 use increart_gui_core::{AppState, Msg, StyleFilter, StylePicker, StyleStats, StyleView, needs_refs};
 
 use crate::textures::Textures;
-use crate::widgets::{BAD, GOOD, ICON_FILL, NEUTRAL, group, ic, ph};
+use crate::widgets::{BAD, GOOD, ICON_FILL, NEUTRAL, dialog_footer, group, ic, ph};
 
 const THUMB: f32 = 64.0;
 
@@ -355,7 +355,7 @@ fn footer(ui: &mut egui::Ui, st: &AppState, rows: &[(usize, usize)], out: &mut V
         line.push_str(&format!(" ({} left out: need more reference images)", ticked.len() - fit));
     }
     ui.label(line);
-    let (mut left, right) = egui::Sides::new().show(
+    let (mut tools, done) = dialog_footer(
         ui,
         |ui| {
             let mut out = vec![];
@@ -389,14 +389,14 @@ fn footer(ui: &mut egui::Ui, st: &AppState, rows: &[(usize, usize)], out: &mut V
             out
         },
         |ui| {
-            let ok = ui.button(RichText::new(ic(ph::CHECK, "OK")).strong()).clicked();
+            let ok = ui.button(RichText::new(ic(ph::CHECK, "Apply")).strong()).clicked();
             let tip = "put back the styles as they were";
             let cancel = ui.button("Cancel   Esc").on_hover_text(tip).clicked();
             ok.then_some(true).or(cancel.then_some(false))
         },
     );
-    out.append(&mut left);
-    if let Some(keep) = right {
+    out.append(&mut tools);
+    if let Some(keep) = done {
         out.push(Msg::StylesClose(keep));
     }
 }

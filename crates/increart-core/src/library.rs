@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::container;
 use crate::error::{Error, IoContext, Result};
 use crate::fsutil;
 use crate::id::{self, Id, IdAllocator, IdKind, Timestamp};
@@ -28,6 +29,7 @@ const LAYOUT: &[&str] = &[
     UNREVIEWED_IDEAS,
     INPUT_LIBRARY,
     DISCARDED_IDEAS,
+    EDITED_IDEAS,
     PROJECTS,
     COLLECTIONS,
     "thumbs/input",
@@ -169,7 +171,12 @@ impl Library {
         };
         rsnfmt::write(
             &root.join(LIBRARY_FILE),
-            &LibraryMeta { format: LIBRARY_FORMAT, link_mode, metadata: METADATA_VERSION },
+            &LibraryMeta {
+                format: LIBRARY_FORMAT,
+                link_mode,
+                metadata: METADATA_VERSION,
+                store_format: StoreFormat::Png,
+            },
         )?;
         Library::open(&root)
     }
@@ -183,7 +190,7 @@ impl Library {
             return Err(Error::NotALibrary(root));
         }
         let meta: LibraryMeta = rsnfmt::read(&meta_path)?;
-        if meta.format != LIBRARY_FORMAT {
+        if meta.format != LIBRARY_FORMAT && meta.format != LIBRARY_FORMAT_WEBP {
             return Err(Error::UnsupportedFormat(meta.format));
         }
         let lock_path = root.join(LOCK_FILE);
@@ -218,8 +225,15 @@ impl Library {
         }
         lib.problems.extend(ix.problems);
         for store in [Store::Input, Store::Output] {
-            for id in lib.store_ids(store)? {
+            for (id, formats) in lib.store_files(store)? {
                 lib.ids.observe(store_kind(store), &id);
+                if formats.len() > 1 {
+                    let r = ImageRef { id, store };
+                    lib.problems.push(format!(
+                        "{}: stored as both PNG and WebP (an interrupted conversion): convert the library again",
+                        r.rel_path_as(StoreFormat::Png)
+                    ));
+                }
             }
         }
         lib.sync_pixel_index()?;
@@ -242,7 +256,7 @@ impl Library {
         for store in [Store::Input, Store::Output] {
             images.extend(self.store_ids(store)?.into_iter().map(|id| ImageRef { id, store }));
         }
-        Ok(UsageCheck { images, used })
+        Ok(UsageCheck { root: self.root.clone(), images, used })
     }
 
     /// Checks one store image's `increart:usage` against the runs: a
@@ -256,15 +270,9 @@ impl Library {
         if !path.exists() {
             return; // removed since the check began
         }
-        let res = png::find_header_chunk(&path, png::KEY_USAGE).and_then(|found| {
-            let stored = found.as_ref().filter(|(_, _, ok)| *ok).and_then(|(_, c, _)| {
-                let t = std::str::from_utf8(c.data.get(png::KEY_USAGE.len() + 1..)?).ok()?;
-                UsageCounts::parse(t)
-            });
-            match stored {
-                Some(s) if s.max(derived) == s => Ok(()),
-                s => self.write_usage(r, found.map(|(at, _, _)| at), s.unwrap_or_default().max(derived)),
-            }
+        let res = container::find_header_chunk(&path, png::KEY_USAGE).and_then(|found| match stored_usage(&found) {
+            Some(s) if s.max(derived) == s => Ok(()),
+            s => self.write_usage(r, found.map(|(at, _, _)| at), s.unwrap_or_default().max(derived)),
         });
         if let Err(e) = res {
             self.problems.push(format!("usage counts of {}: {e}", path.display()));
@@ -283,7 +291,7 @@ impl Library {
     /// The image's `increart:usage` counts (zero when it has none).
     pub fn usage_counts(&self, r: &ImageRef) -> Result<UsageCounts> {
         let path = self.image_path(r);
-        Ok(png::header_text(&path, png::KEY_USAGE)?.and_then(|t| UsageCounts::parse(&t)).unwrap_or_default())
+        Ok(container::header_text(&path, png::KEY_USAGE)?.and_then(|t| UsageCounts::parse(&t)).unwrap_or_default())
     }
 
     /// Writes `counts` as the image's `increart:usage`: over the chunk at
@@ -291,10 +299,10 @@ impl Library {
     fn write_usage(&self, r: &ImageRef, at: Option<u64>, counts: UsageCounts) -> Result<()> {
         let path = self.image_path(r);
         match at {
-            Some(at) => png::patch_chunk(&path, at, &counts.chunk()),
+            Some(at) => container::patch_chunk(&path, at, &counts.chunk()),
             None => {
                 let bytes = fs::read(&path).at(&path)?;
-                let new = png::set_chunks(&bytes, &[counts.chunk()]).map_err(|e| Error::format(&path, e))?;
+                let new = container::set_chunks(&bytes, &[counts.chunk()]).map_err(|e| Error::format(&path, e))?;
                 self.rewrite_image(&path, &new)
             }
         }
@@ -306,7 +314,7 @@ impl Library {
     fn bump_usage(&mut self, run: &Run) {
         for (r, add) in usage_of_runs([run]) {
             let path = self.image_path(&r);
-            let res = png::find_header_chunk(&path, png::KEY_USAGE).and_then(|found| {
+            let res = container::find_header_chunk(&path, png::KEY_USAGE).and_then(|found| {
                 let (at, old) = match found {
                     Some((at, c, true)) => {
                         let t = std::str::from_utf8(&c.data[png::KEY_USAGE.len() + 1..]).ok();
@@ -342,7 +350,7 @@ impl Library {
 
     fn upgrade_image(&self, r: &ImageRef) -> Result<()> {
         let path = self.image_path(r);
-        let texts = png::header_texts(&path)?;
+        let texts = container::header_texts(&path)?;
         let text = |key: &str| texts.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
         let mut chunks = vec![];
         let mut bytes = None;
@@ -368,7 +376,7 @@ impl Library {
             Some(b) => b,
             None => fs::read(&path).at(&path)?,
         };
-        let new = png::set_chunks(&bytes, &chunks).map_err(|e| Error::format(&path, e))?;
+        let new = container::set_chunks(&bytes, &chunks).map_err(|e| Error::format(&path, e))?;
         self.rewrite_image(&path, &new)
     }
 
@@ -422,7 +430,12 @@ impl Library {
     }
 
     pub fn image_path(&self, r: &ImageRef) -> PathBuf {
-        self.root.join(r.rel_path())
+        r.path(&self.root)
+    }
+
+    /// The format a store image is in now (links to it carry its extension).
+    pub fn format_of(&self, r: &ImageRef) -> StoreFormat {
+        StoreFormat::of_path(&self.image_path(r)).unwrap_or_default()
     }
 
     fn rel(&self, p: &Path) -> PathBuf {
@@ -431,15 +444,23 @@ impl Library {
 
     /// IDs of every file in a store.
     pub fn store_ids(&self, store: Store) -> Result<Vec<Id>> {
+        Ok(self.store_files(store)?.into_keys().collect())
+    }
+
+    /// Every image in a store and the formats it's stored in (two only
+    /// after an interrupted conversion).
+    fn store_files(&self, store: Store) -> Result<BTreeMap<Id, Vec<StoreFormat>>> {
         let dir = self.root.join(store.dir());
-        let mut out = Vec::new();
+        let mut out: BTreeMap<Id, Vec<StoreFormat>> = BTreeMap::new();
         for e in fs::read_dir(&dir).at(&dir)? {
             let p = e.at(&dir)?.path();
-            if let Some(id) = p.file_name().and_then(|n| n.to_str()?.strip_suffix(".png")?.parse().ok()) {
-                out.push(id);
+            let Some((format, stem)) = p.file_name().and_then(|n| StoreFormat::of_name(n.to_str()?)) else {
+                continue;
+            };
+            if let Ok(id) = stem.parse() {
+                out.entry(id).or_default().push(format);
             }
         }
-        out.sort();
         Ok(out)
     }
 
@@ -468,14 +489,20 @@ fn store_kind(store: Store) -> IdKind {
 
 impl Library {
     /// Writes a new store file with an exclusive create, moving on to the next
-    /// number if the name is taken. `make` builds the bytes for the given ID.
-    fn write_store(&mut self, store: Store, make: impl Fn(&Id) -> Vec<u8>) -> Result<Id> {
+    /// number if the ID is taken (in either format). `make` builds the bytes
+    /// for the given ID and says their format.
+    fn write_store(&mut self, store: Store, make: impl Fn(&Id) -> (StoreFormat, Vec<u8>)) -> Result<Id> {
         loop {
             let id = self.ids.allocate(store_kind(store), self.now());
-            let path = self.image_path(&ImageRef { id: id.clone(), store });
+            let r = ImageRef { id: id.clone(), store };
+            if StoreFormat::ALL.iter().any(|f| fsutil::exists(&self.root.join(r.rel_path_as(*f)))) {
+                continue;
+            }
+            let (format, bytes) = make(&id);
+            let path = self.root.join(r.rel_path_as(format));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
-                    let written = f.write_all(&make(&id)).and_then(|_| fsutil::sync(&f));
+                    let written = f.write_all(&bytes).and_then(|_| fsutil::sync(&f));
                     if let Err(e) = written {
                         let _ = fs::remove_file(&path);
                         return Err(e).at(&path);
@@ -538,7 +565,7 @@ impl Library {
                         continue;
                     }
                 };
-                match png::text(&bytes, png::KEY_PIXELS) {
+                match container::text(&bytes, png::KEY_PIXELS) {
                     Ok(Some(h)) if h == real => {}
                     Ok(Some(h)) => {
                         self.problems.push(format!("{}: increart:pixels {h} != pixel hash {real}", path.display()))
@@ -565,14 +592,15 @@ impl Library {
         self.sync_pixel_index()
     }
 
-    /// A store image's bytes, after checking its pixels against its
-    /// `increart:pixels` (refs are verified before they are sent).
+    /// A store image as PNG bytes, after checking its pixels against its
+    /// `increart:pixels` (refs are verified before they are sent; servers
+    /// read PNG, so a WebP one is re-encoded).
     pub fn read_verified(&self, r: &ImageRef) -> Result<Vec<u8>> {
         let path = self.image_path(r);
         let bytes = fs::read(&path).map_err(|_| Error::NotFound(format!("{:?} image {}", r.store, r.id)))?;
         let real = import::decode_pixels(&bytes).map_err(|e| Error::image(&path, e))?.hash();
-        match png::text(&bytes, png::KEY_PIXELS).map_err(|e| Error::format(&path, e))? {
-            Some(h) if h == real => Ok(bytes),
+        match container::text(&bytes, png::KEY_PIXELS).map_err(|e| Error::format(&path, e))? {
+            Some(h) if h == real => container::as_png(bytes).map_err(|e| Error::format(&path, e)),
             Some(h) => Err(Error::format(&path, format!("increart:pixels {h} != pixel hash {real}"))),
             None => Err(Error::format(&path, "no increart:pixels chunk")),
         }
@@ -581,7 +609,7 @@ impl Library {
     /// Reads a store image's `increart:source` (inputs).
     pub fn source_info(&self, id: &Id) -> Result<Option<SourceInfo>> {
         let path = self.image_path(&ImageRef::input(id.clone()));
-        let Some(json) = png::header_text(&path, png::KEY_SOURCE)? else {
+        let Some(json) = container::header_text(&path, png::KEY_SOURCE)? else {
             return Ok(None);
         };
         serde_json::from_str(&json).map(Some).map_err(|e| Error::format(&path, e))
@@ -590,7 +618,7 @@ impl Library {
     /// Reads an output image's `increart:recipe`.
     pub fn recipe(&self, id: &Id) -> Result<Option<Recipe>> {
         let path = self.image_path(&ImageRef::output(id.clone()));
-        let Some(text) = png::header_text(&path, png::KEY_RECIPE)? else {
+        let Some(text) = container::header_text(&path, png::KEY_RECIPE)? else {
             return Ok(None);
         };
         rsnfmt::from_str(&text).map(Some).map_err(|e| Error::format(&path, rsnfmt::describe(&text, &e)))
@@ -600,7 +628,7 @@ impl Library {
     /// computed from its pixels.
     pub fn blake3_of(&self, r: &ImageRef) -> Result<String> {
         let path = self.image_path(r);
-        if let Some(h) = png::header_text(&path, png::KEY_BLAKE3)? {
+        if let Some(h) = container::header_text(&path, png::KEY_BLAKE3)? {
             return Ok(h);
         }
         let bytes = fs::read(&path).at(&path)?;
@@ -633,7 +661,8 @@ impl Library {
 // ------------------------------------------------------------------ import
 
 impl Library {
-    /// Imports an image into the input store (re-encoded as PNG with
+    /// Imports an image into the input store (re-encoded in the library's
+    /// store format, PNG or WebP, with
     /// `increart:id`, `increart:pixels`, `increart:source` and the original
     /// `eXIf`), or returns the existing image with the same pixels.
     pub fn import_bytes(&mut self, bytes: &[u8], original: &Original) -> Result<Imported> {
@@ -646,6 +675,7 @@ impl Library {
         source.imported = Some(self.now());
         let json = serde_json::to_string_pretty(&source).expect("serializable");
         let hash = prepared.pixel_hash.clone();
+        let format = self.meta.store_format;
         let id = self.write_store(Store::Input, |id| {
             let mut chunks = vec![
                 Chunk::text(png::KEY_ID, id.as_str()),
@@ -657,7 +687,7 @@ impl Library {
             if let Some(exif) = &prepared.exif {
                 chunks.push(Chunk::exif(exif.clone()));
             }
-            import::encode_png(&prepared.pixels, &chunks)
+            container::encode(format, &prepared.pixels, &chunks)
         })?;
         self.pixels.input.insert(prepared.pixel_hash, id.clone());
         if prepared.pixels.is_transparent() {
@@ -749,12 +779,12 @@ impl Library {
     }
 
     /// Writes `idea.rsn` and makes the folder's image links match `images`
-    /// (`<n>-<original name>.png`).
+    /// (`<n>-<original name>.png`, or `.webp` like the store file).
     fn write_idea_dir(&self, dir: &Path, idea: &Idea) -> Result<()> {
         rsnfmt::write(&dir.join(IDEA_FILE), idea)?;
         for e in fs::read_dir(dir).at(dir)? {
             let p = e.at(dir)?.path();
-            if p.extension().is_some_and(|x| x == "png") {
+            if StoreFormat::of_path(&p).is_some() {
                 fs::remove_file(&p).at(&p)?;
             }
         }
@@ -769,14 +799,15 @@ impl Library {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "image".into());
             let r = ImageRef::input(img.clone());
-            link::create(self.link_mode(), &self.image_path(&r), &dir.join(format!("{}-{stem}.png", n + 1)))?;
+            let at = dir.join(format!("{}-{stem}.{}", n + 1, self.format_of(&r).ext()));
+            link::create(self.link_mode(), &self.image_path(&r), &at)?;
         }
         Ok(())
     }
 
     /// Where an idea is, and its directory (absolute).
     pub fn find_idea(&self, id: &Id) -> Result<(IdeaLoc, PathBuf)> {
-        for loc in [IdeaLoc::Unreviewed, IdeaLoc::Discarded] {
+        for loc in [IdeaLoc::Unreviewed, IdeaLoc::Discarded, IdeaLoc::Edited] {
             let dir = self.root.join(loc.dir()).join(id.as_str());
             if dir.join(IDEA_FILE).is_file() {
                 return Ok((loc, dir));
@@ -874,7 +905,8 @@ impl Library {
         let r = ImageRef::output(output.clone());
         let path = self.image_path(&r);
         let bytes = fs::read(&path).at(&path)?;
-        let original = Original { name: Some(format!("{output}.png")), path: Some(r.rel_path()), ..Default::default() };
+        let name = format!("{output}.{}", self.format_of(&r).ext());
+        let original = Original { name: Some(name), path: Some(r.rel_path(&self.root)), ..Default::default() };
         let imported = self.import_bytes(&bytes, &original)?;
         let text = match (with_prompt, self.recipe(output)?) {
             (true, Some(recipe)) => recipe.prompt_original,
@@ -893,6 +925,25 @@ impl Library {
 
     /// Imports a tiled image (encoded, e.g. PNG) and makes an idea of it,
     /// remembering the images it was made of.
+    /// A cropped and marked copy of an image: the PNG `bytes` as a new idea
+    /// in `input/edited/` (made if missing), titled `title`.
+    pub fn edited_copy(&mut self, bytes: &[u8], image: ImageRef, edits: ImageEdits, title: &str) -> Result<Imported> {
+        let dir = self.root.join(EDITED_IDEAS);
+        fs::create_dir_all(&dir).at(&dir)?;
+        let original = Original { name: Some("edited.png".into()), ..Default::default() };
+        let imported = self.import_bytes(bytes, &original)?;
+        self.new_idea(NewIdea {
+            title: title.into(),
+            text: String::new(),
+            tags: vec![],
+            source: IdeaSource::Edited { image, edits },
+            images: vec![imported.image.clone()],
+            starred: false,
+            loc: IdeaLoc::Edited,
+        })?;
+        Ok(imported)
+    }
+
     pub fn idea_from_tiles(&mut self, bytes: &[u8], images: Vec<ImageRef>, title: &str, loc: IdeaLoc) -> Result<Id> {
         let original = Original { name: Some("tiles.png".into()), ..Default::default() };
         let imported = self.import_bytes(bytes, &original)?;
@@ -1438,9 +1489,10 @@ impl Library {
 
 impl Library {
     /// Stores a generated PNG: adds `increart:id`, `increart:pixels` and
-    /// `increart:recipe` without re-encoding (other chunks such as sd-server's
-    /// `parameters` are kept), writes `output_images/<id>.png` and links it
-    /// into the run's project as `unreviewed/<run>_r<rev>_s<seed>.png`.
+    /// `increart:recipe` (other chunks such as sd-server's `parameters` are
+    /// kept), writes `output_images/<id>.png` (without re-encoding) or, in a
+    /// WebP library, `.webp`, and links it into the run's project as
+    /// `unreviewed/<run>_r<rev>_s<seed>.png` (`.webp`).
     /// Returns the image ID and the link (relative to the root).
     pub fn write_output(
         &mut self,
@@ -1461,7 +1513,8 @@ impl Library {
         }
         let recipe_text = rsnfmt::to_string(&recipe);
         // Fail on a malformed file before taking an ID.
-        png::read_chunks(png_bytes).map_err(|e| Error::format(&label, e))?;
+        let server_meta = container::metadata(png_bytes).map_err(|e| Error::format(&label, e))?;
+        let format = self.meta.store_format;
         let id = self.write_store(Store::Output, |id| {
             let chunks = [
                 Chunk::text(png::KEY_ID, id.as_str()),
@@ -1470,7 +1523,16 @@ impl Library {
                 UsageCounts::default().chunk(),
                 Chunk::itxt(png::KEY_RECIPE, &recipe_text),
             ];
-            png::set_chunks(png_bytes, &chunks).expect("checked above")
+            if format == StoreFormat::Png && container::format_of(png_bytes) == Some(StoreFormat::Png) {
+                // the server's PNG as it is, chunks added
+                return (StoreFormat::Png, png::set_chunks(png_bytes, &chunks).expect("checked above"));
+            }
+            // its chunks (`parameters`) and ours on the same pixels
+            let keys: Vec<_> = chunks.iter().filter_map(|c| c.as_text().map(|(k, _)| k)).collect();
+            let mut all: Vec<Chunk> =
+                server_meta.iter().filter(|c| !c.as_text().is_some_and(|(k, _)| keys.contains(&k))).cloned().collect();
+            all.extend(chunks);
+            container::encode(format, &pixels, &all)
         })?;
         self.pixels.output.entry(hash).or_insert_with(|| id.clone());
         if pixels.is_transparent() {
@@ -1478,8 +1540,9 @@ impl Library {
         }
         self.save_pixel_index()?;
         let name = OutputName { run: run.clone(), rev, seed };
-        let at = project_dir.join(Verdict::output_dir(None)).join(name.file_name());
-        link::create(self.link_mode(), &self.image_path(&ImageRef::output(id.clone())), &at)?;
+        let r = ImageRef::output(id.clone());
+        let at = project_dir.join(Verdict::output_dir(None)).join(name.file_name(self.format_of(&r)));
+        link::create(self.link_mode(), &self.image_path(&r), &at)?;
         // its timing, for the run's statistics (none when it wasn't timed)
         if recipe.elapsed_s > 0.0 {
             let r = &mut run_file;
@@ -1567,16 +1630,202 @@ impl Library {
     }
 
     /// Links an output image into a collection folder as `<image-id>.png`
-    /// (unchanged if it is already there). Returns the link path.
+    /// (`.webp` like the store file; unchanged if it is already there).
+    /// Returns the link path.
     pub fn add_to_collection(&self, folder: &Path, image: &Id) -> Result<PathBuf> {
         let r = ImageRef::output(image.clone());
         self.require_image(&r)?;
         let dir = self.folder(Tree::Collections, folder)?;
-        let at = dir.join(format!("{image}.png"));
-        if !fsutil::exists(&at) {
-            link::create(self.link_mode(), &self.image_path(&r), &at)?;
+        let at = |f: StoreFormat| dir.join(format!("{image}.{}", f.ext()));
+        if let Some(there) = StoreFormat::ALL.into_iter().map(at).find(|p| fsutil::exists(p)) {
+            return Ok(self.rel(&there));
         }
+        let at = at(self.format_of(&r));
+        link::create(self.link_mode(), &self.image_path(&r), &at)?;
         Ok(self.rel(&at))
+    }
+}
+
+// ------------------------------------------------------------------ store format
+
+/// How many store images are in each format, and their bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreCounts {
+    pub png: (usize, u64),
+    pub webp: (usize, u64),
+}
+
+/// Converting the stores to one format (DESIGN.md, Image stores), a few
+/// images at a time so the library stays usable meanwhile:
+/// [`Library::conversion`] lists the images, [`Conversion::encode`]
+/// re-encodes one without the library (the slow part), and
+/// [`Library::install`] puts a batch in place and moves their links.
+#[derive(Clone, Debug)]
+pub struct Conversion {
+    pub root: PathBuf,
+    pub to: StoreFormat,
+    pub images: Vec<ImageRef>,
+}
+
+/// An image re-encoded by [`Conversion::encode`], ready to install.
+#[derive(Clone, Debug)]
+pub struct Converted {
+    image: ImageRef,
+    from: StoreFormat,
+    to: StoreFormat,
+    bytes: Vec<u8>,
+}
+
+impl Conversion {
+    fn from(&self) -> StoreFormat {
+        match self.to {
+            StoreFormat::Png => StoreFormat::Webp,
+            StoreFormat::Webp => StoreFormat::Png,
+        }
+    }
+
+    /// Re-encodes one image after checking its pixels against its
+    /// `increart:pixels`; the result is checked by decoding it again.
+    /// `None` when there's nothing to do: gone meanwhile, or too large for
+    /// WebP (it stays PNG).
+    pub fn encode(&self, r: &ImageRef) -> Result<Option<Converted>> {
+        let from = self.from();
+        let path = self.root.join(r.rel_path_as(from));
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).at(&path),
+        };
+        let (format, out, hash) = container::transcode(&bytes, self.to).map_err(|e| Error::format(&path, e))?;
+        match container::text(&bytes, png::KEY_PIXELS).map_err(|e| Error::format(&path, e))? {
+            Some(h) if h == hash => {}
+            Some(h) => return Err(Error::format(&path, format!("increart:pixels {h} != pixel hash {hash}"))),
+            None => return Err(Error::format(&path, "no increart:pixels chunk")),
+        }
+        Ok((format == self.to).then(|| Converted { image: r.clone(), from, to: format, bytes: out }))
+    }
+}
+
+impl Library {
+    pub fn store_format(&self) -> StoreFormat {
+        self.meta.store_format
+    }
+
+    /// Sets the format new store images are written in. Existing images
+    /// stay as they are until [`conversion`](Self::conversion).
+    pub fn set_store_format(&mut self, format: StoreFormat) -> Result<()> {
+        self.meta.store_format = format;
+        self.save_meta()
+    }
+
+    /// Writes `library.rsn`, its format number saying whether the stores may
+    /// hold WebP (older versions refuse such a library rather than miss its
+    /// images).
+    fn save_meta(&mut self) -> Result<()> {
+        let webp = self.meta.store_format == StoreFormat::Webp || self.store_counts()?.webp.0 > 0;
+        self.meta.format = if webp { LIBRARY_FORMAT_WEBP } else { LIBRARY_FORMAT };
+        rsnfmt::write(&self.root.join(LIBRARY_FILE), &self.meta)
+    }
+
+    pub fn store_counts(&self) -> Result<StoreCounts> {
+        let mut c = StoreCounts::default();
+        for store in [Store::Input, Store::Output] {
+            let dir = self.root.join(store.dir());
+            for e in fs::read_dir(&dir).at(&dir)? {
+                let e = e.at(&dir)?;
+                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                match StoreFormat::of_path(&e.path()) {
+                    Some(StoreFormat::Png) => (c.png.0 += 1, c.png.1 += len),
+                    Some(StoreFormat::Webp) => (c.webp.0 += 1, c.webp.1 += len),
+                    None => continue,
+                };
+            }
+        }
+        Ok(c)
+    }
+
+    /// The store images not yet in `to` (or in both formats, after an
+    /// interrupted conversion).
+    pub fn conversion(&self, to: StoreFormat) -> Result<Conversion> {
+        let mut images = Vec::new();
+        for store in [Store::Input, Store::Output] {
+            for (id, formats) in self.store_files(store)? {
+                if formats.iter().any(|f| *f != to) {
+                    images.push(ImageRef { id, store });
+                }
+            }
+        }
+        Ok(Conversion { root: self.root.clone(), to, images })
+    }
+
+    /// Puts re-encoded images in place: each one's metadata is taken again
+    /// from its current file (usage counts may have changed since it was
+    /// encoded), the new file is written with the old one's modification
+    /// time, every link to it is remade with the new extension, then the
+    /// old file goes. Returns the images that failed, with why.
+    pub fn install(&mut self, batch: Vec<Converted>) -> Result<Vec<(ImageRef, String)>> {
+        let links = self.links_by_image()?;
+        let mut failed = Vec::new();
+        for c in batch {
+            let links = links.get(&c.image).map(Vec::as_slice).unwrap_or_default();
+            if let Err(e) = self.install_one(&c, links) {
+                failed.push((c.image, e.to_string()));
+            }
+        }
+        self.save_meta()?;
+        Ok(failed)
+    }
+
+    fn install_one(&self, c: &Converted, links: &[PathBuf]) -> Result<()> {
+        let old = self.root.join(c.image.rel_path_as(c.from));
+        let Ok(now) = fs::read(&old) else {
+            return Ok(()); // gone meanwhile
+        };
+        let meta = container::metadata(&now).map_err(|e| Error::format(&old, e))?;
+        let bytes = container::set_chunks(&c.bytes, &meta).map_err(|e| Error::format(&old, e))?;
+        let new = self.root.join(c.image.rel_path_as(c.to));
+        fsutil::write_atomic(&new, &bytes)?;
+        if let Ok(t) = fs::metadata(&old).and_then(|m| m.modified()) {
+            let _ = File::options().write(true).open(&new).and_then(|f| f.set_modified(t));
+        }
+        for rel in links {
+            let at = self.root.join(rel);
+            if StoreFormat::of_path(&at) == Some(c.to) {
+                continue; // made by an interrupted conversion
+            }
+            let renamed = at.with_extension(c.to.ext());
+            if fsutil::exists(&renamed) {
+                fs::remove_file(&renamed).at(&renamed)?;
+            }
+            link::create(self.link_mode(), &new, &renamed)?;
+            fs::remove_file(&at).at(&at)?;
+        }
+        fs::remove_file(&old).at(&old)
+    }
+
+    /// Every link into the stores (review folders, collections, idea
+    /// folders), by the image it refers to.
+    fn links_by_image(&self) -> Result<HashMap<ImageRef, Vec<PathBuf>>> {
+        let ix = scan::scan(&self.root)?;
+        let mut out: HashMap<ImageRef, Vec<PathBuf>> = HashMap::new();
+        for o in ix.projects.iter().flat_map(|p| &p.outputs) {
+            out.entry(o.image.clone()).or_default().push(o.path.clone());
+        }
+        for c in &ix.collection_links {
+            out.entry(c.image.clone()).or_default().push(c.path.clone());
+        }
+        for e in &ix.ideas {
+            let dir = self.root.join(&e.dir);
+            for f in fs::read_dir(&dir).at(&dir)? {
+                let p = f.at(&dir)?.path();
+                if StoreFormat::of_path(&p).is_some()
+                    && let Some(r) = link::read_ref(&p, Store::Input)?
+                {
+                    out.entry(r).or_default().push(self.rel(&p));
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1604,7 +1853,8 @@ impl Library {
         for e in &ix.ideas {
             todo.extend(e.idea.images.iter().cloned().map(ImageRef::input));
             match &e.idea.source {
-                IdeaSource::FromOutput { image } => todo.push(image.clone()),
+                // an edited copy keeps its original, to be edited again
+                IdeaSource::FromOutput { image } | IdeaSource::Edited { image, .. } => todo.push(image.clone()),
                 IdeaSource::Tiled { images } => todo.extend(images.iter().cloned()),
                 _ => {}
             }
@@ -1660,8 +1910,33 @@ impl Library {
 
 /// The images a usage check goes through ([`Library::usage_check`]).
 pub struct UsageCheck {
+    root: PathBuf,
     pub images: Vec<ImageRef>,
     used: HashMap<ImageRef, UsageCounts>,
+}
+
+impl UsageCheck {
+    /// Whether the image needs nothing from [`Library::check_usage`]: gone,
+    /// or its stored counts already cover the runs'. Only reads, so the check
+    /// can do it without the library lock and lock only for the images that
+    /// need a write (which `check_usage` reads again first).
+    pub fn covers(&self, r: &ImageRef) -> bool {
+        let path = r.path(&self.root);
+        if !path.exists() {
+            return true;
+        }
+        let derived = self.used.get(r).copied().unwrap_or_default();
+        container::find_header_chunk(&path, png::KEY_USAGE)
+            .is_ok_and(|found| stored_usage(&found).is_some_and(|s| s.max(derived) == s))
+    }
+}
+
+/// The counts in a found `increart:usage` chunk, if whole and readable.
+fn stored_usage(found: &Option<(u64, Chunk, bool)>) -> Option<UsageCounts> {
+    found.as_ref().filter(|(_, _, ok)| *ok).and_then(|(_, c, _)| {
+        let t = std::str::from_utf8(c.data.get(png::KEY_USAGE.len() + 1..)?).ok()?;
+        UsageCounts::parse(t)
+    })
 }
 
 /// What runs that generated (have a revision) add to images' usage counts:

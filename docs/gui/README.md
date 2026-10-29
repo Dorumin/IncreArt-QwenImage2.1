@@ -14,19 +14,23 @@ scripts/headless.sh env INCREART_CONFIG=$PWD/tmp/gui-tour/config.rsn \
 | | |
 | --- | --- |
 | [01-library-dialog](01-library-dialog.png) | Start-up: recent libraries (last used in the accent colour), Create a new library… / Open an existing library… |
-| [02-server-dialog](02-server-dialog.png) | Start-up: server presets (a click opens one; ✎ edit, 🗑 delete), Open the last used, sd-server settings… |
-| [03-idea-inbox-grid](03-idea-inbox-grid.png) | Idea inbox grid with keys panel |
+| [02-server-dialog](02-server-dialog.png) | Start-up: server presets (a click opens one; ✎ edit, 🗑 delete), Open the last used, New preset / Set up KoboldCpp for your GPUs…, Server settings… |
+| [03-idea-inbox-grid](03-idea-inbox-grid.png) | Idea inbox grid: keys panel, card-size zoom, the drop-folder hint |
 | [04-idea-inbox-new-idea](04-idea-inbox-new-idea.png) | New idea form |
 | [05-input-library](05-input-library.png) | Input library: folder tree, selection actions, cards |
 | [06-projects-grid](06-projects-grid.png) | Projects: tree and project tiles (cover, counts) |
 | [07-projects-generate](07-projects-generate.png) | Generate: the form, and the Images pane on the right (each image a `<imageN>` reference, the start image, both, or parked) |
+| [07b-generate-blanks](07b-generate-blanks.png) | Generate, a single run whose prompt has blanks: the **Blanks** table under the prompt (a value each, prompt enhance's suggestions, Suggest for the empty ones), filled in when queued |
 | [08-projects-jobs](08-projects-jobs.png) | Jobs: servers and running runs |
 | [09-review](09-review.png) | Review: scope, image, recipe, verdicts, filmstrip |
 | [10-output-library](10-output-library.png) | Output library: all projects, Kept tab (the Grid's preset tabs: Kept · Good · Rejected · Unreviewed · All) |
 | [11-jobs-popover](11-jobs-popover.png) | Status bar jobs indicator and its popover (engine state simulated by the tour) |
 | [12-review-grid](12-review-grid.png) | Review → Grid |
-| [13-review-compare](13-review-compare.png) | Review → A/B compare: A pinned with its own buttons, B next |
+| [13-review-compare](13-review-compare.png) | Review → A/B compare: B (the next image, which ← → change) on the left, A pinned on the right with its own buttons |
+| [13c-review-compare-with](13c-review-compare-with.png) | Review → Compare with… (`Shift+C`): the picker opens on the image's references, its project's next; one click makes it A |
+| [13d-review-compare-input](13d-review-compare-input.png) | Review → A/B compare against an input image: A has no rating buttons, the keys rate B |
 | [14-output-library-rejected](14-output-library-rejected.png) | Output library → Grid → Rejected tab: the source's bad images, with Delete these N rejected… |
+| [14b-output-library-compare](14b-output-library-compare.png) | Output library → right-click → Compare with…: the Grid shows A beside the selected image (B), ←/→ step B |
 | [15-generate-img2img](15-generate-img2img.png) | Generate in a project set to img2img: start image with strength, refs counter |
 | [16-servers-opening](16-servers-opening.png) | Server dialog while opening: locked and dimmed, progress, Continue in background / Cancel |
 | [17-prompt-history](17-prompt-history.png) | Generate history: entries newest first with the settings changed and the runs they led to, word diff and settings against the current form, Restore all / prompt only / Copy |
@@ -34,6 +38,7 @@ scripts/headless.sh env INCREART_CONFIG=$PWD/tmp/gui-tour/config.rsn \
 | [19-idea-inbox-import](19-idea-inbox-import.png) | Idea inbox → Import: waiting files, Import now, recent imports with conversions |
 | [20-input-library-filters](20-input-library-filters.png) | Input library: filters (starred only), Grid · Folder · Discarded |
 | [21-resolutions](21-resolutions.png) | Resolutions editor (aspect, MP, time estimate, row actions) |
+| [21b-model-presets](21b-model-presets.png) | Model presets editor (the gear beside Generate's Model preset): which open servers run each, its recipe, files, steps, CFG, flow shift and sigmas |
 | [22-output-library-lineage](22-output-library-lineage.png) | Output library: sources (collections, smart folders), filters, lineage and recipe of an edited image |
 | [23-export](23-export.png) | Export dialog |
 | [24-projects-grid-tile-actions](24-projects-grid-tile-actions.png) | Projects grid: the selected tile shows Review / Generate (scene 25 clicks Generate and checks the result) |
@@ -54,12 +59,16 @@ scripts/headless.sh env INCREART_CONFIG=$PWD/tmp/gui-tour/config.rsn \
 | [52-server-dialog-edit](52-server-dialog-edit.png) | The preset editor modal: name, server rows, the listed devices to add, Save / Save and open / Open without saving / Cancel |
 | [53-library-wizard](53-library-wizard.png) | Create a new library: home folder, current folder or elsewhere |
 | [55-library-open-wizard](55-library-open-wizard.png) | Open an existing library: the folder, checked for library.rsn |
-| [54-server-wizard](54-server-wizard.png) | Server setup wizard (no presets): sd-server, the listed GPUs ticked, or connect to a running server |
+| [54-server-wizard](54-server-wizard.png) | Server setup wizard (no presets), KoboldCpp: the GPUs through a runtime (Vulkan here; CUDA or ROCm) as its tool lists them (discrete ones ticked), each one's VRAM preset and role, how two GPUs share the work (by default 2 images at a time, prompt enhance ticked on every GPU with room for it beside the images, here both; **Prompt enhance on** ticks its GPUs), the presets table with the one in use highlighted, the summary, the plan and why; Download, save as preset and open |
+| [54a-server-wizard-choose](54a-server-wizard-choose.png) | Server setup wizard, **Choose presets myself**: GPU 1 set to the 32 GB preset from its menu, highlighted in the table, with a warning that it leaves little VRAM |
+| [54c-server-wizard-pe-own-gpu](54c-server-wizard-pe-own-gpu.png) | Server setup wizard, "Prompt enhance on a GPU of its own": GPU 1 makes images, GPU 2 runs only prompt enhance (answers at once, never swapped) |
+| [54d-server-wizard-pe-on-one](54d-server-wizard-pe-on-one.png) | Server setup wizard, prompt enhance unticked on GPU 2 by hand: only GPU 1 runs the chat model |
+| [54b-server-wizard-sd-server](54b-server-wizard-sd-server.png) | Server setup wizard, sd-server: the listed GPUs ticked, or connect to a running server |
 | [56-server-status](56-server-status.png) | Top bar Servers…: the server status window (here without servers) |
 | [57-no-server-warning](57-no-server-warning.png) | First Queue of a session with no server: Set up servers… / Queue anyway / Cancel |
 | [58-server-dialog-from-main](58-server-dialog-from-main.png) | The server dialog reopened from the main window: Close goes back |
 | [59-continue-without-servers](59-continue-without-servers.png) | Continue without servers asks first |
-| [60-server-settings](60-server-settings.png) | sd-server settings modal: binary, models, leave running, devices |
+| [60-server-settings](60-server-settings.png) | Server settings modal: KoboldCpp (binary, its version), sd-server (binary, devices), both (models folder, leave running) |
 | [61-duplicate-project](61-duplicate-project.png) | A project's right-click Duplicate: name the copy first ("stickers copy") |
 | [63-projects-search](63-projects-search.png) | Projects side panel: New project / New folder on top, search ("fox": matching projects and the folders holding them) |
 | [62-rename](62-rename.png) | Rename modal (folders, projects, collections; also right after New folder / New project) |

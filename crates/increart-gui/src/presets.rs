@@ -7,7 +7,7 @@ use increart_core::prompts::{PromptPreset, PromptPresets, PromptTask};
 use increart_gui_core::preset_matches as matches;
 use increart_gui_core::{AppState, GenerateForm, Msg, PresetsEditor, PresetsView, SavePresetDialog, needs_refs};
 
-use crate::widgets::{BAD, ICON_FILL, ic, ph, short};
+use crate::widgets::{BAD, ICON_FILL, dialog_buttons, dialog_footer, ic, ph, short};
 
 /// The Generate prompt's text field.
 pub fn prompt_id() -> egui::Id {
@@ -333,19 +333,19 @@ pub fn editor_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
         if let Some(err) = &e.error {
             ui.colored_label(BAD, err);
         }
-        let (save, restore) = egui::Sides::new().show(
+        let (restore, save) = dialog_footer(
             ui,
+            |ui| {
+                ui.button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Restore defaults"))
+                    .on_hover_text("the built-in presets in place of all of these (Cancel still undoes it)")
+                    .clicked()
+            },
             |ui| {
                 let save = ui.button(RichText::new(ic(ph::CHECK, "Save")).strong()).clicked();
                 if ui.button("Cancel   Esc").clicked() {
                     out.push(Msg::ClosePresetEditor);
                 }
                 save
-            },
-            |ui| {
-                ui.button(ic(ph::ARROW_COUNTER_CLOCKWISE, "Restore defaults"))
-                    .on_hover_text("the built-in presets in place of all of these (Cancel still undoes it)")
-                    .clicked()
             },
         );
         if save {
@@ -574,7 +574,7 @@ pub fn save_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             ui.colored_label(BAD, e);
         }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             if ui.button(RichText::new(ic(ph::CHECK, "Save   Enter")).strong()).clicked() || enter {
                 out.push(Msg::ConfirmSavePreset);
             }
@@ -639,8 +639,13 @@ fn setting_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm) {
     if f.sweep.vary == SweepVary::Model {
         ui.horizontal_wrapped(|ui| {
             ui.label("Models");
-            for p in &st.config.recipes {
+            // those the servers run, and any still ticked
+            let runnable = st.runnable_recipes();
+            for (i, p) in st.config.recipes.iter().enumerate() {
                 let mut on = f.sweep.models.contains(&p.name);
+                if !on && !runnable.contains(&i) {
+                    continue;
+                }
                 let tip = format!("{} steps · cfg {}", p.steps, p.cfg);
                 if ui.checkbox(&mut on, &p.name).on_hover_text(tip).changed() {
                     if on {
@@ -850,6 +855,36 @@ fn style_sweep(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut
                 format!("{} chosen preset(s) left out: they need more than {refs} reference image(s).", unfit.len()),
             );
         }
+    }
+}
+
+/// The prompt's blanks, each with a value (or prompt enhance's
+/// suggestions), for a single run or a setting sweep: filled in when
+/// queued.
+pub fn prompt_blanks(ui: &mut egui::Ui, st: &AppState, f: &mut GenerateForm, out: &mut Vec<Msg>) {
+    use increart_core::prompts::slot_names;
+    let names = slot_names([f.prompt.as_str()]);
+    if names.is_empty() {
+        return;
+    }
+    let sw = &mut f.sweep;
+    pe_bar(ui, st, &names, sw, out);
+    table_box(
+        ui,
+        "prompt_blanks",
+        &format!("Blanks ({})", names.len()),
+        "a value for each of the prompt's blanks, filled in when queued (or type over it in the prompt)",
+        |ui| slot_table(ui, st, &names, &names, &[], sw, out),
+    );
+    suggest_dialog(ui.ctx(), st, sw, out);
+    batch_dialog(ui.ctx(), st, &names, out);
+    let empty: Vec<String> = names
+        .iter()
+        .filter(|n| sw.slots.get(*n).is_none_or(|v| v.trim().is_empty()))
+        .map(|n| format!("{{{n}}}"))
+        .collect();
+    if !empty.is_empty() {
+        ui.colored_label(crate::widgets::NEUTRAL, format!("Fill in {} before queueing.", empty.join(", ")));
     }
 }
 
@@ -1174,8 +1209,8 @@ fn suggest_dialog(ctx: &egui::Context, st: &AppState, sw: &mut Sweep, out: &mut 
             ui.weak("the system prompt goes first: see Settings → Prompt enhance");
         });
         ui.separator();
-        ui.horizontal(|ui| {
-            close = ui.button("Close").clicked();
+        dialog_buttons(ui, |ui| {
+            close = ui.button("Close   Esc").clicked();
         });
     });
     let old = match &key.style {
@@ -1284,13 +1319,13 @@ fn batch_dialog(ctx: &egui::Context, st: &AppState, names: &[String], out: &mut 
         form_grid(ui, st, server, "pe_batch_grid", &mut b.form, None, out);
         ui.add_space(4.0);
         let asked = ticked(&b);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let busy = st.pe.blanks_waiting() > 0;
             let label = RichText::new(ic(ph::MAGIC_WAND, &format!("Suggest ({})", asked.len()))).strong();
             let tip = if busy { "wait for the asks going on" } else { "ask for each blank ticked" };
             let r = ui.add_enabled(!asked.is_empty() && !busy, egui::Button::new(label));
             ask = r.on_hover_text(format!("{tip} ({})", server.name)).on_disabled_hover_text(tip).clicked();
-            close = ui.button("Close").clicked();
+            close = ui.button("Close   Esc").clicked();
         });
         egui::CollapsingHeader::new("The message sent (the first blank's)").id_salt("pe_batch_message").show(
             ui,
@@ -1531,7 +1566,8 @@ fn slot_table(
                         let need = needing_slot(sw, chosen, n);
                         let mut parts = vec![];
                         if in_template.contains(n) {
-                            parts.push("the template".to_string());
+                            // (no styles: a single run's prompt)
+                            parts.push(if chosen.is_empty() { "the prompt" } else { "the template" }.to_string());
                         }
                         match need.len() {
                             0 => {}
@@ -1768,7 +1804,7 @@ pub fn added_blanks_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg
             });
         });
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             if ui.button(RichText::new("Keep as blanks").strong()).clicked() {
                 out.push(Msg::PeAddedBlanks(true));
             }
@@ -1944,12 +1980,12 @@ fn enhance_dialog(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
                 });
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let label = RichText::new(ic(ph::MAGIC_WAND, &format!("Enhance ({})", ticked.len()))).strong();
             let tip = if busy { "wait for the asks going on" } else { "ask for each style ticked" };
             let r = ui.add_enabled(!ticked.is_empty() && !busy, egui::Button::new(label));
             ask = r.on_hover_text(format!("{tip} ({})", server.name)).on_disabled_hover_text(tip).clicked();
-            close = ui.button("Close").clicked();
+            close = ui.button("Close   Esc").clicked();
         });
     });
     if Some(&a) != st.pe.style_dialog.as_ref() {

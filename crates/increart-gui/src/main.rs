@@ -1,6 +1,10 @@
+// Windows: the release build opens no console window beside its own.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! IncreArt: Qwen-Image 2.1 batch generation and review (docs/DESIGN.md).
 //!
-//! Settings: `$XDG_CONFIG_HOME/increart/config.rsn`, or the file named by
+//! Settings: `config.rsn` in the app's config folder (`~/.config/increart`
+//! on Linux, `%APPDATA%\increart` on Windows, `~/Library/Application
+//! Support/increart` on macOS), or the file named by
 //! `INCREART_CONFIG`. The command line can skip the start-up screens (see
 //! `USAGE`); a screen is only skipped when its argument is valid.
 
@@ -8,6 +12,8 @@ mod app;
 mod folderview;
 mod history;
 mod ideas;
+mod logs;
+mod markup;
 mod pe_settings;
 mod presets;
 mod projects;
@@ -78,7 +84,7 @@ fn main() -> eframe::Result {
         std::process::exit(2);
     });
     let config_path = std::env::var_os("INCREART_CONFIG").map(PathBuf::from).or_else(Config::default_path);
-    let (config, warnings) = match &config_path {
+    let (mut config, warnings) = match &config_path {
         Some(p) => Config::load(p).unwrap_or_else(|e| {
             let mut c = Config::default();
             let w = c.normalize();
@@ -90,6 +96,13 @@ fn main() -> eframe::Result {
             (c, w)
         }
     };
+    // KoboldCpp named nowhere: found where it usually is (saved with the
+    // settings' next save)
+    if config.known_koboldcpp().is_none()
+        && let Some(b) = increart_core::kobold::find_binary()
+    {
+        config.koboldcpp = b;
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 900.0])
@@ -102,20 +115,24 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             add_icon_font(&cc.egui_ctx);
+            #[cfg(unix)]
             close_on_signals(&cc.egui_ctx);
             Ok(Box::new(app::App::new(cc, config, config_path, warnings, startup)))
         }),
     )
 }
 
+#[cfg(unix)]
 static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     SIGNALLED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// SIGTERM, SIGINT and SIGHUP close the window as its close button does,
 /// so drafts are saved and the servers the app started are stopped.
+#[cfg(unix)]
 fn close_on_signals(ctx: &egui::Context) {
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic.

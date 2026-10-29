@@ -1206,32 +1206,253 @@ PromptPresets {
         },
         PromptTask {
             name: "Character",
-            description: "Keep a character the same while changing pose, expression or setting.",
+            description: "Keep a character the same while changing one thing: pose, setting, drawing style, colours, clothes, gear or action.",
             presets: [
                 PromptPreset {
                     name: "Character sheet",
+                    group: "Pose & setting",
                     description: "An animator's model sheet: the same character from front, side and back.",
                     prompt: "Create a character sheet of the character in <image1>: front, side and back views, full body, plain white background, consistent design."
                 },
                 PromptPreset {
                     name: "New pose",
+                    group: "Pose & setting",
                     description: "The same character in {pose}.",
                     prompt: "Show the character from <image1> {pose}, keeping the face, outfit and style identical."
                 },
                 PromptPreset {
                     name: "Change expression",
+                    group: "Pose & setting",
                     description: "The same face showing {expression}.",
                     prompt: "Change the expression of the character in <image1> to {expression}. Change nothing else."
                 },
                 PromptPreset {
                     name: "New scene",
+                    group: "Pose & setting",
                     description: "Puts the character into {scene}.",
                     prompt: "Place the character from <image1> in {scene}, keeping the character's face, outfit and style identical."
                 },
                 PromptPreset {
                     name: "Change age",
+                    group: "Pose & setting",
                     description: "Makes the person look {age}, keeping who they are.",
                     prompt: "Make the person in <image1> look {age}, keeping their identity recognisable. Change nothing else."
+                },
+                PromptPreset {
+                    name: "Redrawn in",
+                    group: "Drawing style",
+                    description: "The same character redrawn in {style}, e.g. watercolour, 1990s anime or ink wash, its design unchanged.",
+                    prompt: "Redraw the character from <image1> in {style}, translating its lines, shading and colour into that style. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Chibi",
+                    group: "Drawing style",
+                    description: "A \"chibi\" (small and cute) version: big head, tiny body, details simplified.",
+                    prompt: "Redraw the character from <image1> as a chibi: a big head on a tiny body, about two heads tall, details simplified but every part of the design still there. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Realistic",
+                    group: "Drawing style",
+                    description: "The character as if they really existed: a real person, or a creature that could live.",
+                    prompt: "Redraw the character from <image1> as a photorealistic person or creature, real skin, hair and fabric, natural light, as if photographed. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Pixel sprite",
+                    group: "Drawing style",
+                    description: "A video game sprite at {resolution}, e.g. 32×32 or 64×64, a limited palette and crisp pixels.",
+                    prompt: "Redraw the character from <image1> as a {resolution} pixel-art game sprite, a limited palette, crisp pixels, no anti-aliasing, on a plain background. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Clean line art",
+                    group: "Drawing style",
+                    description: "Inks only: clean black outlines with no colour or shading, ready to colour.",
+                    prompt: "Redraw the character from <image1> as clean black line art on white, confident even lines, no colour, no shading. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Simplified for animation",
+                    group: "Drawing style",
+                    description: "An animation-ready model: fewer lines, flat colour areas, simple shapes that are easy to redraw.",
+                    prompt: "Redraw the character from <image1> as an animation model: fewer, simpler lines, flat colour areas with one shadow tone, shapes easy to redraw frame after frame. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Detailed render",
+                    group: "Drawing style",
+                    description: "A fully rendered illustration: materials, texture and lighting worked out.",
+                    prompt: "Redraw the character from <image1> as a fully rendered illustration, detailed materials and textures, careful lighting, rim light and soft shadows. Keep the character's design, outfit, colours and pose identical."
+                },
+                PromptPreset {
+                    name: "Palette swap",
+                    group: "Colour",
+                    description: "A game's alternate costume: the same shading, the colours swapped for {colour} and {colour2}.",
+                    prompt: "Recolour the character from <image1> with a palette swap to {colour} and {colour2}, each colour area keeping its lightness, as in a game's alternate costume. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Hair colour",
+                    group: "Colour",
+                    description: "The same character with {colour} hair.",
+                    prompt: "Change the hair of the character in <image1> to {colour}, with natural highlights and shadows. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Eye colour",
+                    group: "Colour",
+                    description: "The same character with {colour} eyes.",
+                    prompt: "Change the eyes of the character in <image1> to {colour}. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Outfit colours",
+                    group: "Colour",
+                    description: "The clothes recoloured in {colour} and {colour2}, skin and hair kept.",
+                    prompt: "Recolour the clothing of the character in <image1> in {colour} and {colour2}, the skin, hair and eyes unchanged. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Dark variant",
+                    group: "Colour",
+                    description: "An \"evil twin\" palette: dark, cold, shadowy colours.",
+                    prompt: "Recolour the character from <image1> with a dark variant palette: deep, desaturated and cold colours, glowing accents, an evil-twin look. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Rare variant",
+                    group: "Colour",
+                    description: "An unusual, gleaming alternate palette, like a game's rare find.",
+                    prompt: "Recolour the character from <image1> with a rare variant palette: unexpected but harmonious colours, a subtle metallic sheen and sparkle. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "Greyscale values",
+                    group: "Colour",
+                    description: "The design in shades of grey only, to check it reads without colour.",
+                    prompt: "Convert the character from <image1> to greyscale values only, a clear range from light to dark, to check the design reads without colour. Keep the line art, shading, design and pose identical."
+                },
+                PromptPreset {
+                    name: "New outfit",
+                    group: "Clothing",
+                    description: "The same character in {outfit}.",
+                    prompt: "Dress the character from <image1> in {outfit}, drawn in the same style, fitting the body and pose. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Outfit from an era",
+                    group: "Clothing",
+                    description: "Clothes from {era}, e.g. Regency England or 1970s disco.",
+                    prompt: "Dress the character from <image1> in clothing from {era}, the cut, fabrics and details of that time. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Genre outfit",
+                    group: "Clothing",
+                    description: "An outfit for a {genre} story, e.g. cyberpunk, high fantasy or noir.",
+                    prompt: "Dress the character from <image1> in an outfit for a {genre} story, costume and accessories true to the genre. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Uniform of",
+                    group: "Clothing",
+                    description: "The work clothes of a {job}, e.g. a chef, astronaut or knight.",
+                    prompt: "Dress the character from <image1> in the uniform of a {job}, with its usual badges, fittings and details. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Seasonal outfit",
+                    group: "Clothing",
+                    description: "Clothes for {season}, e.g. deep winter or a summer heatwave.",
+                    prompt: "Dress the character from <image1> for {season}, layers, fabrics and accessories that suit the weather. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Swap one garment",
+                    group: "Clothing",
+                    description: "Just the {garment}, e.g. jacket or boots, changed to {outfit}.",
+                    prompt: "Change only the {garment} of the character in <image1> to {outfit}, everything else they wear unchanged. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Add an accessory",
+                    group: "Clothing",
+                    description: "One accessory added: {accessory}, e.g. a scarf, goggles or a cape.",
+                    prompt: "Add {accessory} to the character in <image1>, worn naturally, in the same style, everything else they wear unchanged. Keep the face, hair, body, pose and art style identical."
+                },
+                PromptPreset {
+                    name: "Give them",
+                    group: "Equipment",
+                    description: "The character holding {equipment}: a weapon, tool, instrument or gadget.",
+                    prompt: "Give the character from <image1> {equipment}, held or worn naturally, the hands and pose adjusted to it. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Swap equipment",
+                    group: "Equipment",
+                    description: "Their {equipment} swapped for {equipment2}.",
+                    prompt: "Replace the {equipment} of the character in <image1> with {equipment2}, held the same way. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Unarmed",
+                    group: "Equipment",
+                    description: "Every weapon, tool and gadget taken away, hands relaxed.",
+                    prompt: "Remove every weapon, tool and gadget from the character in <image1>, hands empty and relaxed, holsters and straps left as they are. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Gear upgrade",
+                    group: "Equipment",
+                    description: "Their gear as a {tier} version, e.g. starter, battle-worn or legendary.",
+                    prompt: "Redraw the equipment of the character in <image1> as a {tier} version of the same gear, its materials, wear and ornament changed to match. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Loadout sheet",
+                    group: "Equipment",
+                    description: "A game's loadout: the character beside each piece of gear laid out and labelled.",
+                    prompt: "Create a loadout sheet of the character from <image1>: the character standing on the left, each piece of their equipment laid out separately beside them with a short label, plain light background. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Equipment from an era",
+                    group: "Equipment",
+                    description: "Their gear remade as it would be in {era}, e.g. the Bronze Age or the year 2200.",
+                    prompt: "Remake the equipment of the character in <image1> as it would be in {era}, the same purpose with that time's materials and technology. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Doing",
+                    group: "Action",
+                    description: "The character {action}, e.g. climbing a rope or fixing an engine, in motion.",
+                    prompt: "Show the character from <image1> {action}, a dynamic pose, clothes and hair moving with it. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Action from an angle",
+                    group: "Action",
+                    description: "The character {action}, seen from {angle}, e.g. a low worm's-eye view.",
+                    prompt: "Show the character from <image1> {action}, seen from {angle}, strong perspective and depth. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Using their gear",
+                    group: "Action",
+                    description: "The character {action} with {equipment}, e.g. swinging a war hammer.",
+                    prompt: "Show the character from <image1> {action} with {equipment}, the weight and motion of it clear in the pose. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Casting",
+                    group: "Action",
+                    description: "Unleashing a spell or power of {element}, its glow lighting them.",
+                    prompt: "Show the character from <image1> unleashing a spell or power of {element}, energy surging from their hands, its light falling on them. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Keyframe sequence",
+                    group: "Action",
+                    description: "Three to five frames of the character {action}: wind-up, action, follow-through.",
+                    prompt: "Create a keyframe sequence of the character from <image1> {action}: three to five frames side by side from anticipation through the action to follow-through, plain white background. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Walk / run cycle",
+                    group: "Action",
+                    description: "An animation cycle sheet of the character's {cycle}, e.g. walk, run, sneak or idle breathing.",
+                    prompt: "Create an animation cycle sheet of the character from <image1>: their {cycle}, evenly spaced frames in side view, plain white background. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Hit reaction",
+                    group: "Action",
+                    description: "The character recoiling from {impact}, e.g. a punch, an explosion or a gust of wind.",
+                    prompt: "Show the character from <image1> recoiling from {impact}, thrown off balance, impact effects around them. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Victory pose",
+                    group: "Action",
+                    description: "The character celebrating a win, game-ending-screen energy.",
+                    prompt: "Show the character from <image1> in a triumphant victory pose, celebrating, confident and full of energy. Keep the face, outfit, art style and proportions identical."
+                },
+                PromptPreset {
+                    name: "Defeat pose",
+                    group: "Action",
+                    description: "The character slumped and beaten, game-over energy.",
+                    prompt: "Show the character from <image1> defeated, slumped and exhausted, head down. Keep the face, outfit, art style and proportions identical."
                 }
             ]
         },

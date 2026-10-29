@@ -3,6 +3,7 @@
 //! the files (`Idea { … }`, `Run { … }`).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,9 @@ use crate::id::{Id, Timestamp};
 use crate::rsnfmt::bare;
 
 pub const LIBRARY_FORMAT: u32 = 1;
+/// A library whose stores may hold WebP files (`store_format: Webp`, or
+/// some left from it): older versions, which read only PNG, refuse it.
+pub const LIBRARY_FORMAT_WEBP: u32 = 2;
 /// See [`LibraryMeta::metadata`].
 pub const METADATA_VERSION: u32 = 1;
 
@@ -37,7 +41,49 @@ impl Store {
     }
 }
 
-/// A store image: always at `<store>_images/<id>.png`.
+/// How store images are encoded, chosen per library (DESIGN.md, Image
+/// stores). Both are lossless: converting keeps the pixels exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StoreFormat {
+    #[default]
+    Png,
+    /// Lossless WebP, about half the size of PNG.
+    Webp,
+}
+
+impl StoreFormat {
+    pub const ALL: [StoreFormat; 2] = [StoreFormat::Png, StoreFormat::Webp];
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            StoreFormat::Png => "png",
+            StoreFormat::Webp => "webp",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StoreFormat::Png => "PNG",
+            StoreFormat::Webp => "WebP",
+        }
+    }
+
+    /// The format a store file or image link has, by its extension.
+    pub fn of_path(p: &Path) -> Option<StoreFormat> {
+        Self::of_name(p.file_name()?.to_str()?).map(|(f, _)| f)
+    }
+
+    /// A store file or link name's format and stem.
+    pub fn of_name(name: &str) -> Option<(StoreFormat, &str)> {
+        Self::ALL.into_iter().find_map(|f| Some((f, name.strip_suffix(f.ext())?.strip_suffix('.')?)))
+    }
+}
+
+fn is_png(f: &StoreFormat) -> bool {
+    *f == StoreFormat::Png
+}
+
+/// A store image: at `<store>_images/<id>.png`, or `.webp`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename = "ImageRef")]
 pub struct ImageRef {
@@ -54,9 +100,26 @@ impl ImageRef {
         ImageRef { id, store: Store::Output }
     }
 
-    /// Path relative to the library root.
-    pub fn rel_path(&self) -> String {
-        format!("{}/{}.png", self.store.dir(), self.id)
+    /// The store file, `<store>_images/<id>.png` or `.webp` (a library can
+    /// hold both); the PNG name when there is neither.
+    pub fn path(&self, root: &Path) -> PathBuf {
+        let png = root.join(self.rel_path_as(StoreFormat::Png));
+        if png.exists() {
+            return png;
+        }
+        let webp = root.join(self.rel_path_as(StoreFormat::Webp));
+        if webp.exists() { webp } else { png }
+    }
+
+    /// [`path`](Self::path) relative to the library root.
+    pub fn rel_path(&self, root: &Path) -> String {
+        let p = self.path(root);
+        p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned()
+    }
+
+    /// The store file's path relative to the root when stored as `format`.
+    pub fn rel_path_as(&self, format: StoreFormat) -> String {
+        format!("{}/{}.{}", self.store.dir(), self.id, format.ext())
     }
 }
 
@@ -77,6 +140,10 @@ pub struct LibraryMeta {
     /// (1: `increart:blake3` everywhere, `inputs` in output recipes).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub metadata: u32,
+    /// The format new store images are written in; existing ones change
+    /// only when the library is converted.
+    #[serde(default, skip_serializing_if = "is_png")]
+    pub store_format: StoreFormat,
 }
 
 fn no_time(v: &f32) -> bool {
@@ -140,6 +207,49 @@ pub enum IdeaSource {
     Tiled {
         images: Vec<ImageRef>,
     },
+    /// A cropped and marked copy of `image` (Crop / mark…); `edits` reopen
+    /// it as it was drawn.
+    Edited {
+        image: ImageRef,
+        edits: ImageEdits,
+    },
+}
+
+/// A crop and marks drawn over an image, in the original's pixels
+/// (`crate::markup` renders them).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename = "ImageEdits")]
+pub struct ImageEdits {
+    /// x, y, width, height; `None`: the whole image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<[u32; 4]>,
+    #[serde(default)]
+    pub marks: Vec<Mark>,
+}
+
+impl ImageEdits {
+    pub fn is_empty(&self) -> bool {
+        self.crop.is_none() && self.marks.is_empty()
+    }
+}
+
+/// A line drawn over an image: its shape, colour (RGBA) and width in pixels.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename = "Mark")]
+pub struct Mark {
+    pub shape: Shape,
+    pub color: [u8; 4],
+    pub width: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Shape {
+    /// A freehand line through these points.
+    Pencil(Vec<[f32; 2]>),
+    /// Corners.
+    Rect([f32; 2], [f32; 2]),
+    /// Its bounding box's corners.
+    Ellipse([f32; 2], [f32; 2]),
 }
 
 /// `project.rsn`.
@@ -608,8 +718,8 @@ pub struct PixelIndexFile {
 /// 2: adds `transparent`.
 pub const PIXEL_INDEX_VERSION: u32 = 2;
 
-/// An output link's name, `<run-id>_r<rev>_s<seed>.png`, seed padded to at
-/// least 4 digits.
+/// An output link's name, `<run-id>_r<rev>_s<seed>.png` (`.webp` for a
+/// WebP store file), seed padded to at least 4 digits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputName {
     pub run: Id,
@@ -618,12 +728,12 @@ pub struct OutputName {
 }
 
 impl OutputName {
-    pub fn file_name(&self) -> String {
-        format!("{}_r{}_s{:04}.png", self.run, self.rev, self.seed)
+    pub fn file_name(&self, format: StoreFormat) -> String {
+        format!("{}_r{}_s{:04}.{}", self.run, self.rev, self.seed, format.ext())
     }
 
     pub fn parse(name: &str) -> Option<OutputName> {
-        let stem = name.strip_suffix(".png")?;
+        let (_, stem) = StoreFormat::of_name(name)?;
         let (run, rest) = stem.split_once("_r")?;
         let (rev, seed) = rest.split_once("_s")?;
         let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
@@ -649,11 +759,14 @@ mod tests {
     #[test]
     fn output_names() {
         let n = OutputName { run: "2026.10.19-09.00-0000".parse().unwrap(), rev: 0, seed: 3 };
-        assert_eq!(n.file_name(), "2026.10.19-09.00-0000_r0_s0003.png");
-        assert_eq!(OutputName::parse(&n.file_name()), Some(n.clone()));
+        assert_eq!(n.file_name(StoreFormat::Png), "2026.10.19-09.00-0000_r0_s0003.png");
+        assert_eq!(OutputName::parse(&n.file_name(StoreFormat::Png)), Some(n.clone()));
+        assert_eq!(n.file_name(StoreFormat::Webp), "2026.10.19-09.00-0000_r0_s0003.webp");
+        assert_eq!(OutputName::parse(&n.file_name(StoreFormat::Webp)), Some(n.clone()));
         let big = OutputName { seed: 123456, ..n };
-        assert_eq!(big.file_name(), "2026.10.19-09.00-0000_r0_s123456.png");
-        assert_eq!(OutputName::parse(&big.file_name()), Some(big));
+        assert_eq!(big.file_name(StoreFormat::Png), "2026.10.19-09.00-0000_r0_s123456.png");
+        assert_eq!(OutputName::parse(&big.file_name(StoreFormat::Png)), Some(big));
+        assert_eq!(OutputName::parse("2026.10.19-09.00-0000_r0_s1.jpg"), None);
         assert_eq!(OutputName::parse("2026.10.19-09.00-0000.png"), None);
         assert_eq!(OutputName::parse("x_r0_s1.png"), None);
     }

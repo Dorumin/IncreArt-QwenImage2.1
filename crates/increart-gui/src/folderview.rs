@@ -349,7 +349,7 @@ fn entry_menu(ui: &mut egui::Ui, st: &AppState, e: &FvEntry, out: &mut Vec<Msg>)
     }
     // on disk: the entry itself; a smart folder's image: its store file
     let on_disk = match &e.kind {
-        EntryKind::Image(img) if smart => Some(Path::new(&img.rel_path()).to_path_buf()),
+        EntryKind::Image(img) if smart => st.library.as_ref().map(|root| PathBuf::from(img.rel_path(root))),
         _ if smart => None,
         _ => Some(path.clone()),
     };

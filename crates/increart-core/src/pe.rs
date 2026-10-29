@@ -4,9 +4,7 @@
 //! rewriting).
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
 use std::io::Cursor;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,9 +173,79 @@ pub enum PeDevice {
     Auto,
     /// The CPU, with this many threads (0: KoboldCpp's choice).
     Cpu { threads: u32 },
-    /// GPUs, through Vulkan (`vulkaninfo` numbering), every layer on them;
-    /// none listed: every GPU.
-    Gpu { devices: Vec<u32> },
+    /// GPUs, through `runtime` (numbered as its [`list_gpus`] lists them),
+    /// every layer on them; none listed: every GPU.
+    Gpu {
+        devices: Vec<u32>,
+        #[serde(default, skip_serializing_if = "is_default")]
+        runtime: GpuRuntime,
+    },
+}
+
+/// How KoboldCpp reaches the GPUs: the build must have it (CUDA and ROCm
+/// builds are separate downloads).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GpuRuntime {
+    /// Any GPU with a Vulkan driver; every KoboldCpp build has it.
+    #[default]
+    Vulkan,
+    /// NVIDIA.
+    Cuda,
+    /// AMD, with a ROCm (hipBLAS) build of KoboldCpp.
+    Rocm,
+    /// Apple silicon: KoboldCpp's Mac build, its only GPU runtime.
+    Metal,
+}
+
+impl GpuRuntime {
+    pub const ALL: [GpuRuntime; 4] = [GpuRuntime::Vulkan, GpuRuntime::Cuda, GpuRuntime::Rocm, GpuRuntime::Metal];
+
+    /// The ones this OS has: Metal on a Mac, the others elsewhere.
+    pub fn here() -> Vec<GpuRuntime> {
+        GpuRuntime::ALL.into_iter().filter(|r| (*r == GpuRuntime::Metal) == cfg!(target_os = "macos")).collect()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GpuRuntime::Vulkan => "Vulkan",
+            GpuRuntime::Cuda => "CUDA",
+            GpuRuntime::Rocm => "ROCm",
+            GpuRuntime::Metal => "Metal",
+        }
+    }
+
+    /// What lists the GPUs, numbered as KoboldCpp numbers them (Metal: the
+    /// app itself, from the RAM).
+    pub fn tool(self) -> &'static str {
+        match self {
+            GpuRuntime::Vulkan => "vulkaninfo",
+            GpuRuntime::Cuda => "nvidia-smi",
+            GpuRuntime::Rocm => "rocm-smi",
+            GpuRuntime::Metal => "",
+        }
+    }
+
+    /// Metal on a Mac; else CUDA when `nvidia-smi` runs, else Vulkan (ROCm
+    /// only when chosen: it needs a ROCm build).
+    pub fn likely() -> GpuRuntime {
+        if cfg!(target_os = "macos") {
+            return GpuRuntime::Metal;
+        }
+        let mut cmd = Command::new("nvidia-smi");
+        let cuda = crate::process::background(&mut cmd, false)
+            .arg("-L")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if cuda { GpuRuntime::Cuda } else { GpuRuntime::Vulkan }
+    }
+
+    /// Whether `binary` (by its file name) can't have this runtime:
+    /// KoboldCpp's `nocuda` builds have Vulkan only.
+    pub fn missing_from(self, binary: &str) -> bool {
+        matches!(self, GpuRuntime::Cuda | GpuRuntime::Rocm) && binary.to_lowercase().contains("nocuda")
+    }
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -214,11 +282,16 @@ pub enum PeRun {
     /// stops it on quitting.
     KoboldCpp {
         binary: String,
-        /// The GGUF model.
+        /// The GGUF model (empty: the one `config` names).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         model: String,
         /// The vision projector (GGUF); empty: text only.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         mmproj: String,
+        /// A KoboldCpp settings file (`.kcpps`, saved from its own
+        /// launcher) to start from; the settings here go over it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        config: String,
         host: String,
         port: u16,
         #[serde(default, skip_serializing_if = "is_default")]
@@ -240,10 +313,13 @@ impl Default for PeRun {
     }
 }
 
-/// The GPUs Vulkan sees, as (number for [`PeDevice::Gpu`], name), from
-/// `vulkaninfo --summary`; software renderers left out.
-pub fn list_gpus() -> Result<Vec<(u32, String)>, String> {
-    let out = Command::new("vulkaninfo")
+/// The GPUs `runtime` sees, as (number for [`PeDevice::Gpu`], name).
+pub fn list_gpus(runtime: GpuRuntime) -> Result<Vec<(u32, String)>, String> {
+    if runtime != GpuRuntime::Vulkan {
+        return crate::tiers::detect_gpus(runtime).map(|l| l.into_iter().map(|g| (g.number, g.name)).collect());
+    }
+    let mut cmd = Command::new("vulkaninfo");
+    let out = crate::process::background(&mut cmd, false)
         .arg("--summary")
         .stderr(Stdio::null())
         .output()
@@ -275,15 +351,43 @@ pub fn parse_vulkaninfo(text: &str) -> Vec<(u32, String)> {
     list
 }
 
-/// The KoboldCpp command line (empty for Connect).
+/// The KoboldCpp command line (empty for Connect). A settings file comes
+/// first: KoboldCpp lets what follows it on the command line override it.
 pub fn command_args(run: &PeRun) -> Vec<String> {
-    let PeRun::KoboldCpp { model, mmproj, host, port, device, context, args, .. } = run else { return vec![] };
-    let mut v: Vec<String> = vec!["--model".into(), model.clone()];
+    let PeRun::KoboldCpp { model, mmproj, config, host, port, device, context, args, .. } = run else {
+        return vec![];
+    };
+    let mut v: Vec<String> = vec![];
+    if !config.is_empty() {
+        v.extend(["--config".into(), config.clone()]);
+    }
+    if !model.is_empty() {
+        v.extend(["--model".into(), model.clone()]);
+    }
     if !mmproj.is_empty() {
         v.extend(["--mmproj".into(), mmproj.clone()]);
     }
     v.extend(["--host".into(), host.clone(), "--port".into(), port.to_string()]);
     v.extend(["--skiplauncher", "--quiet", "--jinja"].map(String::from));
+    v.extend(device_args(device));
+    if *context > 0 {
+        v.extend(["--contextsize".into(), context.to_string()]);
+    }
+    v.extend(args.iter().cloned());
+    v
+}
+
+/// The environment for [`command_args`].
+pub fn run_env(run: &PeRun) -> Vec<(String, String)> {
+    match run {
+        PeRun::KoboldCpp { device, .. } => device_env(device),
+        PeRun::Connect { .. } => vec![],
+    }
+}
+
+/// KoboldCpp's flags for `device`.
+pub fn device_args(device: &PeDevice) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
     match device {
         PeDevice::Auto => {}
         PeDevice::Cpu { threads } => {
@@ -292,16 +396,36 @@ pub fn command_args(run: &PeRun) -> Vec<String> {
                 v.extend(["--threads".into(), threads.to_string()]);
             }
         }
-        PeDevice::Gpu { devices } => {
+        PeDevice::Gpu { devices, runtime: GpuRuntime::Vulkan } => {
             v.push("--usevulkan".into());
             v.extend(devices.iter().map(u32::to_string));
             v.extend(["--gpulayers".into(), "999".into()]);
         }
+        // the Mac build's one GPU, through Metal without asking
+        PeDevice::Gpu { runtime: GpuRuntime::Metal, .. } => v.extend(["--gpulayers", "999"].map(String::from)),
+        // the GPUs picked by `device_env` (`--usecuda` takes one or all)
+        PeDevice::Gpu { .. } => v.extend(["--usecuda", "--gpulayers", "999"].map(String::from)),
     }
-    if *context > 0 {
-        v.extend(["--contextsize".into(), context.to_string()]);
+    v
+}
+
+/// The environment KoboldCpp needs for `device`: CUDA and ROCm see only
+/// the GPUs picked, CUDA numbering them as `nvidia-smi` does.
+pub fn device_env(device: &PeDevice) -> Vec<(String, String)> {
+    let PeDevice::Gpu { devices, runtime } = device else { return vec![] };
+    let ids = devices.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let mut v = vec![];
+    match runtime {
+        GpuRuntime::Vulkan | GpuRuntime::Metal => {}
+        GpuRuntime::Cuda => {
+            v.push(("CUDA_DEVICE_ORDER".into(), "PCI_BUS_ID".into()));
+            if !devices.is_empty() {
+                v.push(("CUDA_VISIBLE_DEVICES".into(), ids));
+            }
+        }
+        GpuRuntime::Rocm if !devices.is_empty() => v.push(("HIP_VISIBLE_DEVICES".into(), ids)),
+        GpuRuntime::Rocm => {}
     }
-    v.extend(args.iter().cloned());
     v
 }
 
@@ -392,6 +516,8 @@ impl Client {
             "stream": true,
         });
         let url = format!("{}/v1/chat/completions", self.base);
+        // a KoboldCpp swapping with images: after the image it's making
+        let _turn = crate::kobold_image::chat_turn(&self.base).map_err(|e| format!("{url}: {e}"))?;
         let mut resp = self.agent.post(&url).send_json(&body).map_err(|e| format!("{url}: {e}"))?;
         let status = resp.status().as_u16();
         let sse = resp
@@ -450,25 +576,21 @@ pub struct PeProcess {
 }
 
 impl Drop for PeProcess {
-    /// KoboldCpp's Linux build is a launcher that runs the server as its
-    /// child: the whole process group is stopped, not just the launcher.
     fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let group = format!("-{}", c.id());
-            let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while c.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
-            let _ = c.wait();
+        if let Some(c) = self.child.take() {
+            crate::process::stop(c);
         }
     }
 }
 
 /// Where a started KoboldCpp logs.
 pub fn log_path(log_dir: &Path, server: &PeServer) -> PathBuf {
-    log_dir.join(format!("pe-{}.log", server.name))
+    log_dir.join(log_name(&server.name))
+}
+
+/// A started chat server's log file name, by the server's name.
+pub fn log_name(server: &str) -> String {
+    format!("pe-{server}.log")
 }
 
 /// Connects to the server, starting KoboldCpp first if it doesn't answer
@@ -482,28 +604,10 @@ pub fn open(server: &PeServer, log_dir: &Path, wait: Duration, cancel: &AtomicBo
     let PeRun::KoboldCpp { binary, .. } = &server.run else {
         return Err(format!("{}: no chat server answers on {}", server.name, server.base_url()));
     };
-    fs::create_dir_all(log_dir).map_err(|e| e.to_string())?;
     let log = log_path(log_dir, server);
-    let out = OpenOptions::new().create(true).append(true).open(&log).map_err(|e| e.to_string())?;
-    let err = out.try_clone().map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(binary);
-    cmd.args(command_args(&server.run))
-        // its own process group, to stop with the server it runs
-        .process_group(0)
-        .stdin(Stdio::null());
-    // stopped too if the app dies without stopping it (killed, crashed):
-    // the launcher passes the signal on to the server it runs. (The signal
-    // comes when the starting thread ends: the PE thread, which lasts as
-    // long as the app.)
-    // SAFETY: prctl is async-signal-safe; nothing else runs before exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    let child =
-        cmd.stdout(out).stderr(err).spawn().map_err(|e| format!("{}: can't start {binary}: {e}", server.name))?;
+    // (started from the PE thread, which lasts as long as the app)
+    let child = crate::kobold::spawn(binary, &command_args(&server.run), &run_env(&server.run), &log, true)
+        .map_err(|e| format!("{}: {e}", server.name))?;
     proc.child = Some(child);
     proc.log = Some(log.clone());
     let deadline = Instant::now() + wait;
@@ -872,6 +976,7 @@ mod tests {
             binary: "kcpp".into(),
             model: "m.gguf".into(),
             mmproj: String::new(),
+            config: String::new(),
             host: "127.0.0.1".into(),
             port: 1240,
             device,
@@ -884,14 +989,46 @@ mod tests {
             tail(run(PeDevice::Cpu { threads: 8 }, 8192)),
             "--jinja --usecpu --threads 8 --contextsize 8192 --blasthreads 24"
         );
+        let gpu = |devices: &[u32], runtime| PeDevice::Gpu { devices: devices.to_vec(), runtime };
         assert_eq!(
-            tail(run(PeDevice::Gpu { devices: vec![1] }, 0)),
+            tail(run(gpu(&[1], GpuRuntime::Vulkan), 0)),
             "--jinja --usevulkan 1 --gpulayers 999 --blasthreads 24"
         );
-        assert_eq!(
-            tail(run(PeDevice::Gpu { devices: vec![] }, 0)),
-            "--jinja --usevulkan --gpulayers 999 --blasthreads 24"
-        );
+        assert_eq!(tail(run(gpu(&[], GpuRuntime::Vulkan), 0)), "--jinja --usevulkan --gpulayers 999 --blasthreads 24");
+        assert!(run_env(&run(gpu(&[1], GpuRuntime::Vulkan), 0)).is_empty());
+        // CUDA and ROCm: the GPUs picked are the only ones they see
+        for runtime in [GpuRuntime::Cuda, GpuRuntime::Rocm] {
+            let r = run(gpu(&[0, 2], runtime), 0);
+            assert_eq!(tail(r.clone()), "--jinja --usecuda --gpulayers 999 --blasthreads 24");
+            let env = run_env(&r);
+            let visible = if runtime == GpuRuntime::Cuda { "CUDA_VISIBLE_DEVICES" } else { "HIP_VISIBLE_DEVICES" };
+            assert!(env.contains(&(visible.into(), "0,2".into())), "{env:?}");
+        }
+        // Metal: the Mac build's GPU, no flag picks it
+        let metal = run(gpu(&[0], GpuRuntime::Metal), 0);
+        assert_eq!(tail(metal.clone()), "--jinja --gpulayers 999 --blasthreads 24");
+        assert!(run_env(&metal).is_empty());
+        let cuda_all = run_env(&run(gpu(&[], GpuRuntime::Cuda), 0));
+        assert_eq!(cuda_all, [("CUDA_DEVICE_ORDER".to_string(), "PCI_BUS_ID".to_string())], "numbered as nvidia-smi");
+        assert!(GpuRuntime::Cuda.missing_from("/k/koboldcpp-linux-x64-nocuda"));
+        assert!(!GpuRuntime::Vulkan.missing_from("/k/koboldcpp-linux-x64-nocuda"));
+        assert!(!GpuRuntime::Rocm.missing_from("/k/koboldcpp_rocm"));
+        // a settings file first, so what follows overrides it
+        let PeRun::KoboldCpp { binary, host, port, device, context, args, .. } = run(PeDevice::Auto, 0) else {
+            unreachable!()
+        };
+        let from_file = PeRun::KoboldCpp {
+            binary,
+            model: String::new(),
+            mmproj: String::new(),
+            config: "q.kcpps".into(),
+            host,
+            port,
+            device,
+            context,
+            args,
+        };
+        assert_eq!(command_args(&from_file)[..4].join(" "), "--config q.kcpps --host 127.0.0.1");
         // only what makes the process counts as a change
         let a = PeServer { run: run(PeDevice::Auto, 0), ..Default::default() };
         let mut b = PeServer { name: "other".into(), start: PeStart::AtLaunch, ..a.clone() };

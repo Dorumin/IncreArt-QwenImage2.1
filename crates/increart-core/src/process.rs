@@ -1,0 +1,401 @@
+//! Starting and stopping the server processes the app runs, the same on
+//! Linux, macOS and Windows (DESIGN.md, Backend): a started server stops
+//! with the app even when the app dies without stopping it (killed,
+//! crashed), a server that runs helpers of its own (KoboldCpp) is stopped
+//! with them, and on Windows no console window opens for any of them.
+
+use std::io;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+/// Readies `cmd` to run in the background: on Windows without a console
+/// window, and with `group`, in a process group of its own (see [`stop`]).
+pub fn background(cmd: &mut Command, group: bool) -> &mut Command {
+    #[cfg(unix)]
+    if group {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | if group { CREATE_NEW_PROCESS_GROUP } else { 0 });
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = group;
+    cmd
+}
+
+/// Spawns `cmd` so that it stops when the app does, however the app ends.
+/// Linux: the kernel sends it SIGTERM when the app goes. Windows: it joins
+/// a job the system closes, killing it, when the app goes. macOS: a small
+/// watcher sends SIGTERM once the app is gone.
+pub fn spawn_with_app(cmd: Command) -> io::Result<Child> {
+    imp::spawn_with_app(cmd)
+}
+
+/// Stops a server started with [`background`]`(cmd, true)` and everything
+/// it started: asked first, killed after 5 s.
+pub fn stop(mut child: Child) {
+    imp::terminate_tree(&child);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    imp::kill_tree(&child);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::*;
+    use std::process::Stdio;
+
+    /// Asks the kernel to send SIGTERM to what `cmd` runs when the app goes.
+    fn with_app(cmd: &mut Command) {
+        use std::os::unix::process::CommandExt;
+        let app = std::process::id();
+        // SAFETY: prctl and getppid are async-signal-safe; nothing else runs before exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                // the app died before the signal was asked for
+                if libc::getppid() as u32 != app {
+                    return Err(io::Error::other("the app has exited"));
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// The signal reaches only the server itself, so a server leading a
+    /// process group (KoboldCpp) would leave its helpers running. A shell
+    /// that gets the same signal stops the group then: asked, then killed
+    /// after 5 s. It ends when the server does.
+    fn watch_group(child: &Child) {
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: getpgid has no memory effects.
+        if unsafe { libc::getpgid(pid) } != pid {
+            return;
+        }
+        // no `--` before the group: dash's kill rejects it
+        let script = r#"trap 'kill -TERM "-$1"; sleep 5; kill -KILL "-$1"; exit' TERM
+trap '' INT
+while kill -0 "$1" 2>/dev/null; do sleep 1 & wait $!; done"#;
+        let mut watcher = Command::new("/bin/sh");
+        watcher
+            .args(["-c", script, "increart-watch", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        with_app(&mut watcher);
+        if let Ok(mut w) = watcher.spawn() {
+            std::thread::spawn(move || w.wait());
+        }
+    }
+
+    /// The signal is sent when the spawning *thread* ends, and servers are
+    /// opened from short-lived threads, so one thread that lasts as long as
+    /// the app does the spawning.
+    pub fn spawn_with_app(mut cmd: Command) -> io::Result<Child> {
+        use std::sync::mpsc;
+        type Job = (Command, mpsc::Sender<io::Result<Child>>);
+        static SPAWNER: std::sync::OnceLock<std::sync::Mutex<mpsc::Sender<Job>>> = std::sync::OnceLock::new();
+        with_app(&mut cmd);
+        let spawner = SPAWNER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("server-spawner".into())
+                .spawn(move || {
+                    for (mut cmd, back) in rx {
+                        let child = cmd.spawn();
+                        if let Ok(c) = &child {
+                            watch_group(c);
+                        }
+                        let _ = back.send(child);
+                    }
+                })
+                .expect("can't start the server-spawner thread");
+            std::sync::Mutex::new(tx)
+        });
+        let (back, child) = mpsc::channel();
+        let gone = || io::Error::other("the server-spawner thread is gone");
+        spawner.lock().map_err(|_| gone())?.send((cmd, back)).map_err(|_| gone())?;
+        child.recv().map_err(|_| gone())?
+    }
+
+    pub use super::unix::{kill_tree, terminate_tree};
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+mod imp {
+    use super::*;
+    use std::process::Stdio;
+
+    /// No kernel help here: a shell polls, every second, whether the app is
+    /// still there, and stops the server (its group, if it leads one) once
+    /// it isn't. It ends when the server does.
+    pub fn spawn_with_app(mut cmd: Command) -> io::Result<Child> {
+        let child = cmd.spawn()?;
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: getpgid has no memory effects.
+        let target = if unsafe { libc::getpgid(pid) } == pid { format!("-{pid}") } else { pid.to_string() };
+        let script = r#"while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done
+kill -0 "$1" 2>/dev/null || kill -TERM "$3" 2>/dev/null"#;
+        let watcher = Command::new("/bin/sh")
+            .args(["-c", script, "increart-watch"])
+            .args([std::process::id().to_string(), pid.to_string(), target])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut w) = watcher {
+            std::thread::spawn(move || w.wait());
+        }
+        Ok(child)
+    }
+
+    pub use super::unix::{kill_tree, terminate_tree};
+}
+
+#[cfg(unix)]
+mod unix {
+    use super::*;
+
+    fn signal(child: &Child, sig: libc::c_int) {
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: kill(2) on the server's own process group.
+        unsafe { libc::kill(-pid, sig) };
+    }
+
+    pub fn terminate_tree(child: &Child) {
+        signal(child, libc::SIGTERM);
+    }
+
+    pub fn kill_tree(child: &Child) {
+        signal(child, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use super::*;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Stdio;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    /// The app's job: its handle is closed by the system when the app ends,
+    /// which kills every process in it (and what they started since).
+    fn job() -> Option<usize> {
+        static JOB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        *JOB.get_or_init(|| {
+            // SAFETY: plain Win32 calls on a job this function owns.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of_val(&info) as u32,
+                );
+                (ok != 0).then_some(job as usize)
+            }
+        })
+    }
+
+    pub fn spawn_with_app(mut cmd: Command) -> io::Result<Child> {
+        let child = cmd.spawn()?;
+        if let Some(job) = job() {
+            // SAFETY: the job handle lives as long as the app; the child's
+            // handle is valid while `child` is.
+            unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+        }
+        Ok(child)
+    }
+
+    fn taskkill(child: &Child, force: bool) {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/T", "/PID", &child.id().to_string()]);
+        if force {
+            cmd.arg("/F");
+        }
+        let _ = background(&mut cmd, false).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+
+    /// Console servers have no window to close, so this asks only those
+    /// that do; [`kill_tree`] follows.
+    pub fn terminate_tree(child: &Child) {
+        taskkill(child, false);
+    }
+
+    pub fn kill_tree(child: &Child) {
+        taskkill(child, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+
+    /// A long-running stand-in server: this test binary, running the
+    /// ignored test below.
+    fn stand_in() -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "process::tests::sleeps", "--ignored", "--nocapture"])
+            .env("INCREART_SLEEP", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd
+    }
+
+    #[test]
+    #[ignore]
+    fn sleeps() {
+        if std::env::var_os("INCREART_SLEEP").is_some() {
+            std::thread::sleep(Duration::from_secs(120));
+        }
+    }
+
+    fn alive(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            // a zombie has stopped
+            let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout);
+            !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        }
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("tasklist");
+            cmd.args(["/NH", "/FI", &format!("PID eq {pid}")]);
+            let out = background(&mut cmd, false).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).contains(&format!(" {pid} "))
+        }
+    }
+
+    fn wait_gone(pid: u32) -> bool {
+        let t = Instant::now();
+        while alive(pid) && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !alive(pid)
+    }
+
+    /// A stand-in KoboldCpp: starts a helper of its own (the stand-in
+    /// server, nothing tying it to the app), writes the helper's pid, then
+    /// waits.
+    #[test]
+    #[ignore]
+    #[allow(clippy::zombie_processes)] // stopped from outside
+    fn stand_in_launcher() {
+        let Ok(out) = std::env::var("INCREART_LAUNCHER") else { return };
+        let helper = stand_in().spawn().unwrap();
+        std::fs::write(&out, helper.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// The stand-in app for the tests below: starts a server from a
+    /// short-lived thread, writes its pid, then waits to be killed. With
+    /// INCREART_GROUP the server is the stand-in launcher in a group of its
+    /// own, and the pid written is its helper's.
+    #[test]
+    #[ignore]
+    #[allow(clippy::zombie_processes)] // killed before it would wait
+    fn stand_in_app() {
+        let Ok(out) = std::env::var("INCREART_STAND_IN") else { return };
+        if std::env::var_os("INCREART_GROUP").is_some() {
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "process::tests::stand_in_launcher", "--ignored", "--nocapture"])
+                .env("INCREART_LAUNCHER", &out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            background(&mut cmd, true);
+            let _launcher = std::thread::spawn(|| spawn_with_app(cmd).unwrap()).join().unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let child = std::thread::spawn(|| spawn_with_app(stand_in()).unwrap()).join().unwrap();
+        std::fs::write(&out, child.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_started_server_stops_when_the_app_is_killed() {
+        kill_the_app_then_check(false);
+    }
+
+    #[test]
+    fn a_server_s_helpers_stop_when_the_app_is_killed() {
+        kill_the_app_then_check(true);
+    }
+
+    /// Kills the stand-in app and checks that the process it reported
+    /// (its server, or with `group` that server's helper) stops too.
+    fn kill_the_app_then_check(group: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("pid");
+        let mut app = Command::new(std::env::current_exe().unwrap());
+        app.args(["--exact", "process::tests::stand_in_app", "--ignored", "--nocapture"])
+            .env("INCREART_STAND_IN", &out)
+            .stdout(Stdio::null());
+        if group {
+            app.env("INCREART_GROUP", "1");
+        }
+        let mut app = app.spawn().unwrap();
+        let t = Instant::now();
+        while std::fs::read_to_string(&out).map_or(true, |s| s.is_empty()) && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let server: u32 = std::fs::read_to_string(&out).unwrap().parse().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(alive(server), "the thread that opened it ending doesn't stop it");
+        app.kill().unwrap();
+        app.wait().unwrap();
+        let stopped = wait_gone(server);
+        if !stopped {
+            let pid = server.to_string();
+            let _ = if cfg!(windows) {
+                Command::new("taskkill").args(["/F", "/PID", &pid]).status()
+            } else {
+                Command::new("kill").args(["-KILL", &pid]).status()
+            };
+        }
+        assert!(stopped, "stopped with the app");
+    }
+
+    #[test]
+    fn stopping_a_server_stops_what_it_started() {
+        // a "launcher" that runs the stand-in server as its own child
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("pid");
+        let mut launcher = Command::new(std::env::current_exe().unwrap());
+        launcher
+            .args(["--exact", "process::tests::stand_in_app", "--ignored", "--nocapture"])
+            .env("INCREART_STAND_IN", &out)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = background(&mut launcher, true).spawn().unwrap();
+        let t = Instant::now();
+        while std::fs::read_to_string(&out).map_or(true, |s| s.is_empty()) && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let server: u32 = std::fs::read_to_string(&out).unwrap().parse().unwrap();
+        let launched = child.id();
+        stop(child);
+        assert!(wait_gone(launched) && wait_gone(server), "the launcher and its server stopped");
+    }
+}

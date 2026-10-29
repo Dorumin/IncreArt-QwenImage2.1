@@ -3,11 +3,15 @@
 
 use eframe::egui::{self, Color32, RichText};
 use increart_core::config::ServerConfig;
+use increart_core::kobold::{KoboldChat, KoboldRun, KoboldServer};
+use increart_core::pe::PeDevice;
+use increart_core::tiers::{self, Gpu, Layout};
 use increart_gui_core::{
-    AppState, Editing, LibraryDialog, LibraryWizard, Msg, PickKind, ServerDialog, ServerProgress, Without,
+    AppState, Confirm, Editing, KoboldWizard, LibraryDialog, LibraryWizard, Msg, PeFile, PickKind, ServerDialog,
+    ServerProgress, Without, WizardGpu,
 };
 
-use crate::widgets::{ACCENT, ACCENT_MUTED, BAD, GOOD, NEUTRAL, ic, ph};
+use crate::widgets::{ACCENT, ACCENT_MUTED, BAD, GOOD, NEUTRAL, dialog_buttons, dialog_footer, ic, ph};
 
 /// A start-up screen: a framed box in the middle of the window. Its height
 /// is only known after drawing it, so it's kept per `key` and the frame is
@@ -63,26 +67,27 @@ pub fn library(
             ui.label(RichText::new("Recent").strong());
             ui.add_enabled_ui(!d.busy, |ui| {
                 for (i, path) in recent.iter().enumerate() {
-                    let (open, forget) = egui::Sides::new().show(
+                    let (open, forget) = egui::Sides::new().shrink_left().truncate().spacing(16.0).show(
                         ui,
                         |ui| {
-                            // the list is most recent first: the last used one tagged, the tag in a muted accent
                             let label = RichText::new(ic(ph::BOOKS, path));
-                            let open = ui.selectable_label(false, label).on_hover_text("Open").clicked();
-                            if back.is_some_and(|b| b == std::path::Path::new(path)) {
+                            ui.selectable_label(false, label).on_hover_text(format!("Open {path}")).clicked()
+                        },
+                        |ui| {
+                            // right to left: ×, then the tag (the list is most recent first: the
+                            // last used one tagged, in a muted accent), so a long path can't hide it
+                            let open_now = back.is_some_and(|b| b == std::path::Path::new(path));
+                            let forget = !open_now
+                                && ui
+                                    .small_button(ph::X)
+                                    .on_hover_text("Remove from the list (the folder stays)")
+                                    .clicked();
+                            if open_now {
                                 ui.label(RichText::new("open now").color(ACCENT_MUTED));
                             } else if i == 0 {
                                 ui.label(RichText::new("last used").color(ACCENT_MUTED));
                             }
-                            open
-                        },
-                        |ui| {
-                            let open_now = back.is_some_and(|b| b == std::path::Path::new(path));
-                            !open_now
-                                && ui
-                                    .small_button(ph::X)
-                                    .on_hover_text("Remove from the list (the folder stays)")
-                                    .clicked()
+                            forget
                         },
                     );
                     if open {
@@ -96,7 +101,7 @@ pub fn library(
             ui.separator();
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             ui.add_enabled_ui(!d.busy, |ui| {
                 // the last used library, named, as the main button (and Enter)
                 // (switching: the last used other than the open one)
@@ -273,7 +278,7 @@ fn library_wizard(ctx: &egui::Context, d: &LibraryDialog, w: LibraryWizard, rece
             ui.colored_label(BAD, e);
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let (text, msg, ok) = if create {
                 let ok = matches!(state, FolderState::Missing | FolderState::Empty);
                 (ic(ph::FOLDER_PLUS, "Create library"), Msg::CreateLibrary, ok)
@@ -282,10 +287,11 @@ fn library_wizard(ctx: &egui::Context, d: &LibraryDialog, w: LibraryWizard, rece
             };
             let ok = ok && !d.busy && !path.is_empty();
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let text = format!("{text}   Enter");
             if ui.add_enabled(ok, egui::Button::new(RichText::new(text).strong())).clicked() || (ok && enter) {
                 out.push(msg);
             }
-            if ui.add_enabled(!d.busy, egui::Button::new("Cancel")).clicked() {
+            if ui.add_enabled(!d.busy, egui::Button::new("Cancel   Esc")).clicked() {
                 out.push(Msg::LibraryWizard(None));
             }
             if d.busy {
@@ -298,21 +304,167 @@ fn library_wizard(ctx: &egui::Context, d: &LibraryDialog, w: LibraryWizard, rece
     }
 }
 
-/// "Start ROCm0 on :1234" / "Connect to http://…" / "Chat: Qwen3-VL".
+/// "Start sd-server on ROCm0 :1234" / "Connect to sd-server at http://…" /
+/// "Chat: Qwen3-VL" / "Start KoboldCpp on :5001".
 pub fn describe(s: &ServerConfig) -> String {
     match s {
-        ServerConfig::Start { device, port, .. } => format!("Start {device} on :{port}"),
-        ServerConfig::Connect { url, .. } => format!("Connect to {url}"),
+        ServerConfig::Start { device, port, .. } => format!("Start sd-server on {device} :{port}"),
+        ServerConfig::Connect { url, .. } => format!("Connect to sd-server at {url}"),
         ServerConfig::Chat(c) => format!("Chat: {}", c.name),
+        ServerConfig::Kobold(k) => {
+            let chat = if k.chat.is_some() { " (and chat)" } else { "" };
+            match &k.run {
+                KoboldRun::Start { port, .. } => format!("Start KoboldCpp on :{port}{chat}"),
+                KoboldRun::Connect { url, .. } => format!("Connect to KoboldCpp at {url}{chat}"),
+            }
+        }
     }
+}
+
+/// A started server's log file name.
+fn log_file(s: &ServerConfig) -> String {
+    increart_core::launcher::log_path(std::path::Path::new(""), s).display().to_string()
+}
+
+/// A path's text box, with a Browse… button picking it.
+fn path_edit(ui: &mut egui::Ui, s: &mut String, hint: &str, pick: PickKind, out: &mut Vec<Msg>) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(s).desired_width(ui.available_width() - 36.0).hint_text(hint));
+        if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
+            out.push(Msg::Pick(pick));
+        }
+    });
+}
+
+/// A KoboldCpp entry's settings (entry `i`), under its row; started with
+/// the KoboldCpp binary in use, its chat model the wizard's if downloaded.
+fn kobold_fields(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    i: usize,
+    k: &mut KoboldServer,
+    has_chat_entry: bool,
+    out: &mut Vec<Msg>,
+) {
+    egui::Grid::new(("kobold", ui.next_auto_id())).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        ui.label("Runs");
+        ui.horizontal(|ui| {
+            let start = matches!(k.run, KoboldRun::Start { .. });
+            if ui.radio(start, "started by IncreArt").clicked() && !start {
+                k.run = KoboldRun::Start {
+                    binary: increart_gui_core::kobold_binary(st),
+                    config: String::new(),
+                    host: "127.0.0.1".into(),
+                    port: 5001,
+                    device: Default::default(),
+                    args: vec![],
+                };
+            }
+            if ui.radio(!start, "already running").clicked() && start {
+                k.run = KoboldRun::Connect { url: k.base_url(), password: String::new(), device: k.device() };
+            }
+        });
+        ui.end_row();
+        let wide = |ui: &mut egui::Ui, s: &mut String, hint: &str| {
+            ui.add(egui::TextEdit::singleline(s).desired_width(f32::INFINITY).hint_text(hint));
+        };
+        match &mut k.run {
+            KoboldRun::Start { binary, config, host, port, device, args } => {
+                ui.label("Binary");
+                let hint = "koboldcpp, or a command line (python3 koboldcpp.py)";
+                path_edit(ui, binary, hint, PickKind::Kobold(i, PeFile::Binary), out);
+                ui.end_row();
+                ui.label("Settings");
+                let hint = ".kcpps from KoboldCpp's launcher (optional; the rest goes over it)";
+                path_edit(ui, config, hint, PickKind::Kobold(i, PeFile::Config), out);
+                ui.end_row();
+                ui.label("Address");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(host).desired_width(120.0));
+                    ui.label("port");
+                    ui.add(egui::DragValue::new(port).range(1024..=65535));
+                });
+                ui.end_row();
+                ui.label("Runs on");
+                ui.horizontal(|ui| {
+                    let (auto, cpu) = (*device == PeDevice::Auto, matches!(device, PeDevice::Cpu { .. }));
+                    if ui.radio(auto, "its choice").clicked() {
+                        *device = PeDevice::Auto;
+                    }
+                    if ui.radio(cpu, "CPU").clicked() && !cpu {
+                        *device = PeDevice::Cpu { threads: 0 };
+                    }
+                    let gpu = matches!(device, PeDevice::Gpu { .. });
+                    if ui.radio(gpu, "GPUs").clicked() && !gpu {
+                        *device = PeDevice::Gpu { devices: vec![], runtime: st.gpu_runtime };
+                    }
+                    if let PeDevice::Gpu { devices, runtime } = device {
+                        crate::pe_settings::runtime_choice(ui, ("kobold_runtime", i), runtime);
+                        let mut text = devices.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
+                        let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0).hint_text("all"));
+                        r.on_hover_text(format!("GPU numbers as {} lists them; empty: every GPU", runtime.tool()));
+                        *devices = text.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                    }
+                });
+                ui.end_row();
+                ui.label("More args");
+                let mut text = args.join(" ");
+                ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("--sdflashattention …"),
+                );
+                *args = text.split_whitespace().map(String::from).collect();
+                ui.end_row();
+            }
+            KoboldRun::Connect { url, password, device } => {
+                ui.label("Address");
+                wide(ui, url, "http://127.0.0.1:5001");
+                ui.end_row();
+                ui.label("Password");
+                ui.add(
+                    egui::TextEdit::singleline(password).password(true).desired_width(160.0).hint_text("if it has one"),
+                );
+                ui.end_row();
+                ui.label("Device");
+                ui.add(egui::TextEdit::singleline(device).desired_width(100.0).hint_text("for recipes"));
+                ui.end_row();
+            }
+        }
+        ui.label("Chat");
+        ui.vertical(|ui| {
+            let mut on = k.chat.is_some();
+            let r = ui.checkbox(&mut on, "also prompt enhance's chat server");
+            if has_chat_entry {
+                r.on_hover_text("prompt enhance shares its asks with the preset's chat servers");
+            }
+            if on != k.chat.is_some() {
+                // the wizard's Qwen3-VL, if it's downloaded
+                k.chat = on.then(|| match tiers::chat_files(&st.config.sdserver.model_dirs) {
+                    Some((model, mmproj)) => KoboldChat { model, mmproj, context: 8192 },
+                    None => KoboldChat::default(),
+                });
+            }
+            if let (Some(c), KoboldRun::Start { .. }) = (&mut k.chat, &k.run) {
+                path_edit(ui, &mut c.model, "chat model .gguf", PickKind::Kobold(i, PeFile::Model), out);
+                let hint = "vision mmproj .gguf (empty: text only)";
+                path_edit(ui, &mut c.mmproj, hint, PickKind::Kobold(i, PeFile::Mmproj), out);
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut c.context).range(0..=131072).speed(256));
+                    ui.weak("context tokens (0: KoboldCpp's default)");
+                });
+            }
+        });
+        ui.end_row();
+    });
 }
 
 pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
     centered(ui, "servers", 560.0, |ui| {
         ui.heading(ic(ph::HARD_DRIVES, "Servers"));
         ui.label(
-            "The servers for this session: sd-servers to generate with, and a chat server for prompt enhance. \
-             Connected servers keep running when IncreArt exits.",
+            "The servers for this session: KoboldCpp or sd-server to generate images with, and a chat server \
+             for prompt enhance (KoboldCpp can be both). Connected servers keep running when IncreArt exits.",
         );
         if let Some(n) = &d.notice {
             ui.add_space(4.0);
@@ -346,7 +498,7 @@ pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec
         }
         if !d.progress.is_empty() {
             ui.separator();
-            progress(ui, st, d);
+            progress(ui, st, d, out);
         }
         ui.separator();
         if d.wizard {
@@ -367,27 +519,35 @@ pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec
             || d.without.is_some()
             || st.confirm.is_some()
             || st.pe.editor.is_some();
-        // ways out on the left, the settings on the right
-        let settings = egui::Sides::new().show(
+        // the settings on the left, the ways out on the right
+        let ((settings, logs), _) = dialog_footer(
             ui,
-            |ui| bottom_left(ui, st, d, modal, out),
             |ui| {
-                !d.opening
+                let settings = !d.opening
                     && ui
-                        .button(ic(ph::GEAR, "sd-server settings…"))
-                        .on_hover_text("Binary, models folder, devices: shared by every preset")
-                        .clicked()
+                        .button(ic(ph::GEAR, "Server settings…"))
+                        .on_hover_text("KoboldCpp and sd-server binaries, the models folder: shared by every preset")
+                        .clicked();
+                let logs = ui
+                    .button(ic(ph::SCROLL, "Logs…"))
+                    .on_hover_text("the logs of the servers IncreArt started")
+                    .clicked();
+                (settings, logs)
             },
+            |ui| ways_out(ui, st, d, modal, out),
         );
-        if settings.1 {
+        if settings {
             out.push(Msg::ServerSettings(true));
+        }
+        if logs {
+            out.push(Msg::OpenLogs(None));
         }
     });
 }
 
 /// Open the last used preset, continue, close, or (while opening) continue
 /// in background / cancel.
-fn bottom_left(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, modal: bool, out: &mut Vec<Msg>) {
+fn ways_out(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, modal: bool, out: &mut Vec<Msg>) {
     if d.opening {
         if ui
             .button(ic(ph::ARROW_RIGHT, "Continue in background"))
@@ -453,7 +613,7 @@ fn settings_problem(st: &AppState) -> Option<String> {
 }
 
 /// Per server: "starting — 12 s", up, or the error.
-fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
+fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
     let secs = (st.now - d.started).max(0.0);
     if !st.stopping.is_empty() {
         ui.horizontal(|ui| {
@@ -468,12 +628,18 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
             match p {
                 ServerProgress::Opening => {
                     ui.spinner();
-                    let what = if matches!(s, ServerConfig::Start { .. }) { "starting" } else { "connecting" };
+                    let what = if s.is_started() { "starting" } else { "connecting" };
                     ui.label(format!("{what} — {secs:.0} s"));
-                    if let Some(line) = st.start_log.get(i).filter(|l| !l.is_empty()) {
-                        ui.add(egui::Label::new(RichText::new(line).weak().monospace()).truncate())
-                            .on_hover_text(format!("from the server's log\n{line}"));
-                    }
+                    // a fixed width: a growing line (KoboldCpp's ". . .") would
+                    // widen the dialog with each character
+                    let size = egui::vec2(320.0, ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_size(size);
+                        if let Some(line) = st.start_log.get(i).filter(|l| !l.is_empty()) {
+                            ui.add(egui::Label::new(RichText::new(line).weak().monospace()).truncate())
+                                .on_hover_text(format!("from the server's log\n{line}"));
+                        }
+                    });
                 }
                 ServerProgress::Up => {
                     ui.colored_label(GOOD, ic(ph::CHECK_CIRCLE, "up"));
@@ -481,6 +647,9 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
                 ServerProgress::Failed(e) => {
                     ui.colored_label(BAD, ic(ph::WARNING, e));
                 }
+            }
+            if s.is_started() {
+                crate::projects::log_button(ui, log_file(s), out);
             }
         });
     }
@@ -495,6 +664,9 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog) {
                 ui.spinner();
             }
             ui.colored_label(color, format!("{dot} {state}"));
+            if matches!(c.run, increart_core::pe::PeRun::KoboldCpp { .. }) {
+                crate::projects::log_button(ui, increart_core::pe::log_name(&c.name), out);
+            }
         });
     }
 }
@@ -506,11 +678,11 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
         ui.label("No presets yet.");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button(RichText::new(ic(ph::MAGIC_WAND, "Set up servers…")).strong()).clicked() {
+            if ui.button(RichText::new(ic(ph::MAGIC_WAND, WIZARD)).strong()).clicked() {
                 out.push(Msg::ServerWizard(true));
             }
         });
-        ui.weak("Or make one by hand with New preset.");
+        ui.weak("Or make one by hand with New preset (KoboldCpp or sd-server).");
         ui.add_space(6.0);
     }
     let last = st.config.last_preset.as_ref().and_then(|n| st.config.server_presets.iter().position(|p| &p.name == n));
@@ -520,19 +692,17 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
         // the preset used last time tagged, the tag in a muted accent (as in the library list)
         let text = RichText::new(text);
         let editing = d.editing == Some(Editing::Preset(i));
-        let (open, (edit, delete)) = egui::Sides::new().show(
+        // the text gives way to the buttons (wraps), a gap kept between them
+        let (open, (edit, delete)) = egui::Sides::new().shrink_left().wrap().spacing(16.0).show(
             ui,
+            |ui| ui.selectable_label(editing, text).on_hover_text("Open").clicked(),
             |ui| {
-                let open = ui.selectable_label(editing, text).on_hover_text("Open").clicked();
+                // right to left: ✎ pinned to the right edge, the bin next to it, then the tag
+                let edit = ui.small_button(ph::PENCIL_SIMPLE).on_hover_text("Edit").clicked();
+                let delete = ui.small_button(ph::TRASH).on_hover_text("Delete preset…").clicked();
                 if last == Some(i) {
                     ui.label(RichText::new("last used").color(ACCENT_MUTED));
                 }
-                open
-            },
-            |ui| {
-                // right to left: ✎ pinned to the right edge, the bin next to it
-                let edit = ui.small_button(ph::PENCIL_SIMPLE).on_hover_text("Edit").clicked();
-                let delete = ui.small_button(ph::TRASH).on_hover_text("Delete preset…").clicked();
                 (edit, delete)
             },
         );
@@ -543,7 +713,7 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
             out.push(Msg::EditPreset(i));
         }
         if delete {
-            out.push(Msg::Ask(format!("Delete preset {}?", p.name), Box::new(Msg::DeletePreset(i))));
+            out.push(Msg::Ask(Confirm::new(format!("Delete preset {}?", p.name), "Delete", Msg::DeletePreset(i))));
         }
     }
     ui.add_space(6.0);
@@ -551,6 +721,14 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
     ui.horizontal(|ui| {
         if ui.button(ic(ph::PLUS, "New preset")).clicked() {
             out.push(Msg::NewPreset);
+        }
+        if !st.config.server_presets.is_empty()
+            && ui
+                .button(ic(ph::MAGIC_WAND, WIZARD))
+                .on_hover_text("KoboldCpp with Qwen-Image, set up by each GPU's memory, as a new preset")
+                .clicked()
+        {
+            out.push(Msg::ServerWizard(true));
         }
     });
     ui.add_space(6.0);
@@ -599,11 +777,12 @@ fn without_window(ctx: &egui::Context, st: &AppState, w: &Without, out: &mut Vec
             }
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new(ic(ph::ARROW_RIGHT, "Continue")).strong()).clicked() {
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        dialog_buttons(ui, |ui| {
+            if ui.button(RichText::new(ic(ph::ARROW_RIGHT, "Continue   Enter")).strong()).clicked() || enter {
                 out.push(Msg::ContinueWithoutServers);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::WithoutDialog(None));
             }
         });
@@ -613,18 +792,24 @@ fn without_window(ctx: &egui::Context, st: &AppState, w: &Without, out: &mut Vec
     }
 }
 
-/// **sd-server settings…**: shared by every Start server.
+/// The setup wizard's button.
+const WIZARD: &str = "Set up KoboldCpp for your GPUs…";
+
+/// **Server settings…**: KoboldCpp, sd-server and the models folder,
+/// shared by every preset.
 fn settings_window(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
     let m = egui::Modal::new(egui::Id::unique("sd_server_settings")).show(ctx, |ui| {
         ui.set_width(560.0);
-        ui.heading(ic(ph::GEAR, "sd-server settings"));
-        ui.label("Used by every preset's Start servers.");
+        ui.heading(ic(ph::GEAR, "Server settings"));
+        ui.label("Shared by every preset.");
         ui.add_space(8.0);
         settings(ui, st, d, out);
         ui.add_space(8.0);
-        if ui.button("Close").clicked() {
-            out.push(Msg::ServerSettings(false));
-        }
+        dialog_buttons(ui, |ui| {
+            if ui.button("Close   Esc").clicked() {
+                out.push(Msg::ServerSettings(false));
+            }
+        });
     });
     if m.should_close() {
         out.push(Msg::ServerSettings(false));
@@ -632,9 +817,15 @@ fn settings_window(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &m
 }
 
 fn settings(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
-    sdserver_fields(ui, st, out);
+    ui.label(RichText::new(ic(ph::IMAGE, "KoboldCpp")).strong());
+    ui.weak(
+        "Generates images, and runs prompt enhance too. New KoboldCpp entries and the setup wizard start this one.",
+    );
+    kobold_binary_field(ui, st, d, out);
     ui.add_space(12.0);
-    ui.label(RichText::new("Devices").strong());
+    ui.label(RichText::new(ic(ph::PLAY_CIRCLE, "sd-server")).strong());
+    let mut c = st.config.sdserver.clone();
+    sdserver_binary_field(ui, &mut c, out);
     ui.horizontal(|ui| {
         let label = if d.devices.is_some() { "List again" } else { "List devices (sd-server --list-devices)" };
         if ui.button(ic(ph::LIST_MAGNIFYING_GLASS, label)).clicked() {
@@ -655,11 +846,57 @@ fn settings(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
             ui.colored_label(BAD, e);
         }
     }
+    ui.add_space(12.0);
+    ui.label(RichText::new(ic(ph::FOLDER, "Both")).strong());
+    models_field(ui, &mut c, out);
+    ui.weak(
+        "KoboldCpp loads the recipes' model files from here too; the setup wizard downloads into koboldcpp/ in it.",
+    );
+    leave_running_field(ui, &mut c);
+    if c != st.config.sdserver {
+        out.push(Msg::SetSdServer(c));
+    }
 }
 
-/// The sd-server binary, models folder and leave-running setting.
-fn sdserver_fields(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
-    let mut c = st.config.sdserver.clone();
+/// The shared KoboldCpp binary, and its version (checked when the field is
+/// left, or a file picked).
+fn kobold_binary_field(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
+    let mut b = st.config.koboldcpp.clone();
+    let fallback = increart_gui_core::kobold_binary(st);
+    let edit = ui.horizontal(|ui| {
+        ui.add_sized([56.0, 18.0], egui::Label::new("Binary"));
+        let r =
+            ui.add(egui::TextEdit::singleline(&mut b).desired_width(ui.available_width() - 36.0).hint_text(&fallback));
+        if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
+            out.push(Msg::Pick(PickKind::KoboldBinary));
+        }
+        r
+    });
+    if b != st.config.koboldcpp {
+        out.push(Msg::SetKoboldBinary(b));
+    }
+    if edit.inner.lost_focus() {
+        out.push(Msg::CheckKoboldVersion);
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(64.0);
+        match &d.kobold_version {
+            Some((binary, Ok(v))) if *binary == fallback => {
+                ui.colored_label(GOOD, ic(ph::CHECK, &format!("KoboldCpp {v}")));
+            }
+            Some((binary, Err(e))) if *binary == fallback => {
+                ui.colored_label(BAD, e);
+            }
+            _ if edit.inner.has_focus() => {}
+            _ => {
+                ui.spinner();
+                ui.weak("--version…");
+            }
+        }
+    });
+}
+
+fn sdserver_binary_field(ui: &mut egui::Ui, c: &mut increart_core::config::SdServerConfig, out: &mut Vec<Msg>) {
     ui.horizontal(|ui| {
         ui.add_sized([56.0, 18.0], egui::Label::new("Binary"));
         ui.add(egui::TextEdit::singleline(&mut c.binary).desired_width(ui.available_width() - 36.0));
@@ -667,11 +904,34 @@ fn sdserver_fields(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
             out.push(Msg::Pick(PickKind::SdServerBinary));
         }
     });
+}
+
+fn leave_running_field(ui: &mut egui::Ui, c: &mut increart_core::config::SdServerConfig) {
+    ui.checkbox(&mut c.leave_running, "Leave started servers running when IncreArt exits")
+        .on_hover_text("The model stays loaded, so the next start is instant; the GPU memory stays in use meanwhile");
+}
+
+/// The sd-server binary, models folder and leave-running setting.
+fn sdserver_fields(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    let mut c = st.config.sdserver.clone();
+    sdserver_binary_field(ui, &mut c, out);
+    models_field(ui, &mut c, out);
+    leave_running_field(ui, &mut c);
+    if c != st.config.sdserver {
+        out.push(Msg::SetSdServer(c));
+    }
+}
+
+/// The models folder: sd-server's first `--model-dir`, where KoboldCpp's
+/// files are looked up too.
+fn models_field(ui: &mut egui::Ui, c: &mut increart_core::config::SdServerConfig, out: &mut Vec<Msg>) {
     ui.horizontal(|ui| {
         ui.add_sized([56.0, 18.0], egui::Label::new("Models"));
         let mut dir = c.model_dirs.first().cloned().unwrap_or_default();
         ui.add(
-            egui::TextEdit::singleline(&mut dir).desired_width(ui.available_width() - 36.0).hint_text("--model-dir"),
+            egui::TextEdit::singleline(&mut dir)
+                .desired_width(ui.available_width() - 36.0)
+                .hint_text("/path/to/models"),
         );
         if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
             out.push(Msg::Pick(PickKind::ModelDir));
@@ -684,19 +944,34 @@ fn sdserver_fields(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
             c.model_dirs.retain(|d| !d.is_empty());
         }
     });
-    ui.checkbox(&mut c.leave_running, "Leave started servers running when IncreArt exits")
-        .on_hover_text("The model stays loaded, so the next start is instant; the GPU memory stays in use meanwhile");
-    if c != st.config.sdserver {
-        out.push(Msg::SetSdServer(c));
-    }
 }
 
-/// The server setup wizard: sd-server, the GPUs to start it on (all GPUs
+/// The server setup wizard: KoboldCpp with a preset by each GPU's memory
+/// ([`kobold_wizard`]), or sd-server, the GPUs to start it on (all GPUs
 /// ticked), or a server already running; saved as a preset and opened.
 fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
     let m = egui::Modal::new(egui::Id::unique("server_wizard")).show(ctx, |ui| {
-        ui.set_width(560.0);
+        // (KoboldCpp's presets table needs the room)
+        ui.set_width(if d.kobold.is_some() { 700.0 } else { 560.0 });
         ui.heading(ic(ph::MAGIC_WAND, "Set up servers"));
+        let busy = d.kobold.as_ref().is_some_and(|k| k.downloading.is_some());
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.horizontal(|ui| {
+                if ui.radio(d.kobold.is_some(), "KoboldCpp, Qwen-Image set up for your GPUs (recommended)").clicked() {
+                    out.push(Msg::WizardKobold(true));
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.radio(d.kobold.is_none(), "sd-server, with your own models").clicked() {
+                    out.push(Msg::WizardKobold(false));
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if let Some(k) = &d.kobold {
+            kobold_wizard(ui, k, out);
+            return;
+        }
         ui.label("IncreArt runs sd-server on your GPUs, one server per GPU.");
         ui.add_space(8.0);
         ui.label(RichText::new("1. sd-server").strong());
@@ -763,21 +1038,28 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
         ui.add_space(10.0);
         ui.label(RichText::new("Prompt enhance (optional)").strong());
         ui.weak("A chat model that suggests and rewrites prompt text.");
-        let chat = d.draft.servers.iter().position(ServerConfig::is_chat);
-        ui.horizontal(|ui| match chat.and_then(|i| d.draft.chat().map(|c| (i, c))) {
-            Some((i, c)) => {
+        let chats: Vec<(usize, &increart_core::pe::PeServer)> = d
+            .draft
+            .servers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| if let ServerConfig::Chat(c) = s { Some((i, c)) } else { None })
+            .collect();
+        for (i, c) in &chats {
+            ui.horizontal(|ui| {
                 ui.label(RichText::new(&c.name).strong()).on_hover_text(crate::pe_settings::describe(c));
                 if ui.small_button(ic(ph::GEAR, "Settings…")).clicked() {
-                    out.push(Msg::PeEditorOpen(Some(i)));
+                    out.push(Msg::PeEditorOpen(Some(*i)));
                 }
                 if ui.small_button(ph::X).on_hover_text("Remove").clicked() {
-                    out.push(Msg::RemoveServer(i));
+                    out.push(Msg::RemoveServer(*i));
                 }
-            }
-            None => {
-                if ui.button(ic(ph::PLUS, "Add a chat server…")).clicked() {
-                    out.push(Msg::PeEditorOpen(None));
-                }
+            });
+        }
+        ui.horizontal(|ui| {
+            let add = if chats.is_empty() { "Add a chat server…" } else { "Add another (asks shared)…" };
+            if ui.button(ic(ph::PLUS, add)).clicked() {
+                out.push(Msg::PeEditorOpen(None));
             }
         });
         ui.add_space(10.0);
@@ -787,13 +1069,13 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
             ui.weak(d.draft.servers.iter().map(describe).collect::<Vec<_>>().join(" · "));
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let ok = !d.draft.servers.is_empty();
             let finish = egui::Button::new(RichText::new(ic(ph::PLAY, "Save as preset and open")).strong());
             if ui.add_enabled(ok, finish).clicked() {
                 out.push(Msg::FinishServerWizard);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::ServerWizard(false));
             }
         });
@@ -803,19 +1085,299 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
     }
 }
 
+/// The wizard's KoboldCpp page: the binary, the models folder, the GPUs
+/// (each one's memory picks its preset), how two or more share the work;
+/// then the models downloaded and the servers opened.
+fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, out: &mut Vec<Msg>) {
+    let mut new = k.clone();
+    let busy = k.downloading.is_some();
+    let plan = k.plan();
+    ui.label("IncreArt starts KoboldCpp with Qwen-Image 2.1 and prompt enhance, set up for each GPU's memory.");
+    ui.add_space(8.0);
+    ui.add_enabled_ui(!busy, |ui| {
+        ui.label(RichText::new("1. KoboldCpp").strong());
+        ui.horizontal(|ui| {
+            ui.add_sized([56.0, 18.0], egui::Label::new("Binary"));
+            path_edit(ui, &mut new.binary, "koboldcpp", PickKind::WizardBinary, out);
+        });
+        ui.horizontal(|ui| {
+            ui.add_sized([56.0, 18.0], egui::Label::new("Models"));
+            path_edit(ui, &mut new.models_dir, "/path/to/models", PickKind::WizardModels, out);
+        });
+        ui.weak(
+            "The models go in koboldcpp/ in this folder (about 15–25 GB). Ones already in your model folders or \
+             Hugging Face's cache are linked, not downloaded again.",
+        );
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("2. GPUs").strong());
+            if ui.small_button(ic(ph::ARROWS_CLOCKWISE, "Detect again")).clicked() {
+                out.push(Msg::WizardKobold(true));
+            }
+            ui.add_space(12.0);
+            ui.label("through");
+            let mut runtime = k.runtime;
+            if crate::pe_settings::runtime_choice(ui, "wizard_runtime", &mut runtime) {
+                out.push(Msg::WizardRuntime(runtime));
+            }
+        });
+        match &mut new.gpus {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak(format!("{}…", k.runtime.tool()));
+                });
+            }
+            Some(Err(e)) => {
+                ui.colored_label(BAD, e.as_str());
+                if ui.button(ic(ph::PLUS, "Add a GPU by hand")).clicked() {
+                    let gpu = Gpu { number: 0, name: "GPU 0".into(), vram_gib: 8.0, integrated: false };
+                    new.gpus = Some(Ok(vec![WizardGpu { gpu, on: true, preset: None, by_hand: true }]));
+                }
+            }
+            Some(Ok(list)) => {
+                let cards = plan.as_ref().map(|p| p.cards.clone()).unwrap_or_default();
+                egui::Grid::new("wizard_gpus").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
+                    for w in list.iter_mut() {
+                        ui.checkbox(&mut w.on, format!("{}  {}", w.gpu.number, w.gpu.name));
+                        if w.by_hand {
+                            ui.add(
+                                egui::DragValue::new(&mut w.gpu.vram_gib)
+                                    .range(0.0..=1024.0)
+                                    .speed(0.5)
+                                    .max_decimals(1)
+                                    .suffix(" GB"),
+                            )
+                            .on_hover_text("Its memory");
+                        } else {
+                            ui.label(format!("{} GB", tiers::show_gb(w.gpu.vram_gib)));
+                        }
+                        let card = cards.iter().find(|c| c.gpu == w.gpu.number);
+                        gpu_preset(ui, w, k.choose, card);
+                        match card {
+                            Some(c) if w.on => ui.label(c.role.describe()),
+                            _ if w.on => ui.label(""),
+                            _ => ui.weak("not used"),
+                        };
+                        ui.end_row();
+                    }
+                });
+                if ui.small_button(ic(ph::PLUS, "Add a GPU by hand")).clicked() {
+                    let number = list.iter().map(|w| w.gpu.number + 1).max().unwrap_or(0);
+                    let gpu = Gpu { number, name: format!("GPU {number}"), vram_gib: 8.0, integrated: false };
+                    list.push(WizardGpu { gpu, on: true, preset: None, by_hand: true });
+                }
+            }
+        }
+        let ticked = k.ticked();
+        if ticked.len() > 1 {
+            ui.add_space(10.0);
+            ui.label(RichText::new(format!("3. How to use {} GPUs", ticked.len())).strong());
+            for layout in [Layout::ImagePerCard, Layout::PeOwnCard] {
+                let text = match k.plan_as(layout) {
+                    Ok(p) => {
+                        let n = p.images_at_once();
+                        let roles: Vec<String> =
+                            p.cards.iter().map(|c| format!("GPU {}: {}", c.gpu, c.role.short())).collect();
+                        let at_once = if n == 1 { "1 image at a time".into() } else { format!("{n} images at a time") };
+                        format!("{at_once} — {}", roles.join(", "))
+                    }
+                    Err(_) if layout == Layout::PeOwnCard => "Prompt enhance on a GPU of its own".into(),
+                    Err(_) => "Images on every GPU".into(),
+                };
+                let hover = match layout {
+                    Layout::ImagePerCard => "More images at once; prompt enhance shares a GPU with images",
+                    Layout::PeOwnCard => "Prompt enhance answers at once and is never swapped; fewer images at once",
+                };
+                ui.radio_value(&mut new.layout, layout, text).on_hover_text(hover);
+            }
+            let current: Vec<u32> = plan
+                .as_ref()
+                .map(|p| p.pe_cards().iter().map(|c| c.gpu).collect())
+                .unwrap_or_else(|_| k.pe_gpus.clone());
+            ui.horizontal(|ui| {
+                ui.label("Prompt enhance on");
+                for (g, _) in &ticked {
+                    let mut on = current.contains(&g.number);
+                    let only = on && current.len() == 1;
+                    let hover = if only {
+                        "Prompt enhance needs a GPU"
+                    } else {
+                        "Each GPU ticked runs a chat model; asks are shared among them"
+                    };
+                    let r = ui.add_enabled(!only, egui::Checkbox::new(&mut on, format!("GPU {}", g.number)));
+                    if r.on_hover_text(hover).on_disabled_hover_text(hover).changed() {
+                        new.pe_gpus = current.iter().copied().filter(|&n| n != g.number).collect();
+                        if on {
+                            new.pe_gpus.push(g.number);
+                        }
+                    }
+                }
+            });
+        }
+        ui.add_space(10.0);
+        presets_table(ui, &mut new, plan.as_ref().ok());
+    });
+    ui.add_space(10.0);
+    match &plan {
+        Ok(p) => {
+            ui.label(RichText::new(&p.summary).strong());
+            for n in &p.notes {
+                match n {
+                    tiers::Note::Plan(s) => ui.label(s),
+                    tiers::Note::Why(s) => ui.weak(s),
+                    tiers::Note::Warn(s) => ui.colored_label(NEUTRAL, ic(ph::WARNING, s)),
+                };
+            }
+        }
+        Err(e) if !k.ticked().is_empty() => {
+            ui.colored_label(NEUTRAL, e);
+        }
+        Err(_) => {
+            ui.weak("Tick a GPU.");
+        }
+    }
+    if let Some(e) = &k.error {
+        ui.colored_label(BAD, e);
+    }
+    if let Some((p, at)) = &k.downloading {
+        ui.add_space(6.0);
+        let name = p.downloads.get(at.file).map(|d| d.file.as_str()).unwrap_or_default();
+        let gb = |b: u64| b as f64 / 1e9;
+        let (fraction, size) = match at.total {
+            Some(t) if t > 0 => (at.done as f32 / t as f32, format!("{:.1} of {:.1} GB", gb(at.done), gb(t))),
+            _ => (0.0, format!("{:.1} GB", gb(at.done))),
+        };
+        ui.label(format!("Downloading {} of {}: {name}", at.file + 1, p.downloads.len()));
+        ui.add(egui::ProgressBar::new(fraction).text(size));
+    }
+    ui.add_space(6.0);
+    dialog_buttons(ui, |ui| {
+        if busy {
+            if ui.button("Cancel download").clicked() {
+                out.push(Msg::CancelWizardDownload);
+            }
+            return;
+        }
+        let finish =
+            egui::Button::new(RichText::new(ic(ph::DOWNLOAD_SIMPLE, "Download, save as preset and open")).strong());
+        if ui.add_enabled(plan.is_ok(), finish).clicked() {
+            out.push(Msg::FinishKoboldWizard);
+        }
+        if ui.button("Cancel   Esc").clicked() {
+            out.push(Msg::ServerWizard(false));
+        }
+    });
+    if new != *k && !busy {
+        out.push(Msg::EditKoboldWizard(new));
+    }
+}
+
+/// A ticked GPU's preset: by its memory, or (choosing) a menu of them;
+/// prompt enhance's own card takes none.
+fn gpu_preset(ui: &mut egui::Ui, w: &mut WizardGpu, choose: bool, card: Option<&tiers::Card>) {
+    let auto = tiers::tier_for(w.gpu.vram_gib);
+    if !w.on {
+        ui.label("");
+    } else if card.is_some_and(|c| c.role == tiers::Role::PeOnly) {
+        ui.weak("—");
+    } else if choose {
+        let by_memory = match &auto {
+            Some(t) => format!("Auto ({} GB)", t.gb),
+            None => "Auto (too small)".into(),
+        };
+        let shown = w.preset.map(|gb| format!("{gb} GB")).unwrap_or(by_memory.clone());
+        egui::ComboBox::from_id_salt(("wizard_preset", w.gpu.number)).selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(&mut w.preset, None, by_memory);
+            for t in tiers::tiers() {
+                ui.selectable_value(&mut w.preset, Some(t.gb), format!("{} GB", t.gb));
+            }
+        });
+    } else {
+        match auto {
+            Some(t) => ui.weak(format!("{} GB preset", t.gb)),
+            None => ui.colored_label(NEUTRAL, "under 8 GB: too small"),
+        };
+    }
+}
+
+/// The presets (docs/vram-tiers.md), the plan's highlighted with its
+/// GPUs; "Choose presets myself" unlocks them: a row's click sets every
+/// image GPU's.
+fn presets_table(ui: &mut egui::Ui, k: &mut KoboldWizard, plan: Option<&tiers::Plan>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Presets").strong());
+        if ui.checkbox(&mut k.choose, "Choose presets myself").changed()
+            && !k.choose
+            && let Some(Ok(list)) = &mut k.gpus
+        {
+            list.iter_mut().for_each(|w| w.preset = None);
+        }
+    });
+    let pe_only: Vec<u32> = plan
+        .map(|p| p.cards.iter().filter(|c| c.role == tiers::Role::PeOnly).map(|c| c.gpu).collect())
+        .unwrap_or_default();
+    let mut clicked = None;
+    egui::Grid::new("wizard_presets").num_columns(9).spacing([14.0, 3.0]).show(ui, |ui| {
+        for h in ["", "Model", "Encoder", "VRAM cap", "PE", "Per image", "Peak VRAM", "Pinned RAM", ""] {
+            ui.weak(h);
+        }
+        ui.end_row();
+        for t in tiers::tiers() {
+            let gpus: Vec<String> = plan
+                .map(|p| p.cards.iter().filter(|c| c.preset == Some(t.gb)).map(|c| format!("GPU {}", c.gpu)).collect())
+                .unwrap_or_default();
+            let on = !gpus.is_empty();
+            let row = ui.selectable_label(on, RichText::new(format!("{} GB", t.gb)).strong());
+            if k.choose && row.clicked() {
+                clicked = Some(t.gb);
+            }
+            if k.choose {
+                row.on_hover_text("Use for every GPU making images");
+            }
+            let cell = |ui: &mut egui::Ui, s: String| {
+                if on {
+                    ui.label(RichText::new(s).color(ACCENT))
+                } else {
+                    ui.weak(s)
+                };
+            };
+            cell(ui, t.quant().to_string());
+            cell(ui, if t.clip_on_gpu { "GPU" } else { "CPU" }.into());
+            cell(ui, if t.vram_limit_mb > 0 { format!("{} GiB", t.vram_limit_mb / 1024) } else { "none".into() });
+            cell(ui, if t.swap { "swaps" } else { "stays loaded" }.into());
+            cell(ui, format!("{} s", t.per_image_s));
+            cell(ui, format!("{:.1} GiB", t.peak_vram_gib));
+            cell(ui, format!("~{} GiB", t.pinned_ram_gib));
+            if on {
+                ui.label(RichText::new(format!("◀ {}", gpus.join(", "))).color(ACCENT).strong());
+            } else {
+                ui.label("");
+            }
+            ui.end_row();
+        }
+    });
+    ui.weak("Timings and memory measured on a Radeon AI PRO R9700 with KoboldCpp 1.123 (docs/vram-tiers.md).");
+    if let (Some(gb), Some(Ok(list))) = (clicked, &mut k.gpus) {
+        for w in list.iter_mut().filter(|w| w.on && !pe_only.contains(&w.gpu.number)) {
+            w.preset = Some(gb);
+        }
+    }
+}
+
 /// The editor (✎ / New preset): name, servers, Save / Save and open / Open
 /// without saving / Cancel. Esc cancels; a click outside doesn't.
 fn editor_window(ctx: &egui::Context, st: &AppState, d: &ServerDialog, editing: Editing, out: &mut Vec<Msg>) {
     egui::Modal::new(egui::Id::unique("preset_editor")).show(ctx, |ui| {
         ui.set_width(620.0);
-        editor(ui, d, editing, out);
+        editor(ui, st, d, editing, out);
         if st.confirm.is_none() && st.pe.editor.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             out.push(Msg::CancelEdit);
         }
     });
 }
 
-fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<Msg>) {
+fn editor(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, editing: Editing, out: &mut Vec<Msg>) {
     let title = if editing == Editing::New { "New preset" } else { "Edit preset" };
     ui.heading(ic(ph::PENCIL_SIMPLE, title));
     let mut name = d.draft.name.clone();
@@ -825,19 +1387,23 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
     }
     ui.add_space(6.0);
     if d.draft.servers.is_empty() {
-        ui.weak("Add an sd-server to start or connect to, and a chat server for prompt enhance if you like.");
+        ui.weak(
+            "Add KoboldCpp (images, and prompt enhance too), or an sd-server to start or connect to and a chat \
+             server for prompt enhance if you like.",
+        );
     }
+    let has_chat_entry = d.draft.chat().is_some();
     for (i, s) in d.draft.servers.iter().enumerate() {
         let mut edited = s.clone();
         // full width, × pinned to the right edge
         let remove = egui::Frame::group(ui.style())
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::Sides::new().show(
+                let (_, remove) = egui::Sides::new().show(
                     ui,
                     |ui| match &mut edited {
                         ServerConfig::Start { name, port, device, .. } => {
-                            ui.label(ic(ph::PLAY_CIRCLE, "Start"));
+                            ui.label(ic(ph::PLAY_CIRCLE, "sd-server"));
                             ui.add(egui::TextEdit::singleline(name).desired_width(70.0).hint_text("name"));
                             ui.label("device");
                             ui.add(egui::TextEdit::singleline(device).desired_width(80.0));
@@ -845,7 +1411,7 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
                             ui.add(egui::DragValue::new(port).range(1024..=65535));
                         }
                         ServerConfig::Connect { name, url, device } => {
-                            ui.label(ic(ph::PLUGS_CONNECTED, "Connect"));
+                            ui.label(ic(ph::PLUGS_CONNECTED, "sd-server at"));
                             ui.add(egui::TextEdit::singleline(name).desired_width(70.0).hint_text("name"));
                             ui.add(egui::TextEdit::singleline(url).desired_width(200.0));
                             ui.add(egui::TextEdit::singleline(device).desired_width(70.0).hint_text("device"));
@@ -857,12 +1423,19 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
                                 out.push(Msg::PeEditorOpen(Some(i)));
                             }
                         }
+                        ServerConfig::Kobold(k) => {
+                            ui.label(ic(ph::IMAGE, "KoboldCpp"));
+                            ui.add(egui::TextEdit::singleline(&mut k.name).desired_width(90.0).hint_text("name"));
+                        }
                     },
                     |ui| ui.small_button(ph::X).on_hover_text("Remove").clicked(),
-                )
+                );
+                if let ServerConfig::Kobold(k) = &mut edited {
+                    kobold_fields(ui, st, i, k, has_chat_entry, out);
+                }
+                remove
             })
-            .inner
-            .1;
+            .inner;
         if remove {
             out.push(Msg::RemoveServer(i));
         }
@@ -871,64 +1444,76 @@ fn editor(ui: &mut egui::Ui, d: &ServerDialog, editing: Editing, out: &mut Vec<M
         }
     }
     ui.horizontal(|ui| {
-        if ui.button(ic(ph::PLUS, "Start server")).clicked() {
+        if ui
+            .button(RichText::new(ic(ph::PLUS, "KoboldCpp")).strong().color(ACCENT))
+            .on_hover_text("KoboldCpp generating images (and the chat server too, if you like)")
+            .clicked()
+        {
+            out.push(Msg::AddKoboldServer);
+        }
+        if ui.button(ic(ph::PLUS, "sd-server")).on_hover_text("an sd-server IncreArt starts").clicked() {
             out.push(Msg::AddStartServer);
         }
-        if ui.button(ic(ph::PLUS, "Connect")).clicked() {
+        if ui.button(ic(ph::PLUS, "Connect to sd-server")).on_hover_text("an sd-server already running").clicked() {
             out.push(Msg::AddConnectServer);
         }
-        let chat = d.draft.chat().is_some();
         if ui
-            .add_enabled(!chat, egui::Button::new(ic(ph::MAGIC_WAND, "Chat server")))
-            .on_hover_text("the chat model prompt enhance uses; one per preset")
-            .on_disabled_hover_text("a preset has one chat server")
+            .button(ic(ph::MAGIC_WAND, "Chat server"))
+            .on_hover_text("a chat model for prompt enhance; with several, asks are shared among them")
             .clicked()
         {
             out.push(Msg::PeEditorOpen(None));
         }
     });
-    // the listed devices: a click adds a Start server on one
-    ui.horizontal_wrapped(|ui| {
-        ui.weak("Devices:");
-        match &d.devices {
-            None => {
-                ui.spinner();
-            }
-            Some(Err(_)) => {
-                ui.weak("couldn't list them (sd-server settings…)");
-            }
-            Some(Ok(list)) => {
-                for device in list.iter().map(|l| increart_core::launcher::device_name(l)) {
-                    let used = d
-                        .draft
-                        .servers
-                        .iter()
-                        .any(|s| matches!(s, ServerConfig::Start { device: x, .. } if x == device));
-                    if ui
-                        .add_enabled(!used, egui::Button::new(ic(ph::PLUS, device)).small())
-                        .on_hover_text("Start a server on this device")
-                        .clicked()
-                    {
-                        out.push(Msg::DraftDevice(device.into(), true));
+    // the listed devices: a click adds a Start server on one (with sd-servers)
+    let sd = d.draft.servers.iter().any(|s| matches!(s, ServerConfig::Start { .. } | ServerConfig::Connect { .. }));
+    if sd {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Devices:");
+            match &d.devices {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(_)) => {
+                    ui.weak("couldn't list them (Server settings…)");
+                }
+                Some(Ok(list)) => {
+                    for device in list.iter().map(|l| increart_core::launcher::device_name(l)) {
+                        let used = d
+                            .draft
+                            .servers
+                            .iter()
+                            .any(|s| matches!(s, ServerConfig::Start { device: x, .. } if x == device));
+                        if ui
+                            .add_enabled(!used, egui::Button::new(ic(ph::PLUS, device)).small())
+                            .on_hover_text("Start a server on this device")
+                            .clicked()
+                        {
+                            out.push(Msg::DraftDevice(device.into(), true));
+                        }
                     }
                 }
             }
-        }
-    });
-    ui.colored_label(Color32::GRAY, "Ports default to 1234, 1235, …; device names as `--list-devices` prints them.");
+        });
+        ui.colored_label(
+            Color32::GRAY,
+            "sd-server ports default to 1234, 1235, …; device names as `--list-devices` prints them.",
+        );
+    }
     ui.add_space(8.0);
     let has_servers = !d.draft.servers.is_empty();
-    ui.horizontal(|ui| {
+    dialog_buttons(ui, |ui| {
+        let open = egui::Button::new(RichText::new(ic(ph::PLAY, "Save and open")).strong());
+        if ui.add_enabled(has_servers, open).clicked() {
+            out.push(Msg::SaveAndOpen);
+        }
         if ui.button(ic(ph::FLOPPY_DISK, "Save")).clicked() {
             out.push(Msg::SavePreset);
-        }
-        if ui.add_enabled(has_servers, egui::Button::new(ic(ph::PLAY, "Save and open"))).clicked() {
-            out.push(Msg::SaveAndOpen);
         }
         if ui.add_enabled(has_servers, egui::Button::new("Open without saving")).clicked() {
             out.push(Msg::OpenDraft);
         }
-        if ui.button("Cancel").clicked() {
+        if ui.button("Cancel   Esc").clicked() {
             out.push(Msg::CancelEdit);
         }
     });

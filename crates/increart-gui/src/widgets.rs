@@ -35,7 +35,7 @@ pub fn size_info(w: u32, h: u32) -> String {
 /// Puts a library image, full size, on the system clipboard. Decoded on a
 /// thread so a large image doesn't stall the UI.
 pub fn copy_image(ctx: &egui::Context, root: &Path, img: &increart_core::ImageRef) {
-    let (ctx, path) = (ctx.clone(), root.join(img.rel_path()));
+    let (ctx, path) = (ctx.clone(), img.path(root));
     std::thread::spawn(move || {
         if let Ok(decoded) = image::open(&path) {
             let rgba = decoded.to_rgba8();
@@ -49,18 +49,57 @@ pub fn copy_image(ctx: &egui::Context, root: &Path, img: &increart_core::ImageRe
 /// The "Copy image" and "Describe with PE…" menu items, for any image's
 /// right-click menu.
 pub fn image_menu_items(ui: &mut egui::Ui, root: &Path, img: &increart_core::ImageRef, out: &mut Vec<Msg>) {
+    copy_image_item(ui, root, img, out);
+    markup_item(ui, img, None, out);
+    describe_item(ui, img, "Describe with PE…", out);
+}
+
+/// **Crop / mark…**: the editor on the image; `index`: its place in
+/// Generate, where the copy goes.
+pub fn markup_item(ui: &mut egui::Ui, img: &increart_core::ImageRef, index: Option<usize>, out: &mut Vec<Msg>) {
+    let tip = match index {
+        Some(_) => "crop it, circle what to change: the marked copy goes in below it",
+        None => "crop it, circle what to change: saved as a copy (hidden in the input library)",
+    };
+    if ui.button(ic(ph::PENCIL_SIMPLE, "Crop / mark…")).on_hover_text(tip).clicked() {
+        out.push(Msg::OpenMarkup(img.clone(), index));
+        ui.close();
+    }
+}
+
+/// **Copy image**: full size, to the clipboard.
+pub fn copy_image_item(ui: &mut egui::Ui, root: &Path, img: &increart_core::ImageRef, out: &mut Vec<Msg>) {
     if ui.button(ic(ph::COPY, "Copy image")).on_hover_text("to the clipboard, full size").clicked() {
         copy_image(ui.ctx(), root, img);
         out.push(Msg::Info("Image copied to the clipboard".into()));
         ui.close();
     }
+}
+
+/// **Describe with PE…**: the prompt-enhance server describes it as a prompt.
+pub fn describe_item(ui: &mut egui::Ui, img: &increart_core::ImageRef, label: &str, out: &mut Vec<Msg>) {
     if ui
-        .button(ic(ph::MAGIC_WAND, "Describe with PE…"))
+        .button(ic(ph::MAGIC_WAND, label))
         .on_hover_text("the prompt-enhance server describes it as a prompt")
         .clicked()
     {
         out.push(Msg::PeRewrite(increart_gui_core::PeTarget::Describe(img.clone())));
         ui.close();
+    }
+}
+
+/// Scrolls the cursor's cell into view when the cursor has moved (keys,
+/// Follow, a rating), not every frame, so scrolling by hand stays.
+pub fn reveal_cursor<T: PartialEq + Clone + Send + Sync + 'static>(
+    ui: &egui::Ui,
+    salt: &str,
+    at: T,
+    r: &egui::Response,
+) {
+    let id = egui::Id::unique("cursor_seen").with(salt);
+    if ui.data(|d| d.get_temp::<T>(id)).as_ref() != Some(&at) {
+        ui.data_mut(|d| d.insert_temp(id, at));
+        r.scroll_to_me(None);
     }
 }
 
@@ -348,6 +387,23 @@ pub fn when(t: increart_core::id::Timestamp) -> String {
         _ => format!("{} days ago", secs / 86_400),
     };
     format!("{} · {ago}", t.format("%Y-%m-%d %H:%M UTC"))
+}
+
+/// A dialog's button row (DESIGN.md, Dialog buttons): `tools` (buttons
+/// that don't finish it, and status) on the left, `actions` on the right,
+/// laid out right to left: add the main action first, it goes in the corner,
+/// and Cancel / Close last. The tools side shrinks when the row is narrow.
+pub fn dialog_footer<L, R>(
+    ui: &mut egui::Ui,
+    tools: impl FnOnce(&mut egui::Ui) -> L,
+    actions: impl FnOnce(&mut egui::Ui) -> R,
+) -> (L, R) {
+    egui::Sides::new().shrink_left().truncate().show(ui, tools, actions)
+}
+
+/// A dialog's button row with only actions ([`dialog_footer`]).
+pub fn dialog_buttons<R>(ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    dialog_footer(ui, |_| (), actions).1
 }
 
 #[cfg(test)]

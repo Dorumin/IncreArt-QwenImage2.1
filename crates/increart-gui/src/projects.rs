@@ -6,11 +6,11 @@ use eframe::egui::{self, ComboBox, Panel, RichText, ScrollArea};
 use increart_core::config::TreeOrder;
 use increart_core::engine::Stop;
 use increart_core::{Tree, Verdict};
-use increart_gui_core::{AppState, Msg, OutputSource, PickKind, ProjectsTab, Tab, UseTarget, counts, cover};
+use increart_gui_core::{AppState, Confirm, Msg, OutputSource, PickKind, ProjectsTab, Tab, UseTarget, counts, cover};
 
 use crate::textures::Textures;
 use crate::tree;
-use crate::widgets::{ACCENT, BAD, GOOD, NEUTRAL, card, ic, ph, short, thumb};
+use crate::widgets::{ACCENT, BAD, GOOD, NEUTRAL, card, dialog_buttons, dialog_footer, ic, ph, short, thumb};
 
 pub fn view(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
     Panel::left("proj_tree").default_size(250.0).show(ui, |ui| {
@@ -331,7 +331,7 @@ fn project_menu(ui: &mut egui::Ui, st: &AppState, p: &increart_core::scan::Proje
             p.name(),
             st.delete_summary(Tree::Projects, &rel)
         );
-        out.push(Msg::Ask(text, Box::new(Msg::DeleteNode(Tree::Projects, rel))));
+        out.push(Msg::Ask(Confirm::new(text, "Delete", Msg::DeleteNode(Tree::Projects, rel))));
         ui.close();
     }
 }
@@ -386,6 +386,14 @@ fn images_pane(
         {
             out.push(Msg::RefPicker(true));
         }
+        if ui
+            .add_enabled(!f.images.is_empty(), egui::Button::new(ic(ph::SQUARES_FOUR, "Tile…")))
+            .on_hover_text("all these images (parked ones too), tiled in this order")
+            .on_disabled_hover_text("no images in Generate")
+            .clicked()
+        {
+            out.push(Msg::TileGenerateImages);
+        }
     });
     ui.weak("or drop image files here");
     // what the prompt names vs what's there
@@ -399,6 +407,8 @@ fn images_pane(
         };
         ui.colored_label(BAD, format!("The prompt names <image{n}>, but there are {} reference(s){why}", refs.len()));
     }
+    // a sweep's prompts can name what the prompt doesn't
+    let named = increart_gui_core::update::named_image_tags(st);
     ui.separator();
     if f.images.is_empty() {
         ui.weak("No images: the run is text-to-image.");
@@ -425,7 +435,9 @@ fn images_pane(
                         out.push(Msg::Preview(Some(x.image.clone())));
                     }
                     resp.context_menu(|ui| {
-                        crate::widgets::image_menu_items(ui, root, &x.image, out);
+                        crate::widgets::copy_image_item(ui, root, &x.image, out);
+                        crate::widgets::markup_item(ui, &x.image, Some(i), out);
+                        crate::widgets::describe_item(ui, &x.image, "Describe with PE…", out);
                         if ui.button(ic(ph::ARROWS_OUT, "View large")).clicked() {
                             out.push(Msg::Preview(Some(x.image.clone())));
                             ui.close();
@@ -488,6 +500,14 @@ fn images_pane(
                                 *f = g;
                                 crate::presets::focus_prompt_at(ui.ctx(), end);
                             }
+                            let tip = if st.edited_source(&x.image).is_some() {
+                                "crop / mark… again: the copy is replaced"
+                            } else {
+                                "crop / mark…: the marked copy goes in below"
+                            };
+                            if ui.small_button(ph::PENCIL_SIMPLE).on_hover_text(tip).clicked() {
+                                out.push(Msg::OpenMarkup(x.image.clone(), Some(i)));
+                            }
                             if ui
                                 .add_enabled(i > 0, egui::Button::new(ph::ARROW_UP).small())
                                 .on_hover_text("move up")
@@ -506,8 +526,12 @@ fn images_pane(
                                 out.push(Msg::RemoveImage(i));
                             }
                         });
-                        if x.reference && !tags.contains(&tag.unwrap_or(0)) {
-                            ui.weak("not named in the prompt");
+                        if x.reference && !named.contains(&tag.unwrap_or(0)) {
+                            ui.weak(if f.sweep.on {
+                                "not named in the prompt or the sweep"
+                            } else {
+                                "not named in the prompt"
+                            });
                         }
                         if !x.reference && !x.start {
                             ui.weak("parked: not sent");
@@ -594,7 +618,7 @@ pub fn new_project_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures
                 }
             });
         });
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             if ui.button(RichText::new(ic(ph::CHECK, "Create   Enter")).strong()).clicked() {
                 out.push(Msg::ConfirmNewProject);
             }
@@ -636,7 +660,7 @@ pub fn duplicate_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) 
             ui.colored_label(BAD, e);
         }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Duplicate   Enter")).strong());
             if ui.add_enabled(problem.is_none(), create).clicked() {
                 out.push(Msg::ConfirmDuplicate);
@@ -709,7 +733,7 @@ fn promote_name_step(ui: &mut egui::Ui, st: &AppState, d: &increart_gui_core::Pr
     ui.add_space(4.0);
     promote_result(ui, st, &d);
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    dialog_buttons(ui, |ui| {
         let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Create here   Enter")).strong());
         if ui.add_enabled(problem.is_none(), create).clicked() {
             out.push(Msg::ConfirmPromote);
@@ -809,18 +833,24 @@ fn promote_location(ui: &mut egui::Ui, st: &AppState, d: &increart_gui_core::Pro
     promote_result(ui, st, &d);
     ui.add_space(4.0);
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-    ui.horizontal(|ui| {
-        if ui.button(ic(ph::ARROW_LEFT, "Back")).clicked() {
-            out.push(Msg::PromoteChoose(false));
-        }
-        let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Create   Enter")).strong());
-        if ui.add_enabled(problem.is_none(), create).clicked() || enter && !field_enter && problem.is_none() {
-            out.push(Msg::ConfirmPromote);
-        }
-        if ui.button("Cancel   Esc").clicked() {
-            out.push(Msg::CancelPromote);
-        }
-    });
+    let (back, (create, cancel)) = dialog_footer(
+        ui,
+        |ui| ui.button(ic(ph::ARROW_LEFT, "Back")).clicked(),
+        |ui| {
+            let create = egui::Button::new(RichText::new(ic(ph::CHECK, "Create   Enter")).strong());
+            let create = ui.add_enabled(problem.is_none(), create).clicked();
+            (create, ui.button("Cancel   Esc").clicked())
+        },
+    );
+    if back {
+        out.push(Msg::PromoteChoose(false));
+    }
+    if create || enter && !field_enter && problem.is_none() {
+        out.push(Msg::ConfirmPromote);
+    }
+    if cancel {
+        out.push(Msg::CancelPromote);
+    }
 }
 
 /// One folder in the location tree: indented, selectable.
@@ -858,12 +888,14 @@ pub fn retag_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
         }
         ui.add_space(6.0);
         ui.weak("The current prompt is saved to its history first.");
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new(ic(ph::CHECK, "Update prompt")).strong()).clicked() {
-                out.push(Msg::RetagConfirm);
-            }
-            if ui.button("Leave the prompt as it is").clicked() {
+        // leaving it is the default: renumbering rewrites what was typed
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        dialog_buttons(ui, |ui| {
+            if ui.button(RichText::new("Leave the prompt as it is   Enter").strong()).clicked() || enter {
                 out.push(Msg::RetagDismiss);
+            }
+            if ui.button(ic(ph::CHECK, "Update prompt")).clicked() {
+                out.push(Msg::RetagConfirm);
             }
         });
     });
@@ -1021,7 +1053,7 @@ pub fn preview_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, ke
                     ui.close();
                 }
                 ui.separator();
-                crate::review::use_menu(ui, root, img, out);
+                crate::review::use_menu(ui, st, root, img, out);
             });
 
             let mut close_clicked = false;
@@ -1046,9 +1078,11 @@ pub fn preview_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, ke
                         ui.separator();
                         if rates {
                             // right to left, so Good · Neutral · Bad read left to right
-                            ui.menu_button(ph::DOTS_THREE, |ui| crate::review::use_menu(ui, root, img, &mut picked))
-                                .response
-                                .on_hover_text("use this image");
+                            ui.menu_button(ph::DOTS_THREE, |ui| {
+                                crate::review::use_menu(ui, st, root, img, &mut picked)
+                            })
+                            .response
+                            .on_hover_text("use this image");
                             verdict_buttons(ui, verdict.flatten(), true, &mut picked);
                             let undo = ui.add_enabled(
                                 !st.review_undo.is_empty(),
@@ -1261,9 +1295,10 @@ pub fn scale_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
         ui.label(RichText::new(format!("→ {}", crate::widgets::size_info(w, h))).strong());
         ui.weak(format!("Same aspect, both sides rounded to multiples of 32, within {lo}–{hi}."));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            apply = ui.button(RichText::new(ic(ph::CHECK, "Apply")).strong()).clicked();
-            if ui.button("Cancel").clicked() {
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        dialog_buttons(ui, |ui| {
+            apply = ui.button(RichText::new(ic(ph::CHECK, "Apply   Enter")).strong()).clicked() || enter;
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::CloseScale);
             }
         });
@@ -1280,99 +1315,321 @@ pub fn scale_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
 
 /// The resolutions editor (DESIGN.md, Resolutions): name, size, aspect,
 /// megapixels, a time estimate; default, duplicate, swap, reorder, delete.
+/// A modal that only Escape or Cancel closes: a stray click outside would
+/// lose the edits.
 pub fn resolutions_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     let Some(list) = &st.res_editor else { return };
     let mut l = list.clone();
-    let mut open = true;
-    egui::Window::new(ic(ph::RESIZE, "Resolutions")).open(&mut open).collapsible(false).default_width(760.0).show(
-        ctx,
-        |ui| {
-            ui.weak("Sizes snap to multiples of 32 when saved; one is the default. Saved to config.rsn.");
-            let mut action: Option<(usize, &str)> = None;
-            egui::Grid::new("res").num_columns(8).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-                for h in ["default", "name", "width", "height", "aspect", "MP", "≈ per image", ""] {
-                    ui.label(RichText::new(h).strong());
+    let (mut save, mut cancel) = (false, false);
+    egui::Modal::new(egui::Id::unique("resolutions")).show(ctx, |ui| {
+        ui.heading(ic(ph::RESIZE, "Resolutions"));
+        ui.weak("Sizes snap to multiples of 32 when saved; one is the default. Saved to config.rsn.");
+        let mut action: Option<(usize, &str)> = None;
+        egui::Grid::new("res").num_columns(8).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+            for h in ["default", "name", "width", "height", "aspect", "MP", "≈ per image", ""] {
+                ui.label(RichText::new(h).strong());
+            }
+            ui.end_row();
+            for (i, r) in l.iter_mut().enumerate() {
+                if ui.radio(r.default, "").clicked() {
+                    action = Some((i, "default"));
+                }
+                ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut r.name));
+                for v in [&mut r.width, &mut r.height] {
+                    let d = egui::DragValue::new(v).range(32..=4096).speed(32).update_while_editing(false);
+                    if ui.add(d).changed() {
+                        *v = increart_gui_core::round32(*v).min(4096);
+                    }
+                }
+                ui.label(crate::widgets::aspect(r.width, r.height));
+                let mp = r.width as f32 * r.height as f32 / 1e6;
+                ui.label(format!("{mp:.2}"));
+                let mut f = st.generate.clone();
+                (f.width, f.height) = (r.width, r.height);
+                ui.label(fmt_secs(estimate(&f)));
+                ui.horizontal(|ui| {
+                    for (icon, tip, what) in [
+                        (ph::COPY, "duplicate", "dup"),
+                        (ph::ARROWS_OUT, "scale… (megapixels, width or height)", "scale"),
+                        (ph::ARROWS_LEFT_RIGHT, "swap width and height", "swap"),
+                        (ph::ARROW_UP, "move up", "up"),
+                        (ph::ARROW_DOWN, "move down", "down"),
+                        (ph::TRASH, "delete", "del"),
+                    ] {
+                        if ui.small_button(icon).on_hover_text(tip).clicked() {
+                            action = Some((i, what));
+                        }
+                    }
+                });
+                if r.width % 32 != 0 || r.height % 32 != 0 {
+                    ui.colored_label(BAD, "not a multiple of 32: snaps on save");
+                }
+                if !(256..=2048).contains(&r.width) || !(256..=2048).contains(&r.height) {
+                    ui.colored_label(NEUTRAL, "outside 256–2048");
                 }
                 ui.end_row();
-                for (i, r) in l.iter_mut().enumerate() {
-                    if ui.radio(r.default, "").clicked() {
-                        action = Some((i, "default"));
-                    }
-                    ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut r.name));
-                    for v in [&mut r.width, &mut r.height] {
-                        let d = egui::DragValue::new(v).range(32..=4096).speed(32).update_while_editing(false);
-                        if ui.add(d).changed() {
-                            *v = increart_gui_core::round32(*v).min(4096);
-                        }
-                    }
-                    ui.label(crate::widgets::aspect(r.width, r.height));
-                    let mp = r.width as f32 * r.height as f32 / 1e6;
-                    ui.label(format!("{mp:.2}"));
-                    let mut f = st.generate.clone();
-                    (f.width, f.height) = (r.width, r.height);
-                    ui.label(fmt_secs(estimate(&f)));
-                    ui.horizontal(|ui| {
-                        for (icon, tip, what) in [
-                            (ph::COPY, "duplicate", "dup"),
-                            (ph::ARROWS_OUT, "scale… (megapixels, width or height)", "scale"),
-                            (ph::ARROWS_LEFT_RIGHT, "swap width and height", "swap"),
-                            (ph::ARROW_UP, "move up", "up"),
-                            (ph::ARROW_DOWN, "move down", "down"),
-                            (ph::TRASH, "delete", "del"),
-                        ] {
-                            if ui.small_button(icon).on_hover_text(tip).clicked() {
-                                action = Some((i, what));
-                            }
-                        }
-                    });
-                    if r.width % 32 != 0 || r.height % 32 != 0 {
-                        ui.colored_label(BAD, "not a multiple of 32: snaps on save");
-                    }
-                    if !(256..=2048).contains(&r.width) || !(256..=2048).contains(&r.height) {
-                        ui.colored_label(NEUTRAL, "outside 256–2048");
-                    }
-                    ui.end_row();
-                }
-            });
-            match action {
-                Some((i, "default")) => l.iter_mut().enumerate().for_each(|(j, r)| r.default = i == j),
-                Some((i, "dup")) => {
-                    let mut r = l[i].clone();
-                    r.default = false;
-                    l.insert(i + 1, r);
-                }
-                Some((i, "scale")) => out.push(Msg::OpenScale(increart_gui_core::ScaleTarget::Resolution(i))),
-                Some((i, "swap")) => (l[i].width, l[i].height) = (l[i].height, l[i].width),
-                Some((i, "up")) if i > 0 => l.swap(i, i - 1),
-                Some((i, "down")) if i + 1 < l.len() => l.swap(i, i + 1),
-                Some((i, "del")) if l.len() > 1 => {
-                    l.remove(i);
-                }
-                _ => {}
             }
-            ui.separator();
-            ui.horizontal(|ui| {
+        });
+        match action {
+            Some((i, "default")) => l.iter_mut().enumerate().for_each(|(j, r)| r.default = i == j),
+            Some((i, "dup")) => {
+                let mut r = l[i].clone();
+                r.default = false;
+                l.insert(i + 1, r);
+            }
+            Some((i, "scale")) => out.push(Msg::OpenScale(increart_gui_core::ScaleTarget::Resolution(i))),
+            Some((i, "swap")) => (l[i].width, l[i].height) = (l[i].height, l[i].width),
+            Some((i, "up")) if i > 0 => l.swap(i, i - 1),
+            Some((i, "down")) if i + 1 < l.len() => l.swap(i, i + 1),
+            Some((i, "del")) if l.len() > 1 => {
+                l.remove(i);
+            }
+            _ => {}
+        }
+        ui.add_space(6.0);
+        dialog_footer(
+            ui,
+            |ui| {
                 if ui.button(ic(ph::PLUS, "Add")).clicked() {
                     l.push(increart_core::config::Resolution::new("", st.generate.width, st.generate.height));
                 }
                 if ui.button("Reset to built-ins").clicked() {
                     l = increart_core::config::builtin_resolutions();
                 }
-                if ui.button(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong()).clicked() {
-                    out.push(Msg::EditResolutions(l.clone()));
-                    out.push(Msg::SaveResolutions);
-                }
-                if ui.button("Cancel").clicked() {
-                    out.push(Msg::CloseResolutions);
-                }
-            });
-        },
-    );
+            },
+            |ui| {
+                save = ui.button(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong()).clicked();
+                cancel = ui.button("Cancel   Esc").clicked();
+            },
+        );
+    });
     if &l != list {
         out.push(Msg::EditResolutions(l));
     }
-    if !open {
+    let esc = st.scale.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    if save {
+        out.push(Msg::SaveResolutions);
+    } else if cancel || esc {
         out.push(Msg::CloseResolutions);
+    }
+}
+
+/// The model presets editor (DESIGN.md, Model presets): the list, with
+/// which open servers run each, and the selected one's recipe, files and
+/// settings. A modal, like the resolutions editor.
+pub fn recipes_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_core::config::{MODEL_SLOTS, RecipePreset};
+    let Some(ed) = &st.recipe_editor else { return };
+    let mut e = ed.clone();
+    let (mut save, mut cancel) = (false, false);
+    let files = st.server_files();
+    egui::Modal::new(egui::Id::unique("recipes")).show(ctx, |ui| {
+        ui.set_width(820.0);
+        ui.heading(ic(ph::CUBE, "Model presets"));
+        ui.weak("Generate's Model list: what each loads and its default settings. Saved to config.rsn.");
+        ui.add_space(4.0);
+        let mut action: Option<(usize, &str)> = None;
+        ui.horizontal_top(|ui| {
+            // the list
+            ui.vertical(|ui| {
+                ui.set_width(220.0);
+                for (i, r) in e.rows.iter().enumerate() {
+                    let on = st.servers_running(&r.preset.files);
+                    let mark = if on.is_empty() {
+                        RichText::new(ph::CIRCLE).weak()
+                    } else {
+                        RichText::new(ph::CHECK_CIRCLE).color(GOOD)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(mark).on_hover_text(if on.is_empty() {
+                            "no open server has its files".to_string()
+                        } else {
+                            format!("runs on {}", on.join(", "))
+                        });
+                        let name = if r.preset.name.trim().is_empty() { "(no name)" } else { r.preset.name.as_str() };
+                        if ui.selectable_label(i == e.selected, name).clicked() {
+                            action = Some((i, "select"));
+                        }
+                    });
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let i = e.selected;
+                    for (icon, tip, what) in [
+                        (ph::PLUS, "new (a copy of the selected one's files)", "new"),
+                        (ph::COPY, "duplicate", "dup"),
+                        (ph::ARROW_UP, "move up", "up"),
+                        (ph::ARROW_DOWN, "move down", "down"),
+                        (ph::TRASH, "delete", "del"),
+                    ] {
+                        if ui.small_button(icon).on_hover_text(tip).clicked() {
+                            action = Some((i, what));
+                        }
+                    }
+                });
+            });
+            ui.add_space(12.0);
+            // the selected one
+            let Some(r) = e.rows.get_mut(e.selected) else { return };
+            ui.vertical(|ui| {
+                let p = &mut r.preset;
+                egui::Grid::new("recipe").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label("Name");
+                    ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(320.0));
+                    ui.end_row();
+                    ui.label("Recipe").on_hover_text("sd-server's recipe for these files, e.g. qwen-image-21");
+                    ui.add(egui::TextEdit::singleline(&mut p.recipe).desired_width(320.0).hint_text("qwen-image-21"));
+                    ui.end_row();
+                    ui.label("Steps");
+                    ui.add(egui::DragValue::new(&mut p.steps).range(1..=200));
+                    ui.end_row();
+                    ui.label("CFG");
+                    ui.add(egui::DragValue::new(&mut p.cfg).range(0.0..=30.0).speed(0.1).max_decimals(2));
+                    ui.end_row();
+                    ui.label("Flow shift");
+                    ui.horizontal(|ui| {
+                        let mut on = p.flow_shift.is_some();
+                        if ui.checkbox(&mut on, "").on_hover_text("off: the recipe's").changed() {
+                            p.flow_shift = on.then_some(3.0);
+                        }
+                        if let Some(v) = &mut p.flow_shift {
+                            ui.add(egui::DragValue::new(v).range(0.01..=20.0).speed(0.05).max_decimals(2));
+                        } else {
+                            ui.weak("the recipe's");
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Sigmas").on_hover_text("a custom schedule, comma-separated; empty: the recipe's");
+                    ui.add(egui::TextEdit::singleline(&mut r.sigmas).desired_width(320.0).hint_text("the recipe's"));
+                    ui.end_row();
+                });
+                let p = &mut r.preset;
+                ui.add_space(6.0);
+                ui.label(RichText::new("Files").strong());
+                ui.weak("Relative to a model folder, as the servers list them.");
+                let mut remove = None;
+                let slots: Vec<(String, String)> = p.files.clone().into_iter().collect();
+                egui::Grid::new("recipe_files").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+                    for (slot, file) in &slots {
+                        let mut s = slot.clone();
+                        ComboBox::from_id_salt(("slot", slot)).selected_text(&s).width(120.0).show_ui(ui, |ui| {
+                            for name in MODEL_SLOTS {
+                                if name == slot || !p.files.contains_key(name) {
+                                    ui.selectable_value(&mut s, name.to_string(), name);
+                                }
+                            }
+                        });
+                        let mut f = file.clone();
+                        let known = files.contains(f.as_str()) || std::path::Path::new(&f).is_absolute();
+                        let edit = egui::TextEdit::singleline(&mut f);
+                        if known || files.is_empty() {
+                            ui.add_sized([330.0, 20.0], edit);
+                        } else {
+                            ui.add_sized([330.0, 20.0], edit.text_color(NEUTRAL))
+                                .on_hover_text("no open server lists this file");
+                        }
+                        if files.is_empty() {
+                            ui.label("");
+                        } else {
+                            ui.menu_button(ph::CARET_DOWN, |ui| {
+                                ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                    for id in &files {
+                                        if ui.selectable_label(*id == f, *id).clicked() {
+                                            f = id.to_string();
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            })
+                            .response
+                            .on_hover_text("the files the open servers list");
+                        }
+                        if ui.small_button(ph::TRASH).on_hover_text("remove").clicked() {
+                            remove = Some(slot.clone());
+                        }
+                        ui.end_row();
+                        if s != *slot {
+                            p.files.remove(slot);
+                            p.files.insert(s, f);
+                        } else if f != *file {
+                            p.files.insert(s, f);
+                        }
+                    }
+                });
+                if let Some(slot) = remove {
+                    p.files.remove(&slot);
+                }
+                if let Some(free) = MODEL_SLOTS.iter().find(|s| !p.files.contains_key(**s))
+                    && ui.small_button(ic(ph::PLUS, "File")).clicked()
+                {
+                    p.files.insert(free.to_string(), String::new());
+                }
+            });
+        });
+        match action {
+            Some((i, "select")) => e.selected = i,
+            Some((i, "new")) => {
+                let files = e.rows.get(i).map(|r| r.preset.files.clone()).unwrap_or_default();
+                let preset = RecipePreset {
+                    name: String::new(),
+                    recipe: e.rows.get(i).map_or("qwen-image-21".into(), |r| r.preset.recipe.clone()),
+                    files,
+                    steps: 20,
+                    cfg: 2.0,
+                    flow_shift: None,
+                    custom_sigmas: vec![],
+                };
+                e.rows.push(increart_gui_core::RecipeRow { preset, origin: None, sigmas: String::new() });
+                e.selected = e.rows.len() - 1;
+            }
+            Some((i, "dup")) if i < e.rows.len() => {
+                let mut r = e.rows[i].clone();
+                r.origin = None;
+                r.preset.name = format!("{} copy", r.preset.name);
+                e.rows.insert(i + 1, r);
+                e.selected = i + 1;
+            }
+            Some((i, "up")) if i > 0 && i < e.rows.len() => {
+                e.rows.swap(i, i - 1);
+                e.selected = i - 1;
+            }
+            Some((i, "down")) if i + 1 < e.rows.len() => {
+                e.rows.swap(i, i + 1);
+                e.selected = i + 1;
+            }
+            Some((i, "del")) if e.rows.len() > 1 && i < e.rows.len() => {
+                e.rows.remove(i);
+                e.selected = i.min(e.rows.len() - 1);
+            }
+            _ => {}
+        }
+        ui.add_space(6.0);
+        let problem = e.problem();
+        dialog_footer(
+            ui,
+            |ui| {
+                if ui.button("Reset to built-ins").on_hover_text("replaces the whole list").clicked() {
+                    e = increart_gui_core::RecipeEditor::new(&increart_core::config::builtin_recipes(), 0);
+                    e.rows.iter_mut().for_each(|r| r.origin = None);
+                }
+                if let Some(p) = &problem {
+                    ui.colored_label(BAD, p);
+                }
+            },
+            |ui| {
+                let b = egui::Button::new(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong());
+                save = ui.add_enabled(problem.is_none(), b).clicked();
+                cancel = ui.button("Cancel   Esc").clicked();
+            },
+        );
+    });
+    if &e != ed {
+        out.push(Msg::EditRecipes(e));
+    }
+    if save {
+        out.push(Msg::SaveRecipes);
+    } else if cancel || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        out.push(Msg::CloseRecipes);
     }
 }
 
@@ -1420,15 +1677,11 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
             ui.horizontal(|ui| {
                 ui.label("Label");
                 ui.add(egui::TextEdit::singleline(&mut f.label).desired_width(140.0));
-                ui.label("Model");
-                let preset = st.config.recipes.get(f.preset).map_or("?", |r| r.name.as_str());
-                ComboBox::from_id_salt("preset").selected_text(preset).show_ui(ui, |ui| {
-                    for (i, r) in st.config.recipes.iter().enumerate() {
-                        if ui.selectable_label(i == f.preset, &r.name).clicked() {
-                            out.push(Msg::SelectRecipe(i));
-                        }
-                    }
-                });
+                ui.label("Model preset");
+                model_choice(ui, st, f.preset, out);
+                if ui.small_button(ph::GEAR).on_hover_text("Edit the model presets…").clicked() {
+                    out.push(Msg::OpenRecipes);
+                }
             });
 
             ui.horizontal(|ui| {
@@ -1490,18 +1743,22 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
                 }
             });
             let slots = increart_core::prompts::slots(&f.prompt);
-            if f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Style {
-                if !f.prompt.trim().is_empty() && !f.prompt.contains(increart_core::prompts::PRESET_SLOT) {
-                    ui.colored_label(NEUTRAL, "No {preset} in the template: each run uses its preset's prompt alone.");
-                }
-            } else if !slots.is_empty() {
-                let names: Vec<&str> = slots.iter().map(|r| &f.prompt[r.clone()]).collect();
-                ui.colored_label(BAD, format!("Fill in {} (type over it) before queueing.", names.join(", ")));
+            if f.sweep.on
+                && f.sweep.vary == increart_core::prompts::SweepVary::Style
+                && !f.prompt.trim().is_empty()
+                && !f.prompt.contains(increart_core::prompts::PRESET_SLOT)
+            {
+                ui.colored_label(NEUTRAL, "No {preset} in the template: each run uses its preset's prompt alone.");
             }
             ui.horizontal(|ui| {
                 crate::rewrite::button(ui, st, increart_gui_core::PeTarget::Prompt, "Rewrite", out);
                 ui.weak("For a transparent background, ask for it in the prompt (e.g. \"make the background transparent\").");
             });
+            let style_sweep = f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Style;
+            if !style_sweep && !slots.is_empty() {
+                ui.add_space(4.0);
+                crate::presets::prompt_blanks(ui, st, &mut f, out);
+            }
             ui.label("Negative prompt");
             ui.add(egui::TextEdit::singleline(&mut f.negative).desired_width(f32::INFINITY));
             if f.sweep.on {
@@ -1613,28 +1870,77 @@ fn generate(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<
     }
 }
 
-/// Under the Generate form: **Queue** (how many runs and seeds), **Clear**,
-/// the draft's state, the time per image, and why Queue can't go yet.
+/// Under the Generate form, laid out as a dialog's button row: **Clear**,
+/// **Review** and the draft's state on the left, **Queue** (how many runs
+/// and seeds) in the corner with the time per image beside it; below, why
+/// Queue can't go yet.
+/// The model presets the open servers can run (the others need files no
+/// server has), and what a KoboldCpp started elsewhere runs without a preset.
+fn model_choice(ui: &mut egui::Ui, st: &AppState, chosen: usize, out: &mut Vec<Msg>) {
+    let recipes = &st.config.recipes;
+    let runnable = st.runnable_recipes();
+    let hidden: Vec<&str> =
+        (0..recipes.len()).filter(|i| !runnable.contains(i)).map(|i| recipes[i].name.as_str()).collect();
+    let name = recipes.get(chosen).map_or("?", |r| r.name.as_str());
+    let shown = if runnable.contains(&chosen) { RichText::new(name) } else { RichText::new(name).color(BAD) };
+    let r = ComboBox::from_id_salt("preset").selected_text(shown).show_ui(ui, |ui| {
+        for &i in &runnable {
+            if ui.selectable_label(i == chosen, &recipes[i].name).clicked() {
+                out.push(Msg::SelectRecipe(i));
+            }
+        }
+        if runnable.is_empty() {
+            ui.weak("No server has the files of any model preset");
+        }
+        if !hidden.is_empty() {
+            ui.separator();
+            let why: Vec<String> = recipes
+                .iter()
+                .filter(|r| hidden.contains(&r.name.as_str()))
+                .filter_map(|r| st.why_no_server_runs(&r.files).map(|w| format!("{}:\n  {}", r.name, w.join("\n  "))))
+                .collect();
+            let l = ui.weak(format!("Not on these servers: {}", hidden.join(", ")));
+            if !why.is_empty() {
+                l.on_hover_text(why.join("\n\n"));
+            }
+        }
+        for (server, file) in st.models_without_preset() {
+            ui.weak(format!("{server} runs {file}, which no model preset uses"));
+        }
+    });
+    if !runnable.contains(&chosen) {
+        r.response.on_hover_text("No open server has this preset's model files");
+    }
+}
+
 fn queue_strip(ui: &mut egui::Ui, st: &AppState, f: &increart_gui_core::GenerateForm, out: &mut Vec<Msg>) {
     ui.add_space(4.0);
     let runs = f.sweep.on.then(|| increart_gui_core::update::sweep_runs(st));
-    ui.horizontal_wrapped(|ui| {
-        let label = match &runs {
-            Some(r) => {
-                let n = r.as_ref().map_or(0, |(r, _)| r.len());
-                format!("Queue sweep: {n} runs × {} seed(s)", f.seeds)
+    let (_, queue) = dialog_footer(
+        ui,
+        |ui| {
+            if ui.button(ic(ph::ERASER, "Clear")).on_hover_text("reset the form (and this project's draft)").clicked() {
+                out.push(Msg::ClearGenerate);
             }
-            None => format!("Queue {} seed(s)", f.seeds),
-        };
-        if ui.button(RichText::new(ic(ph::PLAY, &label)).strong()).clicked() {
-            out.push(Msg::QueueGenerate);
-        }
-        if ui.button(ic(ph::ERASER, "Clear")).on_hover_text("reset the form (and this project's draft)").clicked() {
-            out.push(Msg::ClearGenerate);
-        }
-        crate::app::draft_note(ui, st, st.generate_dirty);
-        ui.weak(format!("≈ {} per image on one R9700 (rough estimate)", fmt_secs(estimate(f))));
-    });
+            review_button(ui, st, out);
+            crate::app::draft_note(ui, st, st.generate_dirty);
+        },
+        |ui| {
+            let label = match &runs {
+                Some(r) => {
+                    let n = r.as_ref().map_or(0, |(r, _)| r.len());
+                    format!("Queue sweep: {n} runs × {} seed(s)", f.seeds)
+                }
+                None => format!("Queue {} seed(s)", f.seeds),
+            };
+            let queue = ui.button(RichText::new(ic(ph::PLAY, &label)).strong()).clicked();
+            ui.weak(format!("≈ {} per image", fmt_secs(estimate(f)))).on_hover_text("on one R9700, a rough estimate");
+            queue
+        },
+    );
+    if queue {
+        out.push(Msg::QueueGenerate);
+    }
     if let Some(Err(e)) = &runs {
         ui.colored_label(crate::widgets::NEUTRAL, e);
     }
@@ -1642,6 +1948,32 @@ fn queue_strip(ui: &mut egui::Ui, st: &AppState, f: &increart_gui_core::Generate
         ui.weak("No servers: the run is saved and generated once servers are connected.");
     }
     ui.add_space(2.0);
+}
+
+/// **Review N new**: Review on the open project's unreviewed images (every
+/// run and sweep in it); greyed while there are none, so the strip stays put.
+fn review_button(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    let Some(p) = st.project.as_ref().and_then(|id| st.index.project(id)) else { return };
+    ui.separator();
+    let n = counts(p)[3];
+    let generating = st
+        .progress
+        .keys()
+        .filter(|(run, _)| st.index.run(run).is_some_and(|(q, _)| q.project.id == p.project.id))
+        .count();
+    let more = match generating {
+        0 => String::new(),
+        g => format!("; {g} more generating"),
+    };
+    let label = if n > 0 { format!("Review {n} new") } else { "Review".into() };
+    let r = ui.add_enabled(n > 0, egui::Button::new(ic(ph::EYE, &label)));
+    let r = r
+        .on_hover_text(format!("review this project's new images, every run and sweep, oldest first{more}"))
+        .on_disabled_hover_text(format!("nothing to review yet{more}"));
+    if r.clicked() {
+        out.push(Msg::ReviewScope(Some(p.project.id.clone())));
+        out.push(Msg::Tab(Tab::Review));
+    }
 }
 
 /// **Aspect**: common ratios (landscape and portrait), a swap, and the
@@ -1727,7 +2059,7 @@ pub fn fmt_secs(s: f32) -> String {
 
 fn jobs(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     ui.heading(ic(ph::HARD_DRIVES, "Servers"));
-    server_list(ui, st);
+    server_list(ui, st, out);
     if ui.button(ic(ph::GEAR, "Change servers…")).clicked() {
         out.push(Msg::OpenServerDialog);
     }
@@ -1813,7 +2145,7 @@ pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>
              the next starts.",
         );
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let spread = RichText::new(ic(ph::STACK, "Sweep by sweep & queue   Enter")).strong();
             if ui.button(spread).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 out.push(Msg::SweepOrderAnswer(Some(true)));
@@ -1836,7 +2168,7 @@ pub fn sweep_order_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>
 fn pe_device(st: &AppState) -> String {
     use increart_core::pe::{PeDevice, PeRun};
     match st.pe.server.as_ref().map(|s| &s.run) {
-        Some(PeRun::KoboldCpp { device: PeDevice::Gpu { devices }, .. }) if !devices.is_empty() => {
+        Some(PeRun::KoboldCpp { device: PeDevice::Gpu { devices, .. }, .. }) if !devices.is_empty() => {
             let ids: Vec<String> = devices.iter().map(u32::to_string).collect();
             format!("GPU {}", ids.join(", "))
         }
@@ -1848,13 +2180,14 @@ fn pe_device(st: &AppState) -> String {
 
 /// One row per server: name, device, state, loaded model; a row saying so
 /// when no GPU server is connected, and the PE server's row last.
-pub fn server_list(ui: &mut egui::Ui, st: &AppState) {
+pub fn server_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
     let weak = ui.visuals().weak_text_color();
-    egui::Grid::new(ui.scope_id().with("servers")).num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new(ui.scope_id().with("servers")).num_columns(5).spacing([16.0, 4.0]).show(ui, |ui| {
         if st.servers.is_empty() {
             ui.label(RichText::new("sd-server").strong());
             ui.label("GPU");
             ui.colored_label(weak, "○ none connected");
+            ui.label("");
             ui.label("");
             ui.end_row();
         }
@@ -1870,6 +2203,12 @@ pub fn server_list(ui: &mut egui::Ui, st: &AppState) {
             };
             state_cell(ui, RichText::new(&s.state).color(c));
             ui.label(s.model.clone().unwrap_or_default());
+            let log = s.config.as_ref().map(|c| increart_core::launcher::log_path(Path::new(""), c));
+            log_button(
+                ui,
+                log.map_or_else(|| increart_core::launcher::log_name(&s.name), |p| p.display().to_string()),
+                out,
+            );
             ui.end_row();
         }
         ui.label(RichText::new("PE").strong()).on_hover_text("Prompt enhance");
@@ -1878,8 +2217,26 @@ pub fn server_list(ui: &mut egui::Ui, st: &AppState) {
         let (dot, state, color) = crate::app::pe_state(ui, st);
         state_cell(ui, RichText::new(format!("{dot} {state}")).color(color));
         ui.label("");
+        match &st.pe.server {
+            Some(s) => log_button(ui, increart_core::pe::log_name(&s.name), out),
+            None => {
+                ui.label("");
+            }
+        }
         ui.end_row();
     });
+}
+
+/// A server's log in the log viewer, when the app started it (only those
+/// have a log).
+pub fn log_button(ui: &mut egui::Ui, file: String, out: &mut Vec<Msg>) {
+    if !increart_gui_core::runtime::log_dir().join(&file).is_file() {
+        ui.label("");
+        return;
+    }
+    if ui.small_button(ph::SCROLL).on_hover_text(format!("its log ({file})")).clicked() {
+        out.push(Msg::OpenLogs(Some(file)));
+    }
 }
 
 /// A server's state in a fixed width, cut with "…" (whole on hover): it
@@ -1972,18 +2329,12 @@ pub fn pe_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
 }
 
 /// **Finish & stop all** / **Stop all now**, above the runs (not scrolled
-/// away with them), greyed out while nothing generates.
+/// away with them), greyed out while nothing generates; on the right, in
+/// the order of each project's buttons below (Stop now in the corner).
 pub fn stop_all_row(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
-    ui.horizontal(|ui| {
+    dialog_buttons(ui, |ui| {
         let all = st.active_runs.len();
         let unfinishing = st.active_runs.iter().any(|r| !st.finishing.contains(r));
-        if ui
-            .add_enabled(unfinishing, egui::Button::new(ic(ph::STOP_CIRCLE, "Finish & stop all")))
-            .on_hover_text("the images being generated finish; nothing new starts")
-            .clicked()
-        {
-            out.push(Msg::StopAll(Stop::Finish));
-        }
         if ui
             .add_enabled(all > 0, egui::Button::new(RichText::new(ic(ph::STOP, "Stop all now")).color(BAD)))
             .on_hover_text("everything stops; images being generated are thrown away")
@@ -1991,7 +2342,14 @@ pub fn stop_all_row(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
         {
             let runs = if all == 1 { "the run".to_string() } else { format!("all {all} runs") };
             let text = format!("Stop {runs} now? The images being generated are thrown away.");
-            out.push(Msg::Ask(text, Box::new(Msg::StopAll(Stop::Now))));
+            out.push(Msg::Ask(Confirm::new(text, "Stop now", Msg::StopAll(Stop::Now))));
+        }
+        if ui
+            .add_enabled(unfinishing, egui::Button::new(ic(ph::STOP_CIRCLE, "Finish & stop all")))
+            .on_hover_text("the images being generated finish; nothing new starts")
+            .clicked()
+        {
+            out.push(Msg::StopAll(Stop::Finish));
         }
     });
 }
@@ -2015,9 +2373,8 @@ pub fn run_list(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
             let id = egui::Id::unique(("jobs_project", &g.project));
             let n = if runs.len() == 1 { "1 run".to_string() } else { format!("{} runs", runs.len()) };
             let open = fold(ui, id, |ui| {
-                ui.label(RichText::new(&g.name).strong());
-                ui.weak(group_text(&n, p));
-                group_stops(ui, st, &runs, &format!("{n} of {}", g.name), out);
+                let title = RichText::new(&g.name).strong();
+                group_stops(ui, st, &runs, &format!("{n} of {}", g.name), (title, group_text(&n, p)), out);
             });
             ui.add(egui::ProgressBar::new(p.2).desired_height(6.0));
             if !open {
@@ -2068,9 +2425,9 @@ fn sweep_block(
         let id = egui::Id::unique(("jobs_sweep", project, name));
         let n = format!("{} runs", runs.len());
         let open = fold(ui, id, |ui| {
-            ui.label(RichText::new(format!("{name} · sweep")).strong());
-            ui.weak(group_text(&n, p));
-            group_stops(ui, st, runs, &format!("the {n} of {project_name} {name}"), out);
+            let title = RichText::new(format!("{name} · sweep")).strong();
+            let what = format!("the {n} of {project_name} {name}");
+            group_stops(ui, st, runs, &what, (title, group_text(&n, p)), out);
         });
         let now: Vec<String> = runs
             .iter()
@@ -2148,12 +2505,14 @@ fn group_text(runs: &str, (done, total, _, eta): (u64, u64, f32, Option<f64>)) -
     t
 }
 
-/// A group's Finish & stop / Stop now (asked first), at the header's right.
+/// A group's Finish & stop / Stop now (asked first), at the header's right;
+/// its `title` and summary in the space left, cut short when it's narrow.
 fn group_stops(
     ui: &mut egui::Ui,
     st: &AppState,
     runs: &[&increart_gui_core::RunProgress],
     what: &str,
+    (title, summary): (RichText, String),
     out: &mut Vec<Msg>,
 ) {
     let ids: Vec<increart_core::Id> = runs.iter().map(|r| r.run.clone()).collect();
@@ -2166,7 +2525,7 @@ fn group_stops(
             .clicked()
         {
             let text = format!("Stop {what} now? The images being generated are thrown away.");
-            out.push(Msg::Ask(text, Box::new(Msg::CancelRuns(ids.clone(), Stop::Now))));
+            out.push(Msg::Ask(Confirm::new(text, "Stop now", Msg::CancelRuns(ids.clone(), Stop::Now))));
         }
         if unfinishing.is_empty() {
             ui.weak("finishing…");
@@ -2177,6 +2536,10 @@ fn group_stops(
         {
             out.push(Msg::CancelRuns(unfinishing, Stop::Finish));
         }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(title).truncate());
+            ui.add(egui::Label::new(RichText::new(summary).weak()).truncate());
+        });
     });
 }
 
@@ -2184,9 +2547,11 @@ fn job_block(ui: &mut egui::Ui, j: &increart_gui_core::RunProgress, finishing: b
     {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&j.label).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     stop_buttons(ui, &j.run, finishing, j.sampling.len(), true, out);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(&j.label).strong()).truncate());
+                    });
                 });
             });
             ui.weak(short(&j.prompt, 70));
@@ -2471,12 +2836,14 @@ pub fn job_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &
                 stop_buttons(ui, id, finishing, sampling, false, out);
             });
         }
-        egui::Sides::new().show(
+        dialog_footer(
             ui,
             |ui| {
                 if ui.button(ic(ph::COPY, "Copy prompt")).clicked() {
                     ui.ctx().copy_text(run.prompt.clone());
                 }
+            },
+            |ui| {
                 if ui
                     .button(ic(ph::ARROW_SQUARE_OUT, "Open in Generate"))
                     .on_hover_text("this run's settings in the Generate form")
@@ -2493,8 +2860,8 @@ pub fn job_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &
                     out.push(Msg::JobInfo(None));
                     out.push(Msg::RunHistory(id.clone()));
                 }
+                ui.button("Close   Esc").clicked()
             },
-            |ui| ui.button("Close").clicked(),
         )
     });
     if m.inner.1 || m.should_close() {

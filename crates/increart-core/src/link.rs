@@ -5,8 +5,10 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use crate::container;
 use crate::error::{Error, IoContext, Result};
 use crate::fsutil;
+use crate::model::StoreFormat;
 use crate::model::{ImageRef, LinkMode, Store};
 use crate::png;
 
@@ -61,7 +63,7 @@ pub fn create(mode: LinkMode, target: &Path, at: &Path) -> Result<()> {
 }
 
 /// The store image a symlink points at, from its target text (the last two
-/// components, `<store>_images/<id>.png`), without following it.
+/// components, `<store>_images/<id>.png` or `.webp`), without following it.
 pub fn symlink_ref(at: &Path) -> Option<ImageRef> {
     let target = fs::read_link(at).ok()?;
     let mut comps = target.components().rev();
@@ -70,7 +72,7 @@ pub fn symlink_ref(at: &Path) -> Option<ImageRef> {
     let (Component::Normal(file), Component::Normal(store)) = (file, store) else {
         return None;
     };
-    let id = file.to_str()?.strip_suffix(".png")?.parse().ok()?;
+    let id = StoreFormat::of_name(file.to_str()?)?.1.parse().ok()?;
     Some(ImageRef { id, store: Store::from_dir(store.to_str()?)? })
 }
 
@@ -81,7 +83,7 @@ pub fn read_ref(at: &Path, store: Store) -> Result<Option<ImageRef>> {
     if fsutil::is_symlink(at) {
         return Ok(symlink_ref(at));
     }
-    match png::header_text(at, png::KEY_ID) {
+    match container::header_text(at, png::KEY_ID) {
         Ok(Some(id)) => Ok(Some(ImageRef { id: id.parse()?, store })),
         Ok(None) | Err(Error::Format { .. }) => Ok(None),
         Err(e) => Err(e),
@@ -98,7 +100,7 @@ pub fn refresh_symlinks(root: &Path, dir: &Path) -> Result<()> {
             continue;
         }
         if let Some(r) = symlink_ref(&p) {
-            let target = root.join(r.rel_path());
+            let target = r.path(root);
             let want = pathdiff::diff_paths(&target, p.parent().unwrap()).unwrap();
             if fs::read_link(&p).at(&p)? != want {
                 fs::remove_file(&p).at(&p)?;

@@ -169,6 +169,15 @@ pub fn ask_name(st: &AppState, j: &PeJobState) -> String {
 }
 
 pub fn progress(st: &AppState, j: &PeJobState) -> String {
+    let now = step_text(st, j);
+    match &j.on {
+        // several servers: which one
+        Some(on) if st.pe.pool_size() > 1 && !matches!(j.step, PeStep::Queued) => format!("{now} on {on}"),
+        _ => now,
+    }
+}
+
+fn step_text(st: &AppState, j: &PeJobState) -> String {
     let secs = |since: f64| (st.now - since).max(0.0);
     let last = |t: Option<f64>| t.map_or(String::new(), |t| format!(" ({t:.0} s last time)"));
     match &j.step {
@@ -201,7 +210,7 @@ pub fn brief(st: &AppState) -> Option<String> {
     if st.pe.status == PeStatus::Starting {
         return Some(format!("loading {:.0} s", secs(st.pe.starting_since)));
     }
-    let j = st.pe.jobs.first().filter(|_| st.pe.status == PeStatus::Ready)?;
+    let j = st.pe.working().filter(|_| st.pe.status == PeStatus::Ready)?;
     let now = match &j.step {
         PeStep::Queued => "queued".into(),
         PeStep::Preparing => "preparing".into(),

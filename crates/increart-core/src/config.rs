@@ -24,6 +24,10 @@ pub struct Config {
     /// pcmanfm.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub file_manager: String,
+    /// The command that opens a text file, e.g. a server's log (the file is
+    /// appended). Empty: the desktop's default app for it (xdg-open, gio).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub editor: String,
     /// Model presets for the Generate panel (recipe + model files + sampling
     /// defaults).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -36,6 +40,11 @@ pub struct Config {
     pub last_preset: Option<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub sdserver: SdServerConfig,
+    /// The KoboldCpp binary new KoboldCpp entries and the setup wizard
+    /// start (empty: the one in use, see `known_koboldcpp`; found at
+    /// startup if none is); entries keep their own.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub koboldcpp: String,
     /// How the job queue shares the servers (Jobs: spread all / sweep by
     /// sweep / one at a time).
     #[serde(skip_serializing_if = "is_default")]
@@ -58,6 +67,9 @@ pub struct Config {
     /// The Input library Grid's card width in points (0: the default).
     #[serde(skip_serializing_if = "is_default")]
     pub library_grid_cell: u32,
+    /// The Idea inbox Grid's card width in points (0: the default).
+    #[serde(skip_serializing_if = "is_default")]
+    pub inbox_grid_cell: u32,
     /// The interface zoom in percent (0: 100%).
     #[serde(skip_serializing_if = "is_default")]
     pub ui_zoom: u32,
@@ -93,6 +105,9 @@ pub struct Config {
     /// with nothing to review (**hide reviewed** unticked).
     #[serde(skip_serializing_if = "is_default")]
     pub review_show_reviewed: bool,
+    /// How Review's **Follow** paces the images.
+    #[serde(skip_serializing_if = "is_default")]
+    pub review_follow: FollowPace,
     /// Prompt enhance: the chat servers that suggest prompt text.
     #[serde(skip_serializing_if = "is_default")]
     pub pe: crate::pe::PeConfig,
@@ -125,6 +140,10 @@ pub struct RecipePreset {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_sigmas: Vec<f32>,
 }
+
+/// The slots a model preset's files go in (sd-server's names; KoboldCpp
+/// takes these too).
+pub const MODEL_SLOTS: [&str; 7] = ["diffusion_model", "model", "llm", "vae", "clip_l", "clip_g", "t5xxl"];
 
 pub fn builtin_recipes() -> Vec<RecipePreset> {
     let files = [
@@ -179,6 +198,8 @@ pub enum ServerConfig {
     },
     /// The chat server for prompt enhance (not an sd-server).
     Chat(crate::pe::PeServer),
+    /// KoboldCpp generating images (in place of an sd-server).
+    Kobold(crate::kobold::KoboldServer),
 }
 
 impl ServerConfig {
@@ -186,13 +207,15 @@ impl ServerConfig {
         match self {
             ServerConfig::Start { name, .. } | ServerConfig::Connect { name, .. } => name,
             ServerConfig::Chat(s) => &s.name,
+            ServerConfig::Kobold(k) => &k.name,
         }
     }
 
-    pub fn device(&self) -> &str {
+    pub fn device(&self) -> String {
         match self {
-            ServerConfig::Start { device, .. } | ServerConfig::Connect { device, .. } => device,
-            ServerConfig::Chat(_) => "",
+            ServerConfig::Start { device, .. } | ServerConfig::Connect { device, .. } => device.clone(),
+            ServerConfig::Chat(_) => String::new(),
+            ServerConfig::Kobold(k) => k.device(),
         }
     }
 
@@ -201,11 +224,36 @@ impl ServerConfig {
             ServerConfig::Start { host, port, .. } => format!("http://{host}:{port}"),
             ServerConfig::Connect { url, .. } => url.trim_end_matches('/').to_string(),
             ServerConfig::Chat(s) => s.base_url(),
+            ServerConfig::Kobold(k) => k.base_url(),
         }
+    }
+
+    /// Whether the app starts it (vs connecting to one running).
+    pub fn is_started(&self) -> bool {
+        matches!(
+            self,
+            ServerConfig::Start { .. }
+                | ServerConfig::Kobold(crate::kobold::KoboldServer { run: crate::kobold::KoboldRun::Start { .. }, .. })
+        )
     }
 
     pub fn is_chat(&self) -> bool {
         matches!(self, ServerConfig::Chat(_))
+    }
+
+    /// The port it's started on (None: connected to).
+    pub fn port(&self) -> Option<u16> {
+        match self {
+            ServerConfig::Start { port, .. } => Some(*port),
+            ServerConfig::Chat(crate::pe::PeServer { run: crate::pe::PeRun::KoboldCpp { port, .. }, .. }) => {
+                Some(*port)
+            }
+            ServerConfig::Kobold(crate::kobold::KoboldServer {
+                run: crate::kobold::KoboldRun::Start { port, .. },
+                ..
+            }) => Some(*port),
+            _ => None,
+        }
     }
 }
 
@@ -215,13 +263,69 @@ impl ServerPreset {
         self.servers.iter().filter(|s| !s.is_chat()).cloned().collect()
     }
 
-    /// Its chat server.
+    /// Its chat server entry.
     pub fn chat(&self) -> Option<&crate::pe::PeServer> {
         self.servers.iter().find_map(|s| match s {
             ServerConfig::Chat(c) => Some(c),
             _ => None,
         })
     }
+
+    /// The chat server prompt enhance uses with it: the first of
+    /// [`chat_pool`](Self::chat_pool).
+    pub fn chat_server(&self) -> Option<crate::pe::PeServer> {
+        self.chat_pool().into_iter().next()
+    }
+
+    /// The chat servers prompt enhance shares its asks among: its chat
+    /// entries, then the KoboldCpp image servers that are chat servers
+    /// too; ones swapping with images left out when one that doesn't is
+    /// there (each ask would cost an image a reload).
+    pub fn chat_pool(&self) -> Vec<crate::pe::PeServer> {
+        let mut list: Vec<(crate::pe::PeServer, bool)> = vec![];
+        for s in &self.servers {
+            if let ServerConfig::Chat(c) = s {
+                list.push((c.clone(), false));
+            }
+        }
+        for s in &self.servers {
+            if let ServerConfig::Kobold(k) = s
+                && let Some(c) = k.chat_server()
+            {
+                list.push((c, k.swap));
+            }
+        }
+        if list.iter().any(|(_, swap)| !swap) {
+            list.retain(|(_, swap)| !swap);
+        }
+        let mut pool: Vec<crate::pe::PeServer> = vec![];
+        for (c, _) in list {
+            if !pool.iter().any(|p| p.same_process(&c)) {
+                pool.push(c);
+            }
+        }
+        pool
+    }
+}
+
+/// The app's folder for one kind of per-user file: `increart` in `$<xdg>`
+/// when set, else in `%<windows>%` on Windows, `~/Library/Application
+/// Support` on macOS and `~/<unix>` elsewhere. Config: (`XDG_CONFIG_HOME`,
+/// `.config`, `APPDATA`); state and logs: (`XDG_STATE_HOME`,
+/// `.local/state`, `LOCALAPPDATA`).
+pub fn user_dir(xdg: &str, unix: &str, windows: &str) -> Option<PathBuf> {
+    let var = |v: &str| std::env::var_os(v).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = || var("HOME").or_else(|| var("USERPROFILE"));
+    let base = var(xdg).or_else(|| {
+        if cfg!(windows) {
+            var(windows)
+        } else if cfg!(target_os = "macos") {
+            home().map(|h| h.join("Library/Application Support"))
+        } else {
+            home().map(|h| h.join(unix))
+        }
+    })?;
+    Some(base.join("increart"))
 }
 
 impl Config {
@@ -231,6 +335,30 @@ impl Config {
 
     /// The presets' chat servers, one per process (the first preset's name
     /// for it).
+    /// The KoboldCpp binary in use: the shared one, else a prompt-enhance
+    /// server's, else a preset's KoboldCpp entry's.
+    pub fn known_koboldcpp(&self) -> Option<String> {
+        use crate::kobold::KoboldRun;
+        use crate::pe::PeRun;
+        let set = |b: &str| (!b.trim().is_empty()).then(|| b.trim().to_string());
+        set(&self.koboldcpp)
+            .or_else(|| {
+                self.chat_servers().into_iter().find_map(|c| match &c.run {
+                    PeRun::KoboldCpp { binary, .. } => set(binary),
+                    PeRun::Connect { .. } => None,
+                })
+            })
+            .or_else(|| {
+                self.server_presets.iter().flat_map(|p| &p.servers).find_map(|s| match s {
+                    ServerConfig::Kobold(k) => match &k.run {
+                        KoboldRun::Start { binary, .. } => set(binary),
+                        KoboldRun::Connect { .. } => None,
+                    },
+                    _ => None,
+                })
+            })
+    }
+
     pub fn chat_servers(&self) -> Vec<&crate::pe::PeServer> {
         let mut list: Vec<&crate::pe::PeServer> = vec![];
         for c in self.server_presets.iter().filter_map(ServerPreset::chat) {
@@ -333,6 +461,64 @@ pub struct TileSettings {
     pub title_text: TextSize,
     /// Output scale in percent of the images' own size.
     pub scale: u32,
+    /// What Save writes.
+    pub save_format: TileFormat,
+    /// JPEG and AVIF quality, in percent.
+    pub save_quality: u8,
+}
+
+/// A saved tiled image's format (DESIGN.md, Tiling).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "TileFormat")]
+pub enum TileFormat {
+    #[default]
+    Png,
+    /// Lossless, about half PNG's size.
+    Webp,
+    /// Lossy; transparency is flattened onto white.
+    Jpeg,
+    /// Lossy, smaller than JPEG at the same quality; only in builds with
+    /// the `avif` feature.
+    Avif,
+}
+
+impl TileFormat {
+    /// The formats this build can write.
+    pub fn available() -> &'static [TileFormat] {
+        if cfg!(feature = "avif") {
+            &[TileFormat::Png, TileFormat::Webp, TileFormat::Jpeg, TileFormat::Avif]
+        } else {
+            &[TileFormat::Png, TileFormat::Webp, TileFormat::Jpeg]
+        }
+    }
+
+    /// This format if the build can write it, else PNG (a setting saved by
+    /// a build with AVIF).
+    pub fn usable(self) -> TileFormat {
+        if Self::available().contains(&self) { self } else { TileFormat::Png }
+    }
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            TileFormat::Png => "png",
+            TileFormat::Webp => "webp",
+            TileFormat::Jpeg => "jpg",
+            TileFormat::Avif => "avif",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TileFormat::Png => "PNG",
+            TileFormat::Webp => "WebP",
+            TileFormat::Jpeg => "JPEG",
+            TileFormat::Avif => "AVIF",
+        }
+    }
+
+    pub fn lossy(self) -> bool {
+        matches!(self, TileFormat::Jpeg | TileFormat::Avif)
+    }
 }
 
 /// A Tile text's height (DESIGN.md, Tiling).
@@ -360,6 +546,8 @@ impl Default for TileSettings {
             caption_format: "{style} · seed {seed}".into(),
             title_text: TextSize::Auto,
             scale: 100,
+            save_format: TileFormat::Png,
+            save_quality: 70,
         }
     }
 }
@@ -417,13 +605,9 @@ pub fn snap32(v: u32) -> u32 {
 }
 
 impl Config {
-    /// `$XDG_CONFIG_HOME/increart/config.rsn`, else `~/.config/increart/config.rsn`.
+    /// `config.rsn` in the app's [config folder](user_dir).
     pub fn default_path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("increart").join("config.rsn"))
+        Some(user_dir("XDG_CONFIG_HOME", ".config", "APPDATA")?.join("config.rsn"))
     }
 
     /// Reads and [normalizes](Self::normalize) a config; a missing file is
@@ -522,6 +706,14 @@ mod tests {
         assert_eq!(rsnfmt::from_str::<Config>(&text).unwrap(), c);
         assert_eq!(Config::default().folder_order.0, TreeOrder::Name, "folders A–Z by default");
         assert_eq!(Config::default().review_order, ReviewOrder::Name, "Review A–Z by default");
+        // Follow's pace: the time an image makes at the lag, quicker behind it
+        let f = FollowPace::default();
+        assert_eq!(f.secs(4, Some(20.0)), 20.0);
+        assert_eq!(f.secs(9, Some(20.0)), 10.0);
+        assert_eq!(f.secs(0, Some(20.0)), 60.0, "at most max_secs");
+        assert_eq!(f.secs(40, Some(20.0)), 3.0, "at least min_secs");
+        assert_eq!(f.secs(4, None), 8.0, "nothing made lately: fixed");
+        assert_eq!(FollowPace { auto: false, ..f }.secs(9, Some(20.0)), 8.0);
         let mut c: Config = rsnfmt::from_str("Config { review_oldest_first: true }").unwrap();
         c.normalize();
         assert_eq!(c.review_order, ReviewOrder::OldestToReview);
@@ -642,6 +834,47 @@ mod tests {
         }
         assert_eq!(c.recent_libraries.len(), MAX_RECENT_LIBRARIES);
         assert_eq!(c.recent_libraries[0], format!("/{}", MAX_RECENT_LIBRARIES + 1));
+    }
+
+    #[test]
+    fn koboldcpp_entries() {
+        let text = r#"Config { server_presets: [ServerPreset { name: "K", servers: [
+            Kobold(KoboldServer {
+                name: "kcpp0",
+                run: Start { binary: "/k/koboldcpp", port: 5001, device: Gpu { devices: [1] } },
+                chat: Some(KoboldChat { model: "/m/c.gguf", context: 8192 }),
+            }),
+            Kobold(KoboldServer { name: "box", run: Connect { url: "http://10.0.0.2:5001", device: "Vulkan1" } }),
+            Kobold(KoboldServer { name: "amd", run: Start { binary: "k", port: 5002, device: Gpu { devices: [0, 1], runtime: Rocm } } }),
+        ] }] }"#;
+        let c: Config = rsnfmt::from_str(text).unwrap();
+        let p = &c.server_presets[0];
+        assert_eq!(p.sd_servers().len(), 3, "image servers");
+        assert_eq!(p.servers[2].device(), "ROCm0,1");
+        assert_eq!(
+            (p.servers[0].device(), p.servers[0].base_url()),
+            ("Vulkan1".into(), "http://127.0.0.1:5001".into())
+        );
+        assert!(p.servers[0].is_started() && !p.servers[1].is_started());
+        assert_eq!(p.chat_server().unwrap().base_url(), "http://127.0.0.1:5001", "its chat server too");
+        let back: Config = rsnfmt::from_str(&rsnfmt::to_string(&c)).unwrap();
+        assert_eq!(back.server_presets, c.server_presets);
+    }
+
+    #[test]
+    fn prompt_enhance_shares_every_chat_server_but_swapping_ones() {
+        let text = r#"ServerPreset { name: "two", servers: [
+            Kobold(KoboldServer { name: "a", run: Start { binary: "k", port: 5001 }, chat: Some(KoboldChat { model: "m" }), swap: true }),
+            Kobold(KoboldServer { name: "b", run: Start { binary: "k", port: 5002 }, chat: Some(KoboldChat { model: "m" }) }),
+            Kobold(KoboldServer { name: "c", run: Start { binary: "k", port: 5003 }, chat: Some(KoboldChat { model: "m" }) }),
+            Kobold(KoboldServer { name: "d", run: Start { binary: "k", port: 5004 } }),
+        ] }"#;
+        let mut p: ServerPreset = rsnfmt::from_str(text).unwrap();
+        let urls = |p: &ServerPreset| p.chat_pool().iter().map(|c| c.base_url()).collect::<Vec<_>>();
+        assert_eq!(urls(&p), ["http://127.0.0.1:5002", "http://127.0.0.1:5003"], "not the swapping one");
+        assert_eq!(p.chat_server().unwrap().name, "b");
+        p.servers.drain(1..3);
+        assert_eq!(urls(&p), ["http://127.0.0.1:5001"], "swapping, if it's the only one");
     }
 
     #[test]
@@ -771,6 +1004,55 @@ impl ReviewOrder {
             ReviewOrder::LastRun => Some(TreeOrder::LastRun),
             ReviewOrder::Name => Some(TreeOrder::Name),
             ReviewOrder::OldestToReview => None,
+        }
+    }
+}
+
+/// How Review's **Follow** moves through the unreviewed images: each shown
+/// for a while, then the next, up to the newest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename = "FollowPace", default)]
+pub struct FollowPace {
+    /// Each image as long as one takes to make (from the recent arrivals),
+    /// sped up or slowed down to keep `lag` images ahead; else `fixed_secs`.
+    pub auto: bool,
+    /// Seconds each image, when not `auto` (and `auto`'s while nothing is
+    /// being made).
+    pub fixed_secs: f32,
+    /// `auto`'s shortest and longest time an image.
+    pub min_secs: f32,
+    pub max_secs: f32,
+    /// `auto`: how many images it keeps ahead of the one shown.
+    pub lag: u32,
+    /// Turned on, it starts at the newest image (else the one shown).
+    pub start_newest: bool,
+    /// No moving on while the pointer is over the image.
+    pub pause_on_hover: bool,
+}
+
+impl Default for FollowPace {
+    fn default() -> Self {
+        FollowPace {
+            auto: true,
+            fixed_secs: 8.0,
+            min_secs: 3.0,
+            max_secs: 60.0,
+            lag: 4,
+            start_newest: false,
+            pause_on_hover: false,
+        }
+    }
+}
+
+impl FollowPace {
+    /// Seconds for the image shown, with `ahead` images after it and one
+    /// image made every `interval` seconds lately (`None`: none lately).
+    pub fn secs(&self, ahead: usize, interval: Option<f64>) -> f64 {
+        let (min, max) = (self.min_secs.min(self.max_secs) as f64, self.max_secs.max(self.min_secs) as f64);
+        match interval.filter(|_| self.auto) {
+            // ahead of the lag: quicker, to catch up; short of it: slower
+            Some(i) => (i * (self.lag as f64 + 1.0) / (ahead as f64 + 1.0)).clamp(min, max),
+            None => self.fixed_secs.max(0.5) as f64,
         }
     }
 }

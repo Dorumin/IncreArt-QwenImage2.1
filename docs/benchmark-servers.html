@@ -1,0 +1,259 @@
+<title>IncreArt Server Benchmark</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,600;0,750;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column (~46rem) for prose; tables and charts may run wider, each scrolling in its own box. */
+:root {
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --ink: #15191d;
+  --ink-2: #4a535c;
+  --ink-3: #6f7880;
+  --rule: #dde1e5;
+  --accent: #0f5e7a;
+  --s1: #2a78d6;           /* VRAM, seconds */
+  --s2: #eb6834;           /* host RAM */
+  --good: #1d6b3f; --good-bg: #e2f2e8;
+  --warn: #8a5a00; --warn-bg: #fbefd5;
+  --bad: #a3271c;  --bad-bg: #fbe4e1;
+  --f-body: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --f-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121518; --surface: #1a1e22; --ink: #e9ecef; --ink-2: #b5bdc4; --ink-3: #8b949c; --rule: #2d3339;
+    --accent: #6cc3e0; --s1: #3987e5; --s2: #d95926;
+    --good: #7fd3a0; --good-bg: #173524; --warn: #f0c068; --warn-bg: #3a2c10; --bad: #f29a90; --bad-bg: #401d19;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121518; --surface: #1a1e22; --ink: #e9ecef; --ink-2: #b5bdc4; --ink-3: #8b949c; --rule: #2d3339;
+  --accent: #6cc3e0; --s1: #3987e5; --s2: #d95926;
+  --good: #7fd3a0; --good-bg: #173524; --warn: #f0c068; --warn-bg: #3a2c10; --bad: #f29a90; --bad-bg: #401d19;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 400 1rem/1.6 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 62rem; margin: 0 auto; padding-block: 2.5rem 4rem; display: grid; gap: 2.75rem; }
+section { display: grid; gap: 1rem; min-width: 0; }
+.prose { max-width: 46rem; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: clamp(1.75rem, 4vw, 2.4rem); font-weight: 750; letter-spacing: -0.01em; }
+h2 { font-size: 1.35rem; font-weight: 750; }
+h3 { font-size: 1rem; font-weight: 600; }
+p { margin: 0; }
+.eyebrow { font: 600 0.75rem/1 var(--f-data); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.lede { font-size: 1.1rem; color: var(--ink-2); max-width: 46rem; }
+.meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; font: 0.8rem/1.4 var(--f-data); color: var(--ink-3); }
+code, .mono { font-family: var(--f-data); font-size: 0.85em; }
+a { color: var(--accent); }
+a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* recommendations: the page's one set-off block */
+.recs { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 1.25rem 1.4rem; display: grid; gap: 0.9rem; }
+.recs ol { margin: 0; padding-left: 1.3rem; display: grid; gap: 0.7rem; }
+.recs li::marker { font-family: var(--f-data); color: var(--accent); font-weight: 600; }
+.recs strong { font-weight: 600; }
+
+.scroll { overflow-x: auto; min-width: 0; border-top: 1px solid var(--rule); }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 0.72rem/1.3 var(--f-data); letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); white-space: nowrap; }
+td.n, th.n { text-align: right; font-family: var(--f-data); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.note { color: var(--ink-2); font-size: 0.82rem; min-width: 14rem; }
+td:nth-child(4) { min-width: 11rem; }
+.pill { display: inline-block; font: 600 0.72rem/1 var(--f-data); padding: 0.3rem 0.5rem; border-radius: 99px; white-space: nowrap; }
+.pill::before { margin-right: 0.3rem; }
+.pill.best { color: var(--good); background: var(--good-bg); } .pill.best::before { content: "✓"; }
+.pill.ok { color: var(--ink-2); background: var(--rule); } .pill.ok::before { content: "●"; }
+.pill.slow { color: var(--warn); background: var(--warn-bg); } .pill.slow::before { content: "▲"; }
+.pill.bad  { color: var(--bad);  background: var(--bad-bg); }  .pill.bad::before  { content: "✕"; }
+
+/* bar charts */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr)); gap: 2rem; }
+figure { margin: 0; display: grid; gap: 0.75rem; min-width: 0; }
+figcaption { font-size: 0.85rem; color: var(--ink-2); }
+.legend { display: flex; gap: 1.2rem; font-size: 0.82rem; color: var(--ink-2); }
+.legend i { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 3px; margin-right: 0.35rem; vertical-align: -0.1rem; }
+.chart { display: grid; gap: 0.35rem; }
+.brow { display: grid; grid-template-columns: minmax(8rem, 13rem) 1fr 4.2rem; align-items: center; gap: 0.6rem; }
+.bn { font-size: 0.8rem; color: var(--ink-2); line-height: 1.25; }
+.bv { font: 0.8rem var(--f-data); font-variant-numeric: tabular-nums; color: var(--ink); text-align: right; }
+.track { position: relative; min-height: 1.1rem; display: flex; align-items: center; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 16.667% 100%; }
+.pair { display: grid; gap: 2px; }
+.pair .track { min-height: 0.8rem; }
+.bar { height: 0.9rem; background: var(--s1); border-radius: 0 4px 4px 0; position: relative; }
+.pair .bar { height: 0.7rem; }
+.bar.s2 { background: var(--s2); }
+.bar.broken { border-radius: 0; -webkit-mask: linear-gradient(to left, transparent 0 6px, #000 6px 9px, transparent 9px 12px, #000 12px); mask: linear-gradient(to left, transparent 0 6px, #000 6px 9px, transparent 9px 12px, #000 12px); }
+.lab { font: 0.7rem var(--f-data); color: var(--ink-2); margin-left: 0.35rem; font-variant-numeric: tabular-nums; }
+.nobar { font-size: 0.78rem; color: var(--bad); font-style: italic; }
+.axis .track { background: none; border-top: 1px solid var(--ink-3); min-height: 1.2rem; }
+.ticks span { position: absolute; top: 0.15rem; transform: translateX(-50%); font: 0.68rem var(--f-data); color: var(--ink-3); }
+.ticks span:first-child { transform: none; }
+.ticks span:last-child { transform: translateX(-100%); }
+.mem .track { background-size: 25% 100%; }
+[data-tip]:hover::after, [data-tip]:focus::after { content: attr(data-tip); position: absolute; left: 100%; top: 50%; transform: translate(0.5rem, -50%);
+  background: var(--ink); color: var(--bg); font: 0.75rem var(--f-data); padding: 0.25rem 0.45rem; border-radius: 4px; white-space: nowrap; z-index: 2; pointer-events: none; }
+[data-tip] { cursor: default; }
+[data-tip]:hover { filter: brightness(1.12); }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1.5rem 2.5rem; }
+.two > div { display: grid; gap: 0.6rem; align-content: start; min-width: 0; }
+.big { font: 600 1.6rem/1.1 var(--f-data); font-variant-numeric: tabular-nums; }
+.big small { font-size: 0.8rem; color: var(--ink-3); font-weight: 400; }
+ul.plain { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.45rem; }
+dl.kv { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.2rem; font-size: 0.88rem; }
+dl.kv dt { color: var(--ink-3); font-family: var(--f-data); font-size: 0.8rem; }
+dl.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+pre { margin: 0; padding: 0.8rem 1rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; overflow-x: auto; font: 0.8rem/1.5 var(--f-data); }
+@media (max-width: 520px) {
+  .brow { grid-template-columns: 1fr 3.4rem; }
+  .brow .bn { grid-column: 1 / -1; }
+  .brow.axis .bn { display: none; }
+  dl.kv { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: no-preference) { .bar { transition: filter 120ms; } }
+</style>
+
+<main>
+<header class="prose" style="display:grid;gap:0.9rem">
+  <span class="eyebrow">Benchmark · 28 Oct 2026</span>
+  <h1>Which server should edit images and run prompt enhance?</h1>
+  <p class="lede">IncreArt can drive image editing through sd-server or KoboldCpp, on ROCm or Vulkan, with flash attention and CPU offload on or off. This compares every single-GPU combination on one real job: a 1&nbsp;megapixel Qwen-Image&nbsp;2.1 edit with one reference image, plus prompt enhance (PE) with Qwen3-VL&nbsp;8B on the GPU and on the CPU.</p>
+  <div class="meta"><span>2× Radeon AI PRO R9700 32 GB</span><span>i9-14900K · 188 GB RAM</span><span>ROCm 7.2.4 · Mesa 25.0.7 RADV</span><span>Linux 6.17</span></div>
+</header>
+
+<section class="recs" aria-labelledby="rec-h">
+  <h2 id="rec-h">Recommendations</h2>
+  <ol>
+    <li><strong>Edit images with sd-server on ROCm with flash attention.</strong> It is the fastest setup: 102&nbsp;s per image once the prompt is encoded (126&nbsp;s for a new prompt) at 25.6&nbsp;GiB of VRAM.</li>
+    <li><strong>Add CPU offload when the card must hold something else.</strong> Offload costs only 4% (105&nbsp;s per image) and cuts VRAM to 4.5&nbsp;GiB, using 17.3&nbsp;GiB of RAM instead.</li>
+    <li><strong>Keep PE off the card that edits images.</strong> Sharing one card, images slowed by 41% (146&nbsp;s each) and PE fell from 58 to about 2.6&nbsp;tokens/s, because together they overflow 32&nbsp;GiB and part of their memory moves to system RAM. Put PE on the other card. If both must share one, the offload setup above should leave room (not measured).</li>
+    <li><strong>Run PE on a GPU.</strong> Answers take 2.0–2.9&nbsp;s on a GPU against 5.5–80.7&nbsp;s on the CPU, for 7.2&nbsp;GiB of VRAM.</li>
+    <li><strong>Use KoboldCpp only with GGUF files and the text encoder on the GPU.</strong> Set up as in its official Qwen-Image&nbsp;2.1 template, it takes 201&nbsp;s per image (2.0× sd-server on ROCm) in 14.5&nbsp;GiB of VRAM. Its default puts the text encoder on the CPU, and the int8 files expand to 29&nbsp;GiB and fail.</li>
+    <li><strong>Avoid the rest.</strong> Without flash attention ROCm is 3.5× slower; sd-server on Vulkan is 4.7× slower, and about 50&nbsp;minutes per image without flash attention.</li>
+  </ol>
+</section>
+
+<section aria-labelledby="res-h">
+  <h2 id="res-h">Results</h2>
+  <p class="prose">Times are wall-clock seconds per image as the app sees them, 20 steps at 1024×1024. “Repeat” images reuse the encoded prompt and reference (only the seed changes); “new prompt” is the first image after loading, which encodes them. Memory is the peak while generating.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Verdict</th><th>Server</th><th>Backend</th><th>Options</th><th class="n">Repeat</th><th class="n">New prompt</th><th class="n">VRAM GiB</th><th class="n">Spill GiB</th><th class="n">RAM GiB</th><th>Notes</th></tr></thead>
+    <tbody>
+<tr><td><span class="pill best">Fastest</span></td><td>sd-server</td><td>ROCm (HIP)</td><td>flash attention</td><td class="n">102 s</td><td class="n">126 s</td><td class="n">25.6</td><td class="n">0.0</td><td class="n">4.0</td><td class="note">card1 103.2 s, card2 100.2 s</td></tr>
+<tr><td><span class="pill best">Least VRAM</span></td><td>sd-server</td><td>ROCm (HIP)</td><td>flash attention, offload to CPU</td><td class="n">105 s</td><td class="n">112 s</td><td class="n">4.5</td><td class="n">0.0</td><td class="n">17.3</td><td class="note">weights stay in RAM and stream to the card each step</td></tr>
+<tr><td><span class="pill slow">Slow</span></td><td>sd-server</td><td>ROCm (HIP)</td><td>no flash attention</td><td class="n">352 s</td><td class="n">357 s</td><td class="n">29.5</td><td class="n">0.0</td><td class="n">4.3</td><td class="note"></td></tr>
+<tr><td><span class="pill slow">Slow</span></td><td>sd-server</td><td>Vulkan (RADV)</td><td>flash attention</td><td class="n">481 s</td><td class="n">485 s</td><td class="n">24.2</td><td class="n">2.3</td><td class="n">13.5</td><td class="note">VRAM: own allocations, which read ~2 GiB low on Vulkan; card2&#x27;s total rose 29.8 GiB</td></tr>
+<tr><td><span class="pill slow">Slow</span></td><td>sd-server</td><td>Vulkan (RADV)</td><td>flash attention, offload to CPU</td><td class="n">478 s</td><td class="n">488 s</td><td class="n">18.0</td><td class="n">2.3</td><td class="n">27.8</td><td class="note">run on card1; offload saves little on Vulkan</td></tr>
+<tr><td><span class="pill bad">Impractical</span></td><td>sd-server</td><td>Vulkan (RADV)</td><td>no flash attention</td><td class="n">≈50 min</td><td class="n">–</td><td class="n">28.0</td><td class="n">0.4</td><td class="n">6.6</td><td class="note">stopped at step 13 of 20: ~150 s per step</td></tr>
+<tr><td><span class="pill ok">Works</span></td><td>KoboldCpp</td><td>Vulkan</td><td>official template: Q4_K GGUF, offload, text encoder on GPU</td><td class="n">201 s</td><td class="n">205 s</td><td class="n">14.5</td><td class="n">9.9</td><td class="n">1.2</td><td class="note">encodes the prompt again for every image; loads in ~13 s</td></tr>
+<tr><td><span class="pill ok">Works</span></td><td>KoboldCpp</td><td>Vulkan</td><td>Q8_0 GGUF, text encoder on GPU</td><td class="n">205 s</td><td class="n">206 s</td><td class="n">22.1</td><td class="n">0.1</td><td class="n">1.8</td><td class="note">run on card2 after it was idle</td></tr>
+<tr><td><span class="pill bad">Doesn't fit</span></td><td>KoboldCpp</td><td>Vulkan</td><td>int8 files (sd-server&#x27;s)</td><td class="n">–</td><td class="n">–</td><td class="n">29.1</td><td class="n">–</td><td class="n">5.7</td><td class="note">weights expand to 29 GiB and the image fails; with the default CPU text encoder it took minutes per image</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="prose" style="font-size:0.85rem;color:var(--ink-2)">Spill is GPU memory placed in system RAM (GTT), which the card reads over PCIe. RAM is the server's resident memory. ≈ marks an estimate from step times.</p>
+</section>
+
+<section class="charts" aria-label="Charts">
+  <figure>
+    <h3>Seconds per image (repeat)</h3>
+    <div class="chart">
+<div class="brow"><span class="bn">ROCm · flash attention</span><div class="track"><div class="bar" style="width:16.95%" tabindex="0" data-tip="101.7 s per image"></div></div><span class="bv">102 s</span></div>
+<div class="brow"><span class="bn">ROCm · flash attention, offload to CPU</span><div class="track"><div class="bar" style="width:17.56%" tabindex="0" data-tip="105.3 s per image"></div></div><span class="bv">105 s</span></div>
+<div class="brow"><span class="bn">ROCm · no flash attention</span><div class="track"><div class="bar" style="width:58.73%" tabindex="0" data-tip="352.4 s per image"></div></div><span class="bv">352 s</span></div>
+<div class="brow"><span class="bn">Vulkan · flash attention</span><div class="track"><div class="bar" style="width:80.08%" tabindex="0" data-tip="480.5 s per image"></div></div><span class="bv">481 s</span></div>
+<div class="brow"><span class="bn">Vulkan · flash attention, offload to CPU</span><div class="track"><div class="bar" style="width:79.61%" tabindex="0" data-tip="477.7 s per image"></div></div><span class="bv">478 s</span></div>
+<div class="brow"><span class="bn">Vulkan · no flash attention</span><div class="track"><div class="bar broken" style="width:100.00%" tabindex="0" data-tip="2995.0 s per image (estimated)"></div></div><span class="bv">≈50 min</span></div>
+<div class="brow"><span class="bn">KoboldCpp · official template: Q4_K GGUF, offload, text encoder on GPU</span><div class="track"><div class="bar" style="width:33.50%" tabindex="0" data-tip="201.0 s per image"></div></div><span class="bv">201 s</span></div>
+<div class="brow"><span class="bn">KoboldCpp · Q8_0 GGUF, text encoder on GPU</span><div class="track"><div class="bar" style="width:34.09%" tabindex="0" data-tip="204.5 s per image"></div></div><span class="bv">205 s</span></div>
+<div class="brow"><span class="bn">KoboldCpp · int8 files</span><div class="track"><span class="nobar">no image: out of VRAM</span></div><span class="bv">–</span></div><div class="brow axis"><span class="bn"></span><div class="track ticks"><span style="left:0.00%">0</span><span style="left:16.67%">100</span><span style="left:33.33%">200</span><span style="left:50.00%">300</span><span style="left:66.67%">400</span><span style="left:83.33%">500</span><span style="left:100.00%">600</span></div><span class="bv">s</span></div>
+    </div>
+    <figcaption>Shorter is better. Bars past 600&nbsp;s are cut; the value is on the right.</figcaption>
+  </figure>
+  <figure class="mem">
+    <h3>Peak memory while generating</h3>
+    <div class="legend"><span><i style="background:var(--s1)"></i>VRAM</span><span><i style="background:var(--s2)"></i>Host RAM</span></div>
+    <div class="chart">
+<div class="brow"><span class="bn">ROCm · flash attention</span><div class="pair"><div class="track"><div class="bar s1" style="width:79.92%" tabindex="0" data-tip="VRAM 25.6 GiB"></div><span class="lab">25.6</span></div><div class="track"><div class="bar s2" style="width:12.53%" tabindex="0" data-tip="Host RAM 4.0 GiB"></div><span class="lab">4.0</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">ROCm · flash attention, offload to CPU</span><div class="pair"><div class="track"><div class="bar s1" style="width:14.14%" tabindex="0" data-tip="VRAM 4.5 GiB"></div><span class="lab">4.5</span></div><div class="track"><div class="bar s2" style="width:53.96%" tabindex="0" data-tip="Host RAM 17.3 GiB"></div><span class="lab">17.3</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">ROCm · no flash attention</span><div class="pair"><div class="track"><div class="bar s1" style="width:92.04%" tabindex="0" data-tip="VRAM 29.5 GiB"></div><span class="lab">29.5</span></div><div class="track"><div class="bar s2" style="width:13.46%" tabindex="0" data-tip="Host RAM 4.3 GiB"></div><span class="lab">4.3</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">Vulkan · flash attention</span><div class="pair"><div class="track"><div class="bar s1" style="width:75.72%" tabindex="0" data-tip="VRAM 24.2 GiB"></div><span class="lab">24.2</span></div><div class="track"><div class="bar s2" style="width:42.15%" tabindex="0" data-tip="Host RAM 13.5 GiB"></div><span class="lab">13.5</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">Vulkan · flash attention, offload to CPU</span><div class="pair"><div class="track"><div class="bar s1" style="width:56.22%" tabindex="0" data-tip="VRAM 18.0 GiB"></div><span class="lab">18.0</span></div><div class="track"><div class="bar s2" style="width:87.01%" tabindex="0" data-tip="Host RAM 27.8 GiB"></div><span class="lab">27.8</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">Vulkan · no flash attention</span><div class="pair"><div class="track"><div class="bar s1" style="width:87.50%" tabindex="0" data-tip="VRAM 28.0 GiB"></div><span class="lab">28.0</span></div><div class="track"><div class="bar s2" style="width:20.58%" tabindex="0" data-tip="Host RAM 6.6 GiB"></div><span class="lab">6.6</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">KoboldCpp · official template: Q4_K GGUF, offload, text encoder on GPU</span><div class="pair"><div class="track"><div class="bar s1" style="width:45.17%" tabindex="0" data-tip="VRAM 14.5 GiB"></div><span class="lab">14.5</span></div><div class="track"><div class="bar s2" style="width:3.68%" tabindex="0" data-tip="Host RAM 1.2 GiB"></div><span class="lab">1.2</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">KoboldCpp · Q8_0 GGUF, text encoder on GPU</span><div class="pair"><div class="track"><div class="bar s1" style="width:68.93%" tabindex="0" data-tip="VRAM 22.1 GiB"></div><span class="lab">22.1</span></div><div class="track"><div class="bar s2" style="width:5.68%" tabindex="0" data-tip="Host RAM 1.8 GiB"></div><span class="lab">1.8</span></div></div><span class="bv"></span></div>
+<div class="brow"><span class="bn">KoboldCpp · int8 files</span><div class="pair"><div class="track"><div class="bar s1" style="width:90.80%" tabindex="0" data-tip="VRAM 29.1 GiB"></div><span class="lab">29.1</span></div><div class="track"><div class="bar s2" style="width:17.89%" tabindex="0" data-tip="Host RAM 5.7 GiB"></div><span class="lab">5.7</span></div></div><span class="bv"></span></div><div class="brow axis"><span class="bn"></span><div class="track ticks"><span style="left:0.00%">0</span><span style="left:25.00%">8</span><span style="left:50.00%">16</span><span style="left:75.00%">24</span><span style="left:100.00%">32</span></div><span class="bv">GiB</span></div>
+    </div>
+    <figcaption>One card has 32&nbsp;GiB of VRAM. Offload trades VRAM for RAM almost one for one.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="pe-h">
+  <h2 id="pe-h">Prompt enhance</h2>
+  <p class="prose">KoboldCpp with Qwen3-VL 8B (Q4_K_M, 8192 context) rewriting the edit prompt from the reference image at 768&nbsp;px, three asks each, up to 700 tokens per answer.</p>
+  <div class="two">
+    <div>
+      <h3>On a GPU (Vulkan)</h3>
+      <p class="big">2.0–2.9 <small>s per answer</small></p>
+      <dl class="kv"><dt>generation</dt><dd>58 tokens/s</dd><dt>reading prompt</dt><dd>301 tokens/s (first ask)</dd><dt>answers</dt><dd>88–111 tokens</dd><dt>load</dt><dd>15 s</dd><dt>memory</dt><dd>7.2 GiB VRAM, 0.4 GiB RAM</dd></dl>
+    </div>
+    <div>
+      <h3>On the CPU</h3>
+      <p class="big">5.5–80.7 <small>s per answer</small></p>
+      <dl class="kv"><dt>generation</dt><dd>8.8 tokens/s</dd><dt>reading prompt</dt><dd>20 tokens/s (first ask)</dd><dt>answers</dt><dd>47–700 tokens; one ran to the 700-token cap</dd><dt>load</dt><dd>7 s</dd><dt>memory</dt><dd>7.4 GiB RAM</dd></dl>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="mix-h">
+  <h2 id="mix-h">PE and image editing on one card</h2>
+  <div class="prose" style="display:grid;gap:0.8rem">
+    <p>sd-server (ROCm, flash attention) and the PE server loaded together on card1, with PE answering one request after another for the whole 20&nbsp;minutes of image generation (29 answers). This is the worst case: in the app PE runs only when asked.</p>
+    <ul class="plain">
+      <li>The first two images took 190&nbsp;s and 270&nbsp;s; after that each took 146&nbsp;s, against 103.2&nbsp;s on the same card alone.</li>
+      <li>PE generated 58&nbsp;tokens/s at first and about 2.6&nbsp;tokens/s by the end. After the images stopped it ran at 8&nbsp;tokens/s, because its memory had been moved to system RAM and stayed there.</li>
+      <li>Together they peaked at 29.8&nbsp;GiB of VRAM plus 4.1&nbsp;GiB placed in system memory.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="load-h">
+  <h2 id="load-h">Loading</h2>
+  <div class="prose" style="display:grid;gap:0.8rem">
+    <p>sd-server loads the model on the first request, so load time shows up in the warm-up (one 512&nbsp;px step).</p>
+    <ul class="plain">
+      <li>The first case of the day took 222&nbsp;s on ROCm, reading about 17&nbsp;GB of models from disk. Later ROCm cases took 9–27&nbsp;s and Vulkan 11&nbsp;s, with the files in the page cache.</li>
+      <li>KoboldCpp loaded the GGUF files in about 13&nbsp;s. With the int8 files it took 2.8&nbsp;minutes, converting every tensor.</li>
+      <li>These are indicative only. Another program on this machine (increbot) frees and refills RAM in response to memory use, which decides whether model files are still cached.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="meth-h">
+  <h2 id="meth-h">Method</h2>
+  <div class="prose" style="display:grid;gap:0.8rem">
+    <ul class="plain">
+      <li><strong>Job.</strong> Qwen-Image 2.1 int8 (diffusion model 7.3&nbsp;GB, Qwen3-VL 8B int8 text encoder 9.4&nbsp;GB, bf16 VAE), euler, 20 steps, CFG 2, 1024×1024, one 1024×1024 reference, an edit prompt turning a scene to winter. Seeds 1, 2, 3… so every image is new work.</li>
+      <li><strong>Repeats.</strong> At least three repeat images, more if they differed by over 3%. Setups taking minutes per image timed one repeat after the new-prompt image; repeats varied by under 1.5% everywhere they were measured more than once.</li>
+      <li><strong>Two cards at once.</strong> Cases ran in two lanes, one per card. ROCm with flash attention ran on both as a control: 103.2&nbsp;s on card1 and 100.2&nbsp;s on card2, 3% apart, with identical memory.</li>
+      <li><strong>Memory.</strong> Sampled every 100&nbsp;ms. VRAM is the rise in the card's used memory where the card had no other user, and the server's own allocations (<code>/proc/&lt;pid&gt;/fdinfo</code>) on card2, which another program also used. With offload on ROCm, the per-process count includes host memory mapped for the card (17.3&nbsp;GiB), so the card's rise is the true figure. On Vulkan the per-process count read 1.9&nbsp;GiB below the card's rise on the idle card, so card2's Vulkan figures are likely a little low.</li>
+      <li><strong>Stopped early.</strong> Vulkan without flash attention needed ~150&nbsp;s per step and was stopped. KoboldCpp was first run with the int8 files and its default CPU text encoder; that looked CPU-bound and was stopped, then rerun as described above.</li>
+      <li><strong>KoboldCpp runs.</strong> Done after the main run, with nothing else on either card: the template's files (leejet's Qwen-Image&nbsp;2.1 GGUF, Qwen3-VL&nbsp;8B Q4_K_M with its F16 mmproj as <code>--sdclip1</code>, <code>--sdclipdevice main</code>). Its images are as good, but differ from sd-server's for the same seed.</li>
+    </ul>
+  </div>
+  <dl class="kv">
+    <dt>sd-server</dt><dd>stable-diffusion.cpp fd21ecf, HIP and Vulkan builds, <code>--conditioning-cache-size 32</code>, <code>--flash-attn on|off</code>, <code>--offload-to-cpu</code></dd>
+    <dt>KoboldCpp</dt><dd>1.123.1, <code>--usevulkan N</code>, <code>--sdflashattention</code>, <code>--sdoffloadcpu</code></dd>
+    <dt>PE model</dt><dd>Qwen3-VL-8B-Instruct Q4_K_M + mmproj F16</dd>
+    <dt>Runner</dt><dd><code>scripts/bench-servers.sh</code>, <code>crates/increart-core/examples/bench.rs</code></dd>
+  </dl>
+  <pre>scripts/bench-servers.sh tmp/bench-servers   # both GPUs idle; skips cases that already have a result</pre>
+</section>
+</main>

@@ -12,7 +12,8 @@ use chrono::TimeZone;
 use image::{DynamicImage, ImageEncoder, Rgb, RgbImage, Rgba, RgbaImage};
 use increart_core::model::*;
 use increart_core::{
-    Disposal, Error, IdeaLoc, ImageRef, Library, NewIdea, NewRun, Original, Store, Tree, Verdict, fsutil, link, png,
+    Disposal, Error, IdeaLoc, ImageRef, Library, NewIdea, NewRun, Original, Store, Tree, Verdict, container, fsutil,
+    import, link, png,
 };
 
 fn t0() -> increart_core::id::Timestamp {
@@ -32,6 +33,13 @@ fn png_bytes(img: DynamicImage) -> Vec<u8> {
 fn jpeg_bytes(img: RgbImage) -> Vec<u8> {
     let mut out = Vec::new();
     DynamicImage::ImageRgb8(img).write_to(&mut Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+    out
+}
+
+#[cfg(feature = "avif")]
+fn avif_bytes(img: RgbaImage) -> Vec<u8> {
+    let mut out = Vec::new();
+    DynamicImage::ImageRgba8(img).write_to(&mut Cursor::new(&mut out), image::ImageFormat::Avif).unwrap();
     out
 }
 
@@ -237,6 +245,14 @@ fn whole_library_through_the_api() {
     assert!(matches!(lib.create_project(Path::new("clients/fox"), None, &[]), Err(Error::Refused(_))));
     let run = lib.create_run(&project, new_run(vec![ImageRef::input(photo.clone())], Mode::Generate, 4)).unwrap();
     let (_, run_def) = lib.find_run(&run).unwrap();
+    // what's left to generate, by the scan as by the disk
+    let by_scan = |lib: &Library| {
+        let ix = lib.scan().unwrap();
+        let p = ix.projects.iter().find(|p| p.project.id == project).unwrap();
+        p.pending_seeds(p.runs.iter().find(|r| r.id == run).unwrap()).collect::<Vec<_>>()
+    };
+    assert_eq!(by_scan(&lib), lib.pending_seeds(&run).unwrap());
+    assert_eq!(by_scan(&lib).len(), 4);
     let mut outs = Vec::new();
     for seed in 0..4 {
         let (id, link_path) =
@@ -246,7 +262,9 @@ fn whole_library_through_the_api() {
         assert!(png::text(&bytes, "parameters").unwrap().unwrap().starts_with("a fox"), "parameters kept");
         assert_eq!(lib.recipe(&id).unwrap().unwrap().seed, seed);
         outs.push((id, link_path));
+        assert_eq!(by_scan(&lib), lib.pending_seeds(&run).unwrap());
     }
+    assert!(by_scan(&lib).is_empty());
     // the output records its inputs and both carry a BLAKE3 pixel hash
     let photo_ref = ImageRef::input(photo.clone());
     let photo_bytes = fs::read(lib.image_path(&photo_ref)).unwrap();
@@ -359,6 +377,138 @@ fn whole_library_through_the_api() {
     let ix = lib.scan().unwrap();
     assert_eq!(ix.ideas.iter().filter(|e| e.idea.id == next).count(), 1);
     assert!(ix.ideas.iter().all(|e| e.idea.id <= next));
+}
+
+/// Converts every store image to `to` the way the GUI does: encode, then
+/// install.
+fn convert(lib: &mut Library, to: StoreFormat) {
+    let c = lib.conversion(to).unwrap();
+    assert!(!c.images.is_empty());
+    let done: Vec<_> = c.images.iter().filter_map(|r| c.encode(r).unwrap()).collect();
+    assert_eq!(lib.install(done).unwrap(), []);
+    assert!(lib.conversion(to).unwrap().images.is_empty());
+}
+
+/// A link's image, checking it has the store file's pixels (a copy's usage
+/// counts may lag, so not its bytes).
+fn same_pixels(lib: &Library, rel: &Path, store: Store) -> ImageRef {
+    let abs = lib.path(rel);
+    let r = link::read_ref(&abs, store).unwrap().unwrap_or_else(|| panic!("{} is not a link", rel.display()));
+    let px = |p: &Path| import::decode_pixels(&fs::read(p).unwrap()).unwrap().hash();
+    assert_eq!(px(&abs), px(&lib.image_path(&r)), "{}", rel.display());
+    r
+}
+
+#[test]
+fn webp_store_and_conversion_both_ways() {
+    for mode in [LinkMode::Symlink, LinkMode::Hardlink, LinkMode::Copy] {
+        let (_tmp, mut lib) = setup(Some(mode));
+        let root = lib.root().to_path_buf();
+        let format_number = || increart_core::rsnfmt::read::<LibraryMeta>(&root.join("library.rsn")).unwrap().format;
+        // a PNG library first, then WebP for new images: a mixed one
+        let photo =
+            ImageRef::input(lib.import_bytes(&jpeg_bytes(picture(20, 20, 3)), &original("a.jpg")).unwrap().image);
+        lib.set_store_format(StoreFormat::Webp).unwrap();
+        assert_eq!(format_number(), LIBRARY_FORMAT_WEBP);
+        let rgba = RgbaImage::from_fn(8, 8, |x, y| Rgba([200, (y * 9) as u8, 10, (x * 30) as u8]));
+        let sticker = lib.import_bytes(&png_bytes(DynamicImage::ImageRgba8(rgba)), &original("s.png")).unwrap().image;
+        let sticker = ImageRef::input(sticker);
+        assert_eq!(lib.format_of(&photo), StoreFormat::Png);
+        assert_eq!(lib.format_of(&sticker), StoreFormat::Webp);
+        let idea = lib
+            .new_idea(NewIdea { images: vec![photo.id.clone(), sticker.id.clone()], ..NewIdea::text("A", "") })
+            .unwrap();
+        let idea_dir = lib.find_idea(&idea).unwrap().1;
+        assert!(idea_dir.join("1-a.png").exists() && idea_dir.join("2-s.webp").exists());
+        let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+        let run = lib.create_run(&project, new_run(vec![sticker.clone()], Mode::Generate, 2)).unwrap();
+        assert_eq!(lib.usage_counts(&sticker).unwrap(), counts(1, 0), "patched in a WebP file");
+        let (_, def) = lib.find_run(&run).unwrap();
+        let (out, at) = lib.write_output(&run, 0, 0, &sdserver_png(1), &recipe(&def, 0, None)).unwrap();
+        let out = ImageRef::output(out);
+        assert_eq!(at.extension().unwrap(), "webp");
+        // sd-server's chunk travels with ours; servers get PNG
+        let bytes = fs::read(lib.image_path(&out)).unwrap();
+        assert_eq!(container::format_of(&bytes), Some(StoreFormat::Webp));
+        assert!(container::text(&bytes, "parameters").unwrap().is_some());
+        assert_eq!(lib.recipe(&out.id).unwrap().unwrap().seed, 0);
+        assert!(lib.read_verified(&sticker).unwrap().starts_with(png::SIGNATURE));
+        let reviewed = lib.review_output(&at, Some(Verdict::Good)).unwrap();
+        lib.create_folder(Tree::Collections, Path::new(""), Some("best")).unwrap();
+        let in_coll = lib.add_to_collection(Path::new("best"), &out.id).unwrap();
+        assert_eq!(in_coll.extension().unwrap(), "webp");
+
+        let hashes: Vec<String> = [&photo, &sticker, &out]
+            .iter()
+            .map(|r| import::decode_pixels(&fs::read(lib.image_path(r)).unwrap()).unwrap().hash())
+            .collect();
+        let check = |lib: &Library, ext: &str| {
+            let ix = lib.scan().unwrap();
+            assert!(ix.problems.is_empty(), "{mode:?} {:?}", ix.problems);
+            assert!(lib.unreferenced().unwrap().is_empty());
+            for (r, h) in [&photo, &sticker, &out].iter().zip(&hashes) {
+                let bytes = fs::read(lib.image_path(r)).unwrap();
+                assert_eq!(&import::decode_pixels(&bytes).unwrap().hash(), h);
+                assert_eq!(container::text(&bytes, png::KEY_PIXELS).unwrap().as_ref(), Some(h));
+                assert_eq!(container::text(&bytes, png::KEY_ID).unwrap().as_deref(), Some(r.id.as_str()));
+            }
+            assert_eq!(lib.usage_counts(&sticker).unwrap(), counts(1, 0));
+            assert_eq!(lib.source_info(&photo.id).unwrap().unwrap().original_name.as_deref(), Some("a.jpg"));
+            let p = ix.project(&project).unwrap();
+            assert_eq!(p.outputs.len(), 1);
+            assert_eq!(p.outputs[0].path.extension().unwrap(), ext);
+            assert_eq!(same_pixels(lib, &p.outputs[0].path, Store::Output), out);
+            assert_eq!(ix.collection_links.len(), 1);
+            assert_eq!(ix.collection_links[0].path.extension().unwrap(), ext);
+            same_pixels(lib, &ix.collection_links[0].path, Store::Output);
+            let dir = &ix.idea(&idea).unwrap().dir;
+            assert_eq!(same_pixels(lib, &dir.join(format!("1-a.{ext}")), Store::Input), photo);
+            assert_eq!(same_pixels(lib, &dir.join(format!("2-s.{ext}")), Store::Input), sticker);
+            for r in [&photo, &sticker, &out] {
+                assert!(lib.image_path(r).extension().unwrap() == ext);
+            }
+        };
+        assert!(reviewed.ends_with(format!("{}", at.file_name().unwrap().to_string_lossy())));
+
+        convert(&mut lib, StoreFormat::Webp);
+        check(&lib, "webp");
+        assert_eq!(lib.store_counts().unwrap().png.0, 0);
+        // the verifier follows symlinks only
+        if mode == LinkMode::Symlink {
+            let report = common::verify(&root);
+            assert!(report.trim_end().ends_with("3 WebP pixel hashes left unchecked; problems: none"), "{report}");
+        }
+
+        lib.set_store_format(StoreFormat::Png).unwrap();
+        assert_eq!(format_number(), LIBRARY_FORMAT_WEBP, "WebP files remain");
+        convert(&mut lib, StoreFormat::Png);
+        check(&lib, "png");
+        assert_eq!(format_number(), LIBRARY_FORMAT);
+        if mode == LinkMode::Symlink {
+            let report = common::verify(&root);
+            assert!(report.trim_end().ends_with(" refs; problems: none"), "{report}");
+        }
+
+        // reopens with the setting
+        lib.set_store_format(StoreFormat::Webp).unwrap();
+        drop(lib);
+        let lib = Library::open(&root).unwrap();
+        assert_eq!(lib.store_format(), StoreFormat::Webp);
+        assert!(lib.problems().is_empty(), "{:?}", lib.problems());
+    }
+}
+
+#[cfg(feature = "avif")]
+#[test]
+fn avif_imports_as_png() {
+    let (_tmp, mut lib) = setup(None);
+    let avif =
+        avif_bytes(RgbaImage::from_fn(12, 8, |x, y| Rgba([(x * 20) as u8, (y * 30) as u8, 90, 255 - (x * 20) as u8])));
+    let still = lib.import_bytes(&avif, &original("still.avif")).unwrap().image;
+    let src = lib.source_info(&still).unwrap().unwrap();
+    assert_eq!((src.original_format.as_str(), &src.conversions[..]), ("avif", &["avif -> png".to_string()][..]));
+    let av = image::load_from_memory(&fs::read(lib.image_path(&ImageRef::input(still.clone()))).unwrap()).unwrap();
+    assert_eq!((av.width(), av.height(), av.color().has_alpha()), (12, 8, true));
 }
 
 #[test]
@@ -561,7 +711,12 @@ fn usage_counts_live_in_the_images() {
     let mut lib = Library::open(&root).unwrap();
     let torn = !png::find_header_chunk(&path_b, png::KEY_USAGE).unwrap().unwrap().2;
     assert!(torn, "open doesn't check (the GUI does, in the background)");
+    // the GUI's lock-free read: only the torn one needs the lock
+    let check = lib.usage_check().unwrap();
+    assert!(check.covers(&a), "a higher count covers the runs");
+    assert!(!check.covers(&b), "torn");
     lib.check_all_usage().unwrap();
+    assert!(lib.usage_check().unwrap().covers(&b));
     assert_eq!(usage(&lib, &a), counts(7, 0));
     assert_eq!(usage(&lib, &b), counts(1, 1), "repaired from the runs");
     assert!(png::find_header_chunk(&path_b, png::KEY_USAGE).unwrap().unwrap().2);
@@ -570,17 +725,23 @@ fn usage_counts_live_in_the_images() {
 
 #[test]
 fn imports_record_the_original_files_times_and_mode() {
-    use std::os::unix::fs::PermissionsExt;
     let (tmp, mut lib) = setup(None);
     let file = tmp.path().join("fox.png");
     fs::write(&file, png_bytes(DynamicImage::ImageRgb8(picture(8, 8, 3)))).unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    }
     let id = lib.import_file(&file).unwrap().image;
     let bytes = fs::read(lib.image_path(&ImageRef { id, store: Store::Input })).unwrap();
     let source: SourceInfo = serde_json::from_str(&png::text(&bytes, png::KEY_SOURCE).unwrap().unwrap()).unwrap();
-    assert_eq!(source.original_mode, Some(0o640));
-    assert!(source.original_mtime.is_some() && source.original_ctime.is_some() && source.original_atime.is_some());
-    assert!(source.original_uid.is_some() && source.original_gid.is_some());
+    assert!(source.original_mtime.is_some() && source.original_atime.is_some());
+    // the inode change time, mode and owner are Unix's only
+    if cfg!(unix) {
+        assert_eq!(source.original_mode, Some(0o640));
+        assert!(source.original_ctime.is_some() && source.original_uid.is_some() && source.original_gid.is_some());
+    }
 }
 
 #[test]

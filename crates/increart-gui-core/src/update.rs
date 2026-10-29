@@ -11,9 +11,9 @@ use increart_core::scheduler::Order;
 use increart_core::{Id, IdeaLoc, ImageRef, Index, NewIdea, Tree, Verdict};
 
 use increart_core::HistoryKey;
-use increart_core::config::Resolution;
+use increart_core::config::{Resolution, TileFormat};
 use increart_core::history::{HistoryEntry, HistoryKind};
-use increart_core::model::{Recipe, SourceInfo};
+use increart_core::model::{ImageEdits, Recipe, SourceInfo, StoreFormat};
 use increart_core::model::{SweepParam, SweepTag};
 use increart_core::pe::PeRun;
 use increart_core::prompts::{BatchAsk, EnhanceAsk, PromptPreset, PromptPresets, SUGGEST_COUNT, SuggestAsk};
@@ -61,6 +61,8 @@ pub enum Msg {
     CancelEdit,
     AddStartServer,
     AddConnectServer,
+    /// A KoboldCpp image server, started by the app.
+    AddKoboldServer,
     EditServer(usize, ServerConfig),
     RemoveServer(usize),
     SetPresetName(String),
@@ -78,6 +80,21 @@ pub enum Msg {
     DraftDevice(String, bool),
     /// Wizard: save the draft as a preset (named after its devices) and open it.
     FinishServerWizard,
+    /// Wizard: the KoboldCpp page (true) or the sd-server one.
+    WizardKobold(bool),
+    /// The KoboldCpp page's GPUs (`vulkaninfo`).
+    /// The GPUs listed, and the RAM available (GiB).
+    WizardGpus(Result<Vec<increart_core::tiers::Gpu>, String>, Option<f64>),
+    /// The wizard's GPU runtime changed: its GPUs listed again.
+    WizardRuntime(increart_core::pe::GpuRuntime),
+    /// The KoboldCpp page edited (binary, folder, GPUs, layout).
+    EditKoboldWizard(crate::state::KoboldWizard),
+    /// The KoboldCpp page: download its models, then save and open.
+    FinishKoboldWizard,
+    WizardDownload(crate::state::WizardDownload),
+    /// Every model there (or not).
+    WizardDownloaded(Result<(), String>),
+    CancelWizardDownload,
     /// Opens the editor's servers without saving them (asking first when
     /// servers are already in use).
     OpenDraft,
@@ -91,6 +108,9 @@ pub enum Msg {
     /// stopped are gone (the names of
     /// those the app had started; connected ones are only let go).
     ServersStopped(Vec<String>),
+    /// What the open servers can load (by server name), for the model
+    /// presets Generate offers.
+    ServerModels(Vec<(String, increart_core::sdserver::Loadable)>),
     /// A starting server's latest log line (attempt, server).
     ServerLog(u32, usize, String),
     /// Leave the dialog while servers are still opening; they join when up.
@@ -109,13 +129,35 @@ pub enum Msg {
     /// Leaves a server dialog opened from the main window, keeping the
     /// servers in use.
     CloseServerDialog,
-    /// Shows or hides the sd-server settings window.
+    /// Shows or hides the server settings window.
     ServerSettings(bool),
     /// Shows or hides the server status window.
     ServerStatus(bool),
     /// The Settings window.
     Settings(bool),
     SetNotifications(increart_core::notify::Notifications),
+    SettingsTab(crate::state::SettingsTab),
+    /// The library's store format and counts (after `Effect::StoreInfo`
+    /// or `Effect::SetStoreFormat`).
+    StoreInfo(Result<crate::state::StoreInfo, String>),
+    /// The format new store images are written in (this library only).
+    SetStoreFormat(StoreFormat),
+    /// Convert every store image to the library's store format (asks
+    /// first).
+    ConvertStore,
+    ConvertStoreConfirmed,
+    CancelConvert,
+    /// A store conversion's progress: images done, of how many.
+    Converting(usize, usize),
+    /// A store conversion ended: images converted, left as they were (gone,
+    /// or too large for WebP), failed (with why), and whether it was
+    /// cancelled.
+    Converted {
+        converted: usize,
+        skipped: usize,
+        failed: Vec<String>,
+        cancelled: bool,
+    },
     /// Settings → Test: plays a sound now, whatever the alerts' state.
     TestSound(increart_core::notify::Sound),
     /// A sound played (the player) or not; `test`: from Test.
@@ -216,6 +258,10 @@ pub enum Msg {
     RetagConfirm,
     RetagDismiss,
     QueueGenerate,
+    /// Queue, the references' names checked (or let be).
+    QueueChecked,
+    /// Queue, past the model check (the preset no open server can run).
+    QueueModelChecked,
     /// Queue the Sweep mode's runs (`true`: a big one was confirmed).
     QueueSweep(bool),
     /// Jobs: how the queue shares the servers (saved in the config).
@@ -314,10 +360,15 @@ pub enum Msg {
     ToggleReviewGrid,
     /// `C`: pin the current image as A and show the next as B (again: leave).
     Compare,
-    /// Swap A and B.
+    /// A and B change sides on screen (which one steps stays).
     SwapCompare,
     /// Rate the pinned image (A).
     ReviewPinned(Verdict),
+    /// `Shift+C` / Compare with…: the picker, for the image to compare this
+    /// one (or Review's current / the Output library's selected) against.
+    CompareWith(Option<ImageRef>),
+    /// The Output library's Grid compares against this (None: leave).
+    OutputCompare(Option<ImageRef>),
     // ---- output library
     OutputTab(OutputTab),
     OutputSource(OutputSource),
@@ -325,7 +376,7 @@ pub enum Msg {
     /// Deletes the bad images the Grid shows.
     DeleteShownRejected,
     // ---- confirmation
-    Ask(String, Box<Msg>),
+    Ask(Confirm),
     ConfirmYes,
     ConfirmNo,
     // ---- from the runtime
@@ -406,6 +457,12 @@ pub enum Msg {
     /// Files dropped on the Generate panel: imported as references.
     DropRefs(Vec<PathBuf>),
     SetSdServer(SdServerConfig),
+    /// The shared KoboldCpp binary (`Config::koboldcpp`).
+    SetKoboldBinary(String),
+    /// `--version` of the shared KoboldCpp binary, unless known.
+    CheckKoboldVersion,
+    /// (binary, `--version`'s answer)
+    KoboldVersion(String, Result<String, String>),
     // ---- drafts
     /// The GUI's clock (seconds); drives autosave.
     Tick(f64),
@@ -496,6 +553,10 @@ pub enum Msg {
     /// Clear the values offered for a blank (asks still avoid them).
     PeClearSuggestions(BlankKey),
     PeStatus(PeStatus),
+    /// How many of the PE servers are ready.
+    PeReady(usize),
+    /// The PE server (by name) taking an ask (by number).
+    PeOn(u64, String),
     /// How an ask (by number) is getting on.
     PeProgress(u64, PeStep),
     /// The server's answer to an ask (or what went wrong).
@@ -538,9 +599,9 @@ pub enum Msg {
     PeEditorEdit(increart_core::pe::PeServer),
     PeEditorSave,
     PeEditorClose,
-    /// List the GPUs (`vulkaninfo`) for the settings.
-    PeListGpus,
-    PeGpus(Result<Vec<(u32, String)>, String>),
+    /// List the GPUs a runtime sees, for the settings.
+    PeListGpus(increart_core::pe::GpuRuntime),
+    PeGpus(increart_core::pe::GpuRuntime, Result<Vec<(u32, String)>, String>),
     /// Prompt enhance's system prompt for a job (empty: the default).
     PeSystemPrompt {
         job: String,
@@ -621,6 +682,11 @@ pub enum Msg {
     EditResolutions(Vec<Resolution>),
     SaveResolutions,
     CloseResolutions,
+    // ---- model presets
+    OpenRecipes,
+    EditRecipes(RecipeEditor),
+    SaveRecipes,
+    CloseRecipes,
     // ---- review / output library
     NeedRecipe(Id),
     RecipeLoaded(Id, Option<Recipe>),
@@ -633,8 +699,14 @@ pub enum Msg {
     Checkerboard(bool),
     /// Jump to the newest unreviewed image.
     ReviewNewest,
-    /// Stay on the newest unreviewed image as they come, or not.
+    /// Move on through the unreviewed images by itself, or not.
     ReviewFollow(bool),
+    /// How Follow paces them (saved).
+    FollowPace(increart_core::config::FollowPace),
+    /// Follow paused from its button, or held while the pointer is over the
+    /// image.
+    FollowPause(bool),
+    FollowHold(bool),
     OutputFilter(OutputFilter),
     /// The Output library's search box: project names (`true`) or the
     /// images' titles and prompts; what's typed goes along.
@@ -669,6 +741,19 @@ pub enum Msg {
     RatePicked(Verdict),
     /// The Tile dialog, from the picks.
     OpenTile,
+    /// The Tile dialog, from the images in Generate (all, parked too).
+    TileGenerateImages,
+    // ---- Crop / mark…
+    /// The editor on an image; from Generate, the image's index there.
+    OpenMarkup(ImageRef, Option<usize>),
+    /// What is drawn now (one undo step).
+    MarkupEdit(ImageEdits),
+    MarkupUndo,
+    MarkupRedo,
+    MarkTools(MarkTools),
+    /// Save the copy; `true`: and use it in Generate.
+    MarkupSave(bool),
+    CloseMarkup,
     CloseTile,
     TileSelect(Option<usize>),
     /// A tile to this (column, row).
@@ -688,6 +773,15 @@ pub enum Msg {
     /// Every image tile's caption, a template (`AppState::caption_text`).
     TileCaptionFormat(String),
     TileSettings(increart_core::config::TileSettings),
+    /// Images (or pasted ones) from a cell on, else after the last tile.
+    TileAdd(Vec<crate::tile::TileContent>, Option<(u32, u32)>),
+    /// The `i`th tile's inputs just before it.
+    TileAddInputs(usize),
+    /// Every image's inputs: in columns at the left (`true`) or each
+    /// before its image.
+    TileInputs(bool),
+    /// The reference picker, its choices for the Tile window (from a cell).
+    TilePicker(Option<(u32, u32)>),
     /// Compose and copy, save or add to the library.
     TileOut(TileTarget),
     TilesDone(TileTarget, Result<crate::tile::TileImage, String>),
@@ -700,6 +794,12 @@ pub enum Msg {
     /// Open a folder (or a file's folder) in the system file manager; the
     /// path is relative to the library or absolute.
     ShowInFileManager(PathBuf),
+    /// Open the log viewer, on this log (a file name in the log folder).
+    OpenLogs(Option<String>),
+    /// The log viewer's choices changed (`None`: closed).
+    Logs(Option<LogsView>),
+    /// Open a file in the text editor (`config.editor`).
+    OpenInEditor(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -725,6 +825,19 @@ pub enum Effect {
         create: bool,
     },
     ListDevices(String),
+    /// `binary --version`, answered with `KoboldVersion`.
+    KoboldVersion(String),
+    /// The GPUs and their memory, for the wizard's KoboldCpp page.
+    DetectGpus(increart_core::pe::GpuRuntime),
+    /// Fetches the files into `dir` (skipping those there, linking those
+    /// found in `model_dirs` or Hugging Face's cache), reporting
+    /// `WizardDownload`, then `WizardDownloaded`.
+    DownloadModels {
+        dir: String,
+        files: Vec<increart_core::tiers::Download>,
+        model_dirs: Vec<String>,
+    },
+    CancelDownload,
     /// Open these sd-servers, stopping the engine and the servers in use
     /// that aren't among them (the ones that are, opened with the same
     /// settings, are kept as they are).
@@ -746,10 +859,12 @@ pub enum Effect {
     /// Stop the engine only, keeping the servers (switching libraries).
     StopEngine,
     SavePresets(PromptPresets, PathBuf),
-    /// Ask the PE server (starting it first if needed), one job at a time;
-    /// each reports [`Msg::PeProgress`] and answers [`Msg::PeAnswer`].
+    /// Ask the PE servers (starting them first if needed; ones not among
+    /// them stopped), the jobs shared among them in order, one at a time
+    /// on each; each reports [`Msg::PeOn`] and [`Msg::PeProgress`] and
+    /// answers [`Msg::PeAnswer`].
     PeAsk {
-        server: increart_core::pe::PeServer,
+        servers: Vec<increart_core::pe::PeServer>,
         jobs: Vec<PeJob>,
     },
     /// Drop these asks if still queued, and stop the one being answered.
@@ -757,7 +872,7 @@ pub enum Effect {
     /// Stop the PE server the app started; [`Msg::PeStatus`] Off once it's
     /// down.
     PeShutdown,
-    PeListGpus,
+    PeListGpus(increart_core::pe::GpuRuntime),
     Lib(LibOp),
     QueueRun(Id),
     CancelRun(Id, Stop),
@@ -788,6 +903,10 @@ pub enum Effect {
         path: PathBuf,
         command: String,
     },
+    OpenInEditor {
+        path: PathBuf,
+        command: String,
+    },
     /// List a folder for the folder view (library-relative).
     ListDir(PathBuf),
     /// Watch this library for changes made outside the app (replacing any
@@ -797,6 +916,15 @@ pub enum Effect {
     /// at a time, reporting [`Msg::UsageCheck`]; runs on its own thread
     /// (it reads every image: seconds on a cold disk).
     CheckUsage,
+    /// The library's store format and counts; answers `StoreInfo`.
+    StoreInfo,
+    /// Sets the library's store format; answers `StoreInfo`.
+    SetStoreFormat(StoreFormat),
+    /// Converts every store image to this format, on its own thread
+    /// (re-encoding takes a while), reporting `Converting`, then `Converted`.
+    ConvertStore(StoreFormat),
+    /// Stops a conversion after the batch it is on.
+    CancelConvert,
     /// Composes a tiled image, on its own thread; answers `TilesDone`
     /// (a file is written there too).
     ComposeTiles {
@@ -902,6 +1030,13 @@ pub enum LibOp {
         with_prompt: bool,
         loc: IdeaLoc,
     },
+    /// A cropped and marked copy of `image` in `input/edited/`.
+    EditedCopy {
+        image: ImageRef,
+        edits: ImageEdits,
+        title: String,
+        to: EditedTo,
+    },
     /// A tiled image as a new idea in the input library.
     IdeaFromTiles {
         image: crate::tile::TileImage,
@@ -954,6 +1089,8 @@ pub enum OpOk {
     Done,
     Idea(Id),
     Tiled(Id),
+    /// An edited copy's image, and where it goes.
+    Edited(Id, EditedTo),
     /// A new project from ideas: the Generate panel is seeded from them.
     Promoted {
         project: Id,
@@ -1011,14 +1148,37 @@ fn ask_while_generating(state: &mut AppState, then: Msg) -> Vec<Effect> {
     if n == 0 {
         return update(state, then);
     }
-    state.confirm = Some(Confirm {
-        text: format!(
-            "{n} run(s) are generating in this library. Switching stops them: the images being \
-             made now are dropped, and everything left is generated when you open this library again."
-        ),
-        then: Box::new(then),
-    });
+    let text = format!(
+        "{n} run(s) are generating in this library. Switching stops them: the images being \
+         made now are dropped, and everything left is generated when you open this library again."
+    );
+    state.confirm = Some(Confirm::new(text, "Switch library", then));
     vec![]
+}
+
+/// The warning before queueing a model preset no open server can run
+/// (e.g. sd-server's int8 files on KoboldCpp), with each server's reason.
+fn model_warning(state: &AppState) -> Option<String> {
+    let f = &state.generate;
+    let recipes = &state.config.recipes;
+    let used: Vec<&RecipePreset> = if f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Model {
+        recipes.iter().filter(|r| f.sweep.models.contains(&r.name)).collect()
+    } else {
+        recipes.get(f.preset).into_iter().collect()
+    };
+    let lines: Vec<String> = used
+        .iter()
+        .filter_map(|r| state.why_no_server_runs(&r.files).map(|why| format!("{}:\n  {}", r.name, why.join("\n  "))))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "No open server can run {}:\n\n{}\n\nQueued anyway, a server still tries to load it: that can fail, \
+         or (KoboldCpp with an int8 file) pin tens of GB of RAM.",
+        if lines.len() == 1 { "this model preset" } else { "these model presets" },
+        lines.join("\n\n")
+    ))
 }
 
 /// A fresh state for another library, keeping what isn't the library's:
@@ -1028,6 +1188,21 @@ fn fresh_for_library(state: &mut AppState) {
     std::mem::swap(state, &mut fresh);
     let old = fresh;
     state.servers = old.servers;
+    state.server_models = old.server_models;
+    state.gpu_runtime = old.gpu_runtime;
+    // the chat servers stay too (their asks were the old library's)
+    let pe = old.pe;
+    state.pe.server = pe.server;
+    state.pe.more = pe.more;
+    state.pe.status = pe.status;
+    state.pe.ready = pe.ready;
+    state.pe.gpus = pe.gpus;
+    state.pe.gpus_runtime = pe.gpus_runtime;
+    state.pe.starting_since = pe.starting_since;
+    state.pe.last_load = pe.last_load;
+    state.pe.read_times = pe.read_times;
+    // (answers still coming carry numbers from before)
+    state.pe.asks = pe.asks;
     state.engine_running = old.engine_running;
     state.open_attempt = old.open_attempt;
     state.background = old.background;
@@ -1093,6 +1268,8 @@ fn server_dialog() -> ServerDialog {
         opening: false,
         started: 0.0,
         wizard: false,
+        kobold: None,
+        kobold_version: None,
         from_main: false,
         settings: false,
         notice: None,
@@ -1154,7 +1331,8 @@ fn ask_before_replacing(state: &mut AppState, draft: &ServerPreset, then: Msg) -
     } else if runs > 0 {
         text.push_str(&format!("\n\n{runs} run(s) are generating: they wait until a server is connected again."));
     }
-    update(state, Msg::Ask(text, Box::new(then)))
+    let verb = if stops.is_empty() { "Open" } else { "Stop and open" };
+    update(state, Msg::Ask(Confirm::new(text, verb, then)))
 }
 
 /// Whether these sd-servers are the ones in use, all up and generating.
@@ -1171,7 +1349,7 @@ fn sd_unchanged(state: &AppState, sd: &[ServerConfig]) -> bool {
 /// started ones when the sd-server settings changed since.
 fn stopping_for(state: &AppState, sd: &[ServerConfig]) -> Vec<String> {
     let same_settings = state.servers_opened_with.as_ref() == Some(&state.config.sdserver);
-    let kept = |c: &ServerConfig| sd.contains(c) && (same_settings || !matches!(c, ServerConfig::Start { .. }));
+    let kept = |c: &ServerConfig| sd.contains(c) && (same_settings || !c.is_started());
     state.servers.iter().filter(|s| !s.config.as_ref().is_some_and(kept)).map(server_label).collect()
 }
 
@@ -1182,15 +1360,21 @@ fn server_label(s: &ServerStatus) -> String {
 
 /// The chat server in use from now: the one before stops unless it runs as
 /// the same process, and one to start with its preset starts.
-fn use_chat(state: &mut AppState, chat: Option<increart_core::pe::PeServer>) -> Vec<Effect> {
-    let same = match (&state.pe.server, &chat) {
-        (Some(a), Some(b)) => a.same_process(b),
-        (a, b) => a.is_none() && b.is_none(),
-    };
+fn use_chat(state: &mut AppState, mut chats: Vec<increart_core::pe::PeServer>) -> Vec<Effect> {
+    let now = state.pe.server.iter().chain(&state.pe.more);
+    let same = now.clone().count() == chats.len() && now.zip(&chats).all(|(a, b)| a.same_process(b));
     let mut fx = if same { vec![] } else { update(state, Msg::PeShutdown) };
-    state.pe.server = chat;
+    state.pe.server = (!chats.is_empty()).then(|| chats.remove(0));
+    state.pe.more = chats;
     fx.extend(update(state, Msg::PeLaunch));
     fx
+}
+
+/// The PE servers to ask: `first` (the one in use) and the others
+/// sharing the asks.
+fn pool(state: &AppState, first: increart_core::pe::PeServer) -> Vec<increart_core::pe::PeServer> {
+    let more: Vec<_> = state.pe.more.iter().filter(|m| !m.same_process(&first)).cloned().collect();
+    std::iter::once(first).chain(more).collect()
 }
 
 /// The editor's preset into `config.server_presets`: in place when editing
@@ -1222,6 +1406,17 @@ fn save_draft(state: &mut AppState) -> bool {
     true
 }
 
+/// `--version` for the settings, unless asked already for this binary.
+fn kobold_version_once(state: &AppState) -> Vec<Effect> {
+    let binary = kobold_binary(state);
+    match &state.phase {
+        Phase::Servers(d) if d.kobold_version.as_ref().is_none_or(|(b, _)| *b != binary) => {
+            vec![Effect::KoboldVersion(binary)]
+        }
+        _ => vec![],
+    }
+}
+
 /// `--list-devices` for the editor and settings, unless listed already (the
 /// settings' **List devices** asks again).
 fn list_devices_once(state: &AppState) -> Vec<Effect> {
@@ -1245,15 +1440,22 @@ fn add_start_server(draft: &mut ServerPreset, device: &str) {
     draft.servers.push(server);
 }
 
+/// The KoboldCpp binary new entries start: the one in use
+/// ([`increart_core::config::Config::known_koboldcpp`]), else `koboldcpp`.
+pub fn kobold_binary(state: &AppState) -> String {
+    state.config.known_koboldcpp().unwrap_or_else(|| "koboldcpp".into())
+}
+
 /// The wizard's preset name: its devices ("ROCm0 + ROCm1"), or "Running
 /// server(s)" for connections only.
 fn wizard_name(draft: &ServerPreset) -> String {
-    let devices: Vec<&str> = draft
+    let devices: Vec<String> = draft
         .servers
         .iter()
         .filter_map(|s| match s {
-            ServerConfig::Start { device, .. } => Some(device.as_str()),
-            ServerConfig::Connect { .. } | ServerConfig::Chat(_) => None,
+            ServerConfig::Start { device, .. } => Some(device.clone()),
+            ServerConfig::Kobold(k) if s.is_started() => Some(format!("KoboldCpp {}", k.device()).trim().to_string()),
+            ServerConfig::Kobold(_) | ServerConfig::Connect { .. } | ServerConfig::Chat(_) => None,
         })
         .collect();
     match (devices.len(), draft.sd_servers().len()) {
@@ -1266,11 +1468,13 @@ fn wizard_name(draft: &ServerPreset) -> String {
 
 /// The next free port after the draft's `Start` servers (from 1234).
 fn next_port(draft: &ServerPreset) -> u16 {
+    use increart_core::kobold::{KoboldRun, KoboldServer};
     draft
         .servers
         .iter()
         .filter_map(|s| match s {
-            ServerConfig::Start { port, .. } => Some(*port + 1),
+            ServerConfig::Start { port, .. }
+            | ServerConfig::Kobold(KoboldServer { run: KoboldRun::Start { port, .. }, .. }) => Some(*port + 1),
             _ => None,
         })
         .max()
@@ -1282,7 +1486,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     let fx = apply(state, msg);
     state.nav.depth -= 1;
     if state.nav.depth == 0 && state.review_follow {
-        state.review_cursor = state.review_queue().len().saturating_sub(1);
+        follow_step(state);
     }
     if state.nav.depth == 0 && !state.nav.restoring && state.phase == Phase::Main {
         let now = state.place();
@@ -1408,7 +1612,13 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::LibraryOpened(Ok((root, index))) => {
             let switched = state.switching.take().is_some();
+            let mut fx = vec![];
             if switched {
+                // the old library's asks: not wanted any more
+                let asked: Vec<u64> = state.pe.jobs.iter().map(|j| j.id).collect();
+                if !asked.is_empty() {
+                    fx.push(Effect::PeStop(asked));
+                }
                 fresh_for_library(state);
             }
             state.config.add_recent_library(root.to_string_lossy().into_owned());
@@ -1419,7 +1629,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.index = index;
             state.rebuild_usage();
             state.inbox_tab = if state.unreviewed_ideas().is_empty() { InboxTab::NewIdea } else { InboxTab::Grid };
-            let mut fx = save_config(state);
+            fx.extend(save_config(state));
             fx.push(Effect::WatchLibrary(root));
             fx.push(Effect::CheckUsage);
             if switched {
@@ -1551,6 +1761,28 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             d.progress.clear();
             vec![]
         }
+        Msg::AddKoboldServer => {
+            use increart_core::kobold::{KoboldRun, KoboldServer};
+            let binary = kobold_binary(state);
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            let n = d.draft.sd_servers().len();
+            let run = KoboldRun::Start {
+                binary,
+                config: String::new(),
+                host: "127.0.0.1".into(),
+                port: next_port(&d.draft).max(5001),
+                device: Default::default(),
+                args: vec![],
+            };
+            d.draft.servers.push(ServerConfig::Kobold(KoboldServer {
+                name: format!("kcpp{n}"),
+                run,
+                chat: None,
+                swap: false,
+            }));
+            d.progress.clear();
+            vec![]
+        }
         Msg::EditServer(i, s) => {
             if let Phase::Servers(d) = &mut state.phase
                 && let Some(slot) = d.draft.servers.get_mut(i)
@@ -1625,15 +1857,156 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if d.opening {
                 return vec![];
             }
+            let mut fx = match d.kobold.as_ref().and_then(|k| k.downloading.as_ref()) {
+                Some(_) => vec![Effect::CancelDownload],
+                None => vec![],
+            };
             d.wizard = open;
+            d.kobold = None;
             d.editing = None;
             d.progress.clear();
             d.draft = ServerPreset { name: String::new(), servers: vec![] };
             if !open {
-                return vec![];
+                return fx;
             }
             d.devices = None;
-            update(state, Msg::ListDevices)
+            fx.extend(update(state, Msg::WizardKobold(true)));
+            fx
+        }
+        Msg::WizardKobold(on) => {
+            let binary = kobold_binary(state);
+            let models_dir = state
+                .config
+                .sdserver
+                .model_dirs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{h}/models")).unwrap_or_default());
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            if !d.wizard || d.kobold.as_ref().is_some_and(|k| k.downloading.is_some()) {
+                return vec![];
+            }
+            match &mut d.kobold {
+                // detect again
+                Some(k) if on => {
+                    k.gpus = None;
+                    return vec![Effect::DetectGpus(k.runtime)];
+                }
+                None if !on => return vec![],
+                _ => {}
+            }
+            d.draft.servers.clear();
+            if !on {
+                d.kobold = None;
+                d.devices = None;
+                return update(state, Msg::ListDevices);
+            }
+            d.kobold = Some(Box::new(KoboldWizard {
+                binary,
+                models_dir,
+                gpus: None,
+                choose: false,
+                ram_gib: None,
+                layout: Default::default(),
+                pe_gpus: vec![],
+                pe_by_hand: false,
+                runtime: state.gpu_runtime,
+                downloading: None,
+                error: None,
+            }));
+            vec![Effect::DetectGpus(state.gpu_runtime)]
+        }
+        Msg::WizardRuntime(runtime) => {
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            let Some(k) = d.kobold.as_mut().filter(|k| k.runtime != runtime) else { return vec![] };
+            k.runtime = runtime;
+            // numbered differently: listed again
+            k.gpus = None;
+            k.pe_gpus.clear();
+            k.pe_by_hand = false;
+            vec![Effect::DetectGpus(runtime)]
+        }
+        Msg::WizardGpus(r, ram_gib) => {
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            // (a stale one: listed already)
+            let Some(k) = d.kobold.as_mut().filter(|k| k.gpus.is_none()) else { return vec![] };
+            // the discrete ones ticked
+            let gpu =
+                |gpu: increart_core::tiers::Gpu| WizardGpu { on: !gpu.integrated, gpu, preset: None, by_hand: false };
+            k.gpus = Some(r.map(|l| l.into_iter().map(gpu).collect()));
+            k.ram_gib = ram_gib;
+            vec![]
+        }
+        Msg::EditKoboldWizard(new) => {
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            if let Some(k) = &mut d.kobold
+                && k.downloading.is_none()
+            {
+                let mut new = KoboldWizard { downloading: None, error: None, ..new };
+                if new.layout != k.layout {
+                    // the other layout's own default
+                    (new.pe_gpus, new.pe_by_hand) = (vec![], false);
+                } else if new.pe_gpus != k.pe_gpus {
+                    new.pe_by_hand = true;
+                }
+                **k = new;
+            }
+            vec![]
+        }
+        Msg::FinishKoboldWizard => {
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            let Some(k) = &mut d.kobold else { return vec![] };
+            if k.downloading.is_some() {
+                return vec![];
+            }
+            if !std::path::Path::new(k.models_dir.trim()).is_absolute() {
+                k.error = Some("The models folder must be a full path.".into());
+                return vec![];
+            }
+            match k.plan() {
+                Err(e) => {
+                    k.error = Some(e);
+                    vec![]
+                }
+                Ok(plan) => {
+                    k.error = None;
+                    let files = plan.downloads.clone();
+                    k.downloading = Some((plan, WizardDownload::default()));
+                    let model_dirs = state.config.sdserver.model_dirs.clone();
+                    vec![Effect::DownloadModels { dir: k.models_dir.trim().to_string(), files, model_dirs }]
+                }
+            }
+        }
+        Msg::WizardDownload(p) => {
+            if let Phase::Servers(d) = &mut state.phase
+                && let Some((_, at)) = d.kobold.as_mut().and_then(|k| k.downloading.as_mut())
+            {
+                *at = p;
+            }
+            vec![]
+        }
+        Msg::CancelWizardDownload => vec![Effect::CancelDownload],
+        Msg::WizardDownloaded(r) => {
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            let Some(k) = &mut d.kobold else { return vec![] };
+            let Some((plan, _)) = k.downloading.take() else { return vec![] };
+            if let Err(e) = r {
+                k.error = Some(if e == "cancelled" { "Download cancelled; what's there is kept.".into() } else { e });
+                return vec![];
+            }
+            let dir = k.models_dir.trim().to_string();
+            d.draft.servers = plan.servers;
+            // the recipe's files are under the models folder
+            let c = &mut state.config;
+            c.koboldcpp = k.binary.trim().to_string();
+            if !c.sdserver.model_dirs.contains(&dir) {
+                c.sdserver.model_dirs.push(dir);
+            }
+            match c.recipes.iter_mut().find(|r| r.name == plan.recipe.name) {
+                Some(r) => *r = plan.recipe,
+                None => c.recipes.push(plan.recipe),
+            }
+            update(state, Msg::FinishServerWizard)
         }
         Msg::DraftDevice(device, on) => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
@@ -1650,7 +2023,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if !d.wizard || d.draft.servers.is_empty() {
                 return vec![];
             }
-            d.draft.name = wizard_name(&d.draft);
+            let base = wizard_name(&d.draft);
+            let taken = |n: &str| state.config.server_presets.iter().any(|p| p.name == n);
+            d.draft.name =
+                (1..).map(|i| if i == 1 { base.clone() } else { format!("{base} ({i})") }).find(|n| !taken(n)).unwrap();
             d.editing = Some(Editing::New);
             d.wizard = false;
             update(state, Msg::SaveAndOpen)
@@ -1672,7 +2048,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 state.config.last_preset = Some(draft.name.clone());
                 fx.extend(save_config(state));
             }
-            fx.extend(use_chat(state, draft.chat().cloned()));
+            fx.extend(use_chat(state, draft.chat_pool()));
             let sd = draft.sd_servers();
             // the sd-servers in use already: nothing to open
             if sd_unchanged(state, &sd) {
@@ -1702,7 +2078,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 .map(|s| ServerStatus {
                     config: Some(s.clone()),
                     name: s.name().into(),
-                    device: s.device().into(),
+                    device: s.device(),
                     state: "opening".into(),
                     model: None,
                     idle_since: None,
@@ -1720,6 +2096,15 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::ServerOpened(attempt, _, _) | Msg::ServersSettled(attempt) | Msg::ServerLog(attempt, _, _)
             if attempt != state.open_attempt =>
         {
+            vec![]
+        }
+        Msg::ServerModels(found) => {
+            state.server_models.extend(found);
+            // the model chosen is one they run, if they run any
+            let runnable = state.runnable_recipes();
+            if !runnable.is_empty() && !runnable.contains(&state.generate.preset) {
+                return update(state, Msg::SelectRecipe(runnable[0]));
+            }
             vec![]
         }
         Msg::ServersStopped(names) => {
@@ -1829,8 +2214,8 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::ContinueWithoutServers => {
             let chat = match &mut state.phase {
-                Phase::Servers(d) if d.without.is_some() => d.without.take().and_then(|w| w.chat),
-                _ => state.pe.server.clone(),
+                Phase::Servers(d) if d.without.is_some() => d.without.take().and_then(|w| w.chat).into_iter().collect(),
+                _ => state.pe.server.iter().chain(&state.pe.more).cloned().collect(),
             };
             state.phase = Phase::Main;
             let mut fx = vec![stop_servers(state)];
@@ -1867,7 +2252,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::ServerSettings(open) => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
             d.settings = open && !d.opening;
-            if d.settings { list_devices_once(state) } else { vec![] }
+            if !d.settings {
+                return vec![];
+            }
+            let mut fx = list_devices_once(state);
+            fx.extend(kobold_version_once(state));
+            fx
         }
         Msg::ServerStatus(open) => {
             state.server_status = open && state.phase == Phase::Main;
@@ -1875,7 +2265,81 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::Settings(open) => {
             state.settings_open = open && state.phase == Phase::Main;
+            if state.settings_open && state.settings_tab == crate::state::SettingsTab::Library {
+                return vec![Effect::StoreInfo];
+            }
             vec![]
+        }
+        Msg::SettingsTab(tab) => {
+            state.settings_tab = tab;
+            if tab == crate::state::SettingsTab::Library { vec![Effect::StoreInfo] } else { vec![] }
+        }
+        Msg::StoreInfo(Ok(info)) => {
+            state.store = Some(info);
+            vec![]
+        }
+        Msg::StoreInfo(Err(e)) => {
+            state.messages_error(format!("Image storage: {e}"));
+            vec![]
+        }
+        Msg::SetStoreFormat(format) => {
+            if state.converting.is_some() || state.store.is_some_and(|s| s.format == format) {
+                return vec![];
+            }
+            vec![Effect::SetStoreFormat(format)]
+        }
+        Msg::ConvertStore => {
+            let Some(info) = state.store.filter(|_| state.converting.is_none()) else { return vec![] };
+            let (to, n) = match info.format {
+                StoreFormat::Png => (StoreFormat::Png, info.counts.webp.0),
+                StoreFormat::Webp => (StoreFormat::Webp, info.counts.png.0),
+            };
+            let mut text = format!(
+                "Convert {n} image(s) to {}? Both formats are lossless: every image is checked to have exactly \
+                 the same pixels before its old file goes, and its metadata and links move with it. It takes a \
+                 while; the library stays usable meanwhile.",
+                to.name()
+            );
+            if to == StoreFormat::Webp {
+                text.push_str(" Versions of IncreArt before this one can't open a library holding WebP images.");
+            }
+            update(state, Msg::Ask(Confirm::new(text, "Convert", Msg::ConvertStoreConfirmed)))
+        }
+        Msg::ConvertStoreConfirmed => {
+            let Some(info) = state.store.filter(|_| state.converting.is_none()) else { return vec![] };
+            state.converting = Some((0, 0));
+            vec![Effect::ConvertStore(info.format)]
+        }
+        Msg::CancelConvert => {
+            if state.converting.is_some() {
+                vec![Effect::CancelConvert]
+            } else {
+                vec![]
+            }
+        }
+        Msg::Converting(done, total) => {
+            state.converting = Some((done, total));
+            vec![]
+        }
+        Msg::Converted { converted, skipped, failed, cancelled } => {
+            state.converting = None;
+            let mut text = format!("Converted {converted} image(s)");
+            if skipped > 0 {
+                text.push_str(&format!(", {skipped} left as they were (too large for WebP, or gone)"));
+            }
+            if cancelled {
+                text.push_str("; stopped before the end");
+            }
+            if failed.is_empty() {
+                state.messages_info(text);
+            } else {
+                let shown: Vec<_> = failed.iter().take(5).cloned().collect();
+                state.messages_error(format!("{text}; {} failed: {}", failed.len(), shown.join("; ")));
+            }
+            match state.library {
+                Some(_) => vec![Effect::StoreInfo, Effect::Rescan],
+                None => vec![],
+            }
         }
         Msg::SetNotifications(n) => {
             if state.config.notifications == n {
@@ -2211,7 +2675,32 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     state.index.ideas.iter().any(|e| matches!(e.loc, IdeaLoc::Library(_)) && !e.idea.images.is_empty());
                 if inputs { RefSource::Inputs(None) } else { RefSource::Outputs(OutputSource::AllProjects) }
             });
-            state.ref_picker = Some(RefPicker { source, text: String::new(), ratings: Ratings::KEPT, chosen: vec![] });
+            // the Tile window's inputs mean nothing to Generate
+            let source = if source == RefSource::TileInputs { RefSource::Inputs(None) } else { source };
+            state.ref_picker = Some(RefPicker {
+                source,
+                text: String::new(),
+                ratings: Ratings::KEPT,
+                chosen: vec![],
+                target: PickTarget::Generate,
+            });
+            vec![]
+        }
+        Msg::TilePicker(at) => {
+            let Some(t) = &state.tile else { return vec![] };
+            let inputs = t.layout.images().any(|i| !state.image_inputs(i).is_empty());
+            let source = match &state.ref_picker_source {
+                _ if inputs => RefSource::TileInputs,
+                Some(s) if *s != RefSource::TileInputs => s.clone(),
+                _ => RefSource::Outputs(OutputSource::AllProjects),
+            };
+            state.ref_picker = Some(RefPicker {
+                source,
+                text: String::new(),
+                ratings: Ratings::KEPT,
+                chosen: vec![],
+                target: PickTarget::Tile(at),
+            });
             vec![]
         }
         Msg::RefPicker(false) => {
@@ -2221,7 +2710,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::RefPickerSource(s) => {
             if let Some(p) = &mut state.ref_picker {
                 p.source = s.clone();
-                state.ref_picker_source = Some(s);
+                if !s.contextual() || s == RefSource::TileInputs {
+                    state.ref_picker_source = Some(s);
+                }
             }
             vec![]
         }
@@ -2237,10 +2728,15 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        // Compare with…: one click picks
+        Msg::RefPickerToggle(img) if state.ref_picker.as_ref().is_some_and(|p| p.target == PickTarget::Compare) => {
+            state.ref_picker = None;
+            compare_against(state, img)
+        }
         Msg::RefPickerToggle(img) => {
             let refs = state.generate.refs();
             if let Some(p) = &mut state.ref_picker
-                && !refs.contains(&img)
+                && (p.target != PickTarget::Generate || !refs.contains(&img))
             {
                 match p.chosen.iter().position(|c| *c == img) {
                     Some(i) => {
@@ -2252,8 +2748,56 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             vec![]
         }
         Msg::RefPickerAdd => {
-            let chosen = state.ref_picker.take().map(|p| p.chosen).unwrap_or_default();
-            update(state, Msg::AddRefs(chosen))
+            let Some(p) = state.ref_picker.take() else { return vec![] };
+            match p.target {
+                PickTarget::Generate => update(state, Msg::AddRefs(p.chosen)),
+                PickTarget::Tile(at) => {
+                    let images = p.chosen.into_iter().map(TileContent::Image).collect();
+                    update(state, Msg::TileAdd(images, at))
+                }
+                PickTarget::Compare => match p.chosen.into_iter().next() {
+                    Some(a) => compare_against(state, a),
+                    None => vec![],
+                },
+            }
+        }
+        Msg::CompareWith(image) => {
+            match (state.tab, image) {
+                (Tab::OutputLibrary, Some(img)) => state.output_selected = Some(img),
+                (Tab::Review, Some(img)) => {
+                    if let Some(i) = state.review_queue().iter().position(|o| o.image == img) {
+                        state.review_cursor = i;
+                        unfollow(state);
+                    }
+                }
+                _ => {}
+            }
+            let Some(b) = state.compare_b() else { return vec![] };
+            // what B was made from first, then its project's inputs
+            let project =
+                state.output_link(&b).and_then(|o| state.index.run(&o.name.run)).map(|(p, _)| p.project.id.clone());
+            let source = if !state.image_inputs(&b).is_empty() {
+                RefSource::ImageInputs(b)
+            } else if let Some(id) = project.filter(|id| !state.project_inputs(id).is_empty()) {
+                RefSource::ProjectInputs(id)
+            } else {
+                match &state.ref_picker_source {
+                    Some(s) if !s.contextual() => s.clone(),
+                    _ => RefSource::Outputs(OutputSource::AllProjects),
+                }
+            };
+            state.ref_picker = Some(RefPicker {
+                source,
+                text: String::new(),
+                ratings: Ratings::KEPT,
+                chosen: vec![],
+                target: PickTarget::Compare,
+            });
+            vec![]
+        }
+        Msg::OutputCompare(a) => {
+            state.output_compare = a;
+            vec![]
         }
         Msg::AddRefs(refs) => {
             let before = state.generate.refs();
@@ -2607,7 +3151,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 }
             }
             let jobs = jobs.into_iter().map(|j| queue_blank(state, j, None, 0)).collect();
-            vec![Effect::PeAsk { server, jobs }]
+            vec![Effect::PeAsk { servers: pool(state, server), jobs }]
         }
         Msg::PeSuggestOpen(key) => {
             if state.pe.server.is_none() {
@@ -2678,7 +3222,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 }
             }
             let jobs = jobs.into_iter().map(|j| queue_blank(state, j, Some(&b.form), 0)).collect();
-            vec![Effect::PeAsk { server, jobs }]
+            vec![Effect::PeAsk { servers: pool(state, server), jobs }]
         }
         Msg::PeSuggestAsk => {
             let (Some(server), Some(d)) = (state.pe.server.as_ref().cloned(), state.pe.suggest.clone()) else {
@@ -2699,7 +3243,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             state.pe.blank_batch += 1;
             let job = queue_blank(state, job, Some(&d.form), 0);
-            vec![Effect::PeAsk { server, jobs: vec![job] }]
+            vec![Effect::PeAsk { servers: pool(state, server), jobs: vec![job] }]
         }
         Msg::PeForgetOffered(key) => {
             state.generate.sweep.edit_blank_values(key.style.as_ref(), &key.slot, |v| v.offered.clear());
@@ -2742,6 +3286,16 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 }
             }
             state.pe.status = s;
+            vec![]
+        }
+        Msg::PeReady(n) => {
+            state.pe.ready = n;
+            vec![]
+        }
+        Msg::PeOn(id, name) => {
+            if let Some(j) = state.pe.jobs.iter_mut().find(|j| j.id == id) {
+                j.on = Some(name);
+            }
             vec![]
         }
         Msg::PeProgress(id, step) => {
@@ -2855,7 +3409,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                             }
                             state.pe.blank_batch += 1;
                             let job = queue_blank(state, job, Some(&form), tried.retry + 1);
-                            return vec![Effect::PeAsk { server, jobs: vec![job] }];
+                            return vec![Effect::PeAsk { servers: pool(state, server), jobs: vec![job] }];
                         }
                     }
                     let asked = if retry { format!(", asked {} times", tried.retry + 1) } else { String::new() };
@@ -2945,7 +3499,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             let Some(server) = state.pe.server.as_ref().cloned() else { return vec![] };
             // an ask with nothing to ask: the server is started (after a
             // stop asked before it; one running as asked is kept)
-            vec![Effect::PeAsk { server, jobs: vec![] }]
+            vec![Effect::PeAsk { servers: pool(state, server), jobs: vec![] }]
         }
         Msg::PeShutdown => {
             let ids: Vec<u64> = state.pe.jobs.iter().map(|j| j.id).collect();
@@ -2961,18 +3515,32 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 Some(ServerConfig::Chat(s)) => s.clone(),
                 Some(_) => return vec![],
                 // a new one: the presets' first, else KoboldCpp on the GPUs
-                None => state.config.chat_servers().first().map(|s| (*s).clone()).unwrap_or_else(new_pe_server),
+                None => state
+                    .config
+                    .chat_servers()
+                    .first()
+                    .map(|s| (*s).clone())
+                    .unwrap_or_else(|| new_pe_server(state.gpu_runtime)),
             };
+            let mut draft = draft;
+            // another beside ones the preset has: its own name and port
+            if index.is_none() && d.draft.chat().is_some() {
+                let n = d.draft.servers.iter().filter(|s| s.is_chat()).count() + 1;
+                draft.name = format!("{} {n}", draft.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' '));
+                let used = d.draft.servers.iter().filter_map(ServerConfig::port).max();
+                if let (PeRun::KoboldCpp { port, .. }, Some(used)) = (&mut draft.run, used) {
+                    *port = (*port).max(used + 1);
+                }
+            }
             state.pe.editor = Some(PeEditor { index, draft, error: None });
-            // the GPUs to tick
-            if state.pe.gpus.is_none() { vec![Effect::PeListGpus] } else { vec![] }
+            list_gpus_for_editor(state)
         }
         Msg::PeEditorEdit(draft) => {
             if let Some(e) = &mut state.pe.editor {
                 e.draft = draft;
                 e.error = None;
             }
-            vec![]
+            list_gpus_for_editor(state)
         }
         Msg::PeEditorClose => {
             state.pe.editor = None;
@@ -2985,8 +3553,10 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 Some("It needs a name.".to_string())
             } else {
                 match &e.draft.run {
-                    PeRun::KoboldCpp { binary, model, .. } if binary.trim().is_empty() || model.trim().is_empty() => {
-                        Some("KoboldCpp needs its binary and a model.".into())
+                    PeRun::KoboldCpp { binary, model, config, .. }
+                        if binary.trim().is_empty() || (model.trim().is_empty() && config.trim().is_empty()) =>
+                    {
+                        Some("KoboldCpp needs its binary, and a model or a settings file.".into())
                     }
                     PeRun::Connect { url } if url.trim().is_empty() => Some("It needs the server's address.".into()),
                     _ => None,
@@ -2998,9 +3568,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
             let server = ServerConfig::Chat(increart_core::pe::PeServer { name, ..e.draft });
-            // a preset has one chat server: a new one replaces it
+            // a new one is added: prompt enhance shares its asks among them
             let at = e.index.filter(|i| d.draft.servers.get(*i).is_some_and(ServerConfig::is_chat));
-            match at.or_else(|| d.draft.servers.iter().position(ServerConfig::is_chat)) {
+            match at {
                 Some(i) => d.draft.servers[i] = server,
                 None => d.draft.servers.push(server),
             }
@@ -3008,12 +3578,16 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.pe.editor = None;
             vec![]
         }
-        Msg::PeListGpus => {
+        Msg::PeListGpus(runtime) => {
             state.pe.gpus = None;
-            vec![Effect::PeListGpus]
+            state.pe.gpus_runtime = runtime;
+            vec![Effect::PeListGpus(runtime)]
         }
-        Msg::PeGpus(r) => {
-            state.pe.gpus = Some(r);
+        Msg::PeGpus(runtime, r) => {
+            // (a stale one: another runtime asked for since)
+            if runtime == state.pe.gpus_runtime {
+                state.pe.gpus = Some(r);
+            }
             vec![]
         }
         Msg::PeSampling { job, sampling } => {
@@ -3402,6 +3976,54 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.res_editor = None;
             vec![]
         }
+        // ------------------------------------------------ model presets
+        Msg::OpenRecipes => {
+            state.recipe_editor = Some(RecipeEditor::new(&state.config.recipes, state.generate.preset));
+            vec![]
+        }
+        Msg::EditRecipes(e) => {
+            state.recipe_editor = Some(e);
+            vec![]
+        }
+        Msg::SaveRecipes => {
+            let Some(e) = state.recipe_editor.take() else { return vec![] };
+            if let Some(p) = e.problem() {
+                state.messages_error(p);
+                state.recipe_editor = Some(e);
+                return vec![];
+            }
+            let old = std::mem::take(&mut state.config.recipes);
+            let mut rows = e.rows;
+            for r in &mut rows {
+                r.preset.name = r.preset.name.trim().to_string();
+                r.preset.recipe = r.preset.recipe.trim().to_string();
+                r.preset.custom_sigmas = parse_sigmas(&r.sigmas).unwrap_or_default();
+            }
+            // a model sweep's ticks follow renames; deleted ones go
+            let renamed = |name: &str| {
+                let i = old.iter().position(|p| p.name == name)?;
+                rows.iter().find(|r| r.origin == Some(i)).map(|r| r.preset.name.clone())
+            };
+            let f = &mut state.generate;
+            f.sweep.models = f.sweep.models.iter().filter_map(|m| renamed(m)).collect();
+            let chosen = rows.iter().position(|r| r.origin == Some(f.preset));
+            state.config.recipes = rows.into_iter().map(|r| r.preset).collect();
+            let (i, changed) = match chosen {
+                Some(i) => (i, old.get(state.generate.preset) != state.config.recipes.get(i)),
+                None => (0, true),
+            };
+            state.generate.preset = i;
+            // the form takes an edited preset's settings
+            if changed && let Some(p) = state.config.recipes.get(i).cloned() {
+                state.generate.apply_preset(i, &p);
+            }
+            mark_generate(state);
+            save_config(state)
+        }
+        Msg::CloseRecipes => {
+            state.recipe_editor = None;
+            vec![]
+        }
         Msg::OpenScale(target) => {
             let size = match target {
                 ScaleTarget::Generate => Some((state.generate.width, state.generate.height)),
@@ -3578,10 +4200,31 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::ReviewNewest => {
             state.review_cursor = state.review_queue().len().saturating_sub(1);
+            follow_shown(state);
             vec![]
         }
         Msg::ReviewFollow(on) => {
             state.review_follow = on;
+            if on {
+                if state.config.review_follow.start_newest {
+                    state.review_cursor = state.review_queue().len().saturating_sub(1);
+                }
+                let newest = state.review_queue().iter().map(|o| o.image.id.clone()).max();
+                state.follow = Follow { newest, ..Follow::default() };
+                follow_shown(state);
+            }
+            vec![]
+        }
+        Msg::FollowPace(p) => {
+            state.config.review_follow = p;
+            save_config(state)
+        }
+        Msg::FollowPause(on) => {
+            state.follow.paused = on;
+            vec![]
+        }
+        Msg::FollowHold(on) => {
+            state.follow.held = on;
             vec![]
         }
         Msg::OutputFilter(f) => {
@@ -3704,11 +4347,86 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             } else {
                 crate::tile::TileLayout::square(picked)
             };
-            state.tile = Some(TileDialog { layout, selected: None, working: 0 });
+            state.tile = Some(TileDialog { layout, selected: None, working: 0, start: None });
+            vec![]
+        }
+        Msg::TileGenerateImages => {
+            // all of its images (parked ones too), in the strip's order
+            let f = &state.generate;
+            let images: Vec<ImageRef> = f.images.iter().map(|i| i.image.clone()).collect();
+            if images.is_empty() {
+                return vec![];
+            }
+            let layout = crate::tile::TileLayout::square(images);
+            state.tile = Some(TileDialog { layout, selected: None, working: 0, start: f.init() });
             vec![]
         }
         Msg::CloseTile => {
             state.tile = None;
+            vec![]
+        }
+        Msg::OpenMarkup(image, index) => {
+            let slot = index.and_then(|i| Some((state.project.clone()?, i)));
+            // an edited copy reopens on its original, as it was drawn
+            let (image, edits, replace) = match state.edited_source(&image) {
+                Some((orig, edits)) => (orig.clone(), edits.clone(), slot.is_some()),
+                None => (image, ImageEdits::default(), false),
+            };
+            state.markup = Some(Markup { image, edits, undo: vec![], redo: vec![], slot, replace, saving: false });
+            vec![]
+        }
+        Msg::MarkupEdit(edits) => {
+            if let Some(m) = &mut state.markup
+                && m.edits != edits
+            {
+                m.undo.push(std::mem::replace(&mut m.edits, edits));
+                m.redo.clear();
+            }
+            vec![]
+        }
+        Msg::MarkupUndo => {
+            if let Some(m) = &mut state.markup
+                && let Some(e) = m.undo.pop()
+            {
+                m.redo.push(std::mem::replace(&mut m.edits, e));
+            }
+            vec![]
+        }
+        Msg::MarkupRedo => {
+            if let Some(m) = &mut state.markup
+                && let Some(e) = m.redo.pop()
+            {
+                m.undo.push(std::mem::replace(&mut m.edits, e));
+            }
+            vec![]
+        }
+        Msg::MarkTools(t) => {
+            state.mark_tools = t;
+            vec![]
+        }
+        Msg::MarkupSave(use_it) => {
+            let Some(m) = &state.markup else { return vec![] };
+            if m.saving {
+                return vec![];
+            }
+            if m.edits.is_empty() {
+                state.messages_info("Nothing to save: no crop and no marks");
+                return vec![];
+            }
+            let to = match (&m.slot, use_it) {
+                (Some((p, i)), _) => EditedTo::Generate(p.clone(), *i, m.replace),
+                (None, true) => EditedTo::UseInGenerate,
+                (None, false) => EditedTo::Library,
+            };
+            let (image, edits) = (m.image.clone(), m.edits.clone());
+            let title = edited_title(state, &image);
+            if let Some(m) = &mut state.markup {
+                m.saving = true;
+            }
+            lib(state, LibOp::EditedCopy { image, edits, title, to })
+        }
+        Msg::CloseMarkup => {
+            state.markup = None;
             vec![]
         }
         Msg::TileSelect(i) => {
@@ -3786,11 +4504,57 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::TileAdd(contents, at) => {
+            if let Some(t) = &mut state.tile
+                && !contents.is_empty()
+            {
+                let added = t.layout.add(contents, at);
+                t.selected = added.last().copied();
+            }
+            vec![]
+        }
+        Msg::TileAddInputs(i) => {
+            let Some(inputs) = state
+                .tile
+                .as_ref()
+                .and_then(|t| t.layout.tiles.get(i)?.image().cloned())
+                .map(|img| state.image_inputs(&img))
+            else {
+                return vec![];
+            };
+            if inputs.is_empty() {
+                state.messages_info("This image was made from text only");
+            } else if let Some(t) = &mut state.tile {
+                t.layout.insert_before(i, inputs.into_iter().map(TileContent::Image).collect());
+                t.selected = None;
+            }
+            vec![]
+        }
+        Msg::TileInputs(column) => {
+            let Some(mut layout) = state.tile.as_ref().map(|t| t.layout.clone()) else { return vec![] };
+            let inputs = |i: &ImageRef| state.image_inputs(i);
+            let any = if column { layout.inputs_column(inputs) } else { layout.inputs_before(inputs) };
+            if !any {
+                state.messages_info("These images were made from text only");
+            } else if let Some(t) = &mut state.tile {
+                t.layout = layout;
+                t.selected = None;
+            }
+            vec![]
+        }
         Msg::TileCaptions(fill) => {
             let Some(t) = &state.tile else { return vec![] };
             // text blocks keep none
-            let captions: Vec<String> =
-                t.layout.tiles.iter().map(|x| x.image().map(|i| state.caption(i, fill)).unwrap_or_default()).collect();
+            let captions: Vec<String> = t
+                .layout
+                .tiles
+                .iter()
+                .map(|x| match &x.content {
+                    TileContent::Image(i) => state.caption(i, fill),
+                    TileContent::Pasted(_) if fill != CaptionFill::Clear => "pasted".into(),
+                    _ => String::new(),
+                })
+                .collect();
             if let Some(t) = &mut state.tile {
                 for (x, c) in t.layout.tiles.iter_mut().zip(captions) {
                     x.caption = c;
@@ -3800,7 +4564,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::TileCaptionFormat(template) => {
             if let Some(t) = &mut state.tile {
-                for x in t.layout.tiles.iter_mut().filter(|x| x.image().is_some()) {
+                for x in t.layout.tiles.iter_mut().filter(|x| !matches!(x.content, TileContent::Text { .. })) {
                     x.caption = template.clone();
                 }
             }
@@ -3894,6 +4658,15 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             };
             vec![Effect::ShowInFileManager { path: abs, command: state.config.file_manager.clone() }]
         }
+        Msg::OpenLogs(file) => {
+            state.logs = Some(LogsView::new(file));
+            vec![]
+        }
+        Msg::Logs(view) => {
+            state.logs = view;
+            vec![]
+        }
+        Msg::OpenInEditor(path) => vec![Effect::OpenInEditor { path, command: state.config.editor.clone() }],
         Msg::Tick(t) => {
             state.now = t;
             let mut fx = vec![];
@@ -3928,7 +4701,34 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.messages_error(format!("saving a draft: {e}"));
             vec![]
         }
-        Msg::QueueGenerate if state.generate.sweep.on => update(state, Msg::QueueSweep(false)),
+        Msg::QueueGenerate => match model_warning(state) {
+            Some(text) => {
+                state.confirm = Some(Confirm::new(text, "Queue anyway", Msg::QueueModelChecked));
+                vec![]
+            }
+            None => update(state, Msg::QueueModelChecked),
+        },
+        Msg::QueueModelChecked => {
+            let unnamed = unnamed_refs(state);
+            if unnamed.is_empty() {
+                return update(state, Msg::QueueChecked);
+            }
+            let tags: Vec<String> = unnamed.iter().map(|n| format!("<image{n}>")).collect();
+            let (list, them) = match tags.as_slice() {
+                [one] => (one.clone(), "it"),
+                [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "them"),
+                [] => unreachable!(),
+            };
+            let text = format!(
+                "{list} {} named in the prompt{}. The model gets {them} anyway, \
+                 but without a name the prompt can't say what to do with {them}.",
+                if unnamed.len() == 1 { "isn't" } else { "aren't" },
+                if state.generate.sweep.on { " or any of the sweep's prompts" } else { "" }
+            );
+            state.confirm = Some(Confirm::new(text, "Queue anyway", Msg::QueueChecked));
+            vec![]
+        }
+        Msg::QueueChecked if state.generate.sweep.on => update(state, Msg::QueueSweep(false)),
         Msg::QueueSweep(confirmed) => queue_sweep(state, confirmed),
         Msg::JobOrder(order) => {
             if state.config.job_order == order {
@@ -3948,7 +4748,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             state.sweep_order_asked = false;
             fx
         }
-        Msg::QueueGenerate => {
+        Msg::QueueChecked => {
             let Some(project) = state.project.clone() else {
                 state.messages_error("Select a project first");
                 return vec![];
@@ -3958,12 +4758,22 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 state.messages_error("The prompt is empty");
                 return vec![];
             }
-            if let Some(r) = increart_core::prompts::slots(&f.prompt).first().cloned() {
-                state.messages_error(format!("Fill in {} in the prompt first", &f.prompt[r.clone()]));
-                let chars = |b: usize| state.generate.prompt[..b].chars().count();
-                state.prompt_select = Some(chars(r.start)..chars(r.end));
+            // the blanks filled from the blanks table
+            let filled = increart_core::prompts::fill_slots(f.prompt.clone(), &f.sweep.slots);
+            let unfilled = increart_core::prompts::slot_names([filled.as_str()]);
+            if let Some(n) = unfilled.first() {
+                let blank = format!("{{{n}}}");
+                let at = increart_core::prompts::slots(&f.prompt).into_iter().find(|r| f.prompt[r.clone()] == blank);
+                state.messages_error(format!("Fill in {blank} first (in the blanks table, or type over it)"));
+                if let Some(r) = at {
+                    let chars = |b: usize| state.generate.prompt[..b].chars().count();
+                    state.prompt_select = Some(chars(r.start)..chars(r.end));
+                }
                 return vec![];
             }
+            let mut run = f.clone();
+            run.prompt = filled;
+            let f = &run;
             if !f.width.is_multiple_of(32) || !f.height.is_multiple_of(32) || f.seeds == 0 {
                 state.messages_error("Size must be a multiple of 32 and seeds at least 1");
                 return vec![];
@@ -4134,6 +4944,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 ZoomGrid::Review => state.config.review_grid_cell = size,
                 ZoomGrid::Output => state.config.output_grid_cell = size,
                 ZoomGrid::Library => state.config.library_grid_cell = size,
+                ZoomGrid::Inbox => state.config.inbox_grid_cell = size,
             }
             if save { save_config(state) } else { vec![] }
         }
@@ -4300,11 +5111,24 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if n > 0 {
                 state.review_cursor = (state.review_cursor as isize + d).clamp(0, n as isize - 1) as usize;
             }
-            unfollow(state);
+            // on to the next keeps following, from the start of its time
+            if d > 0 {
+                follow_shown(state);
+            } else {
+                unfollow(state);
+            }
             vec![]
         }
         Msg::ReviewCurrent(v) => {
-            let Some(link) = state.review_queue().get(state.review_cursor).map(|o| o.path.clone()) else {
+            let queue = state.review_queue();
+            // just moved on by Follow: meant for the image that was there
+            let just_moved = state
+                .follow
+                .moved
+                .as_ref()
+                .filter(|(at, _)| state.review_follow && state.now - at < Follow::GRACE)
+                .and_then(|(_, img)| queue.iter().find(|o| &o.image == img));
+            let Some(link) = just_moved.or(queue.get(state.review_cursor)).map(|o| o.path.clone()) else {
                 return vec![];
             };
             lib(state, LibOp::ReviewOutputs { links: vec![(link, Some(v))], undo: false })
@@ -4340,15 +5164,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        // the sides change places: the pinned image on the other side
         Msg::SwapCompare => {
-            let queue = state.review_queue();
-            let Some(b) = queue.get(state.review_cursor).map(|o| o.image.clone()) else { return vec![] };
-            let a_pos = state.review_pinned.as_ref().and_then(|a| queue.iter().position(|o| &o.image == a));
-            if let Some(pos) = a_pos {
-                state.review_cursor = pos;
-                state.review_pinned = Some(b);
-                unfollow(state);
-            }
+            state.compare_flipped = !state.compare_flipped;
             vec![]
         }
         Msg::ReviewPinned(v) => {
@@ -4360,6 +5178,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::OutputTab(t) => {
             state.output_tab = t;
+            state.output_compare = None;
             fv_sync(state);
             relist_if_stale(state)
         }
@@ -4389,8 +5208,8 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             lib(state, LibOp::DeleteOutputs(links))
         }
-        Msg::Ask(text, then) => {
-            state.confirm = Some(Confirm { text, then });
+        Msg::Ask(c) => {
+            state.confirm = Some(c);
             vec![]
         }
         Msg::ConfirmYes => match state.confirm.take() {
@@ -4422,7 +5241,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             let mut fx = relist(state);
             match result {
-                Err(e) => state.messages_error(e),
+                Err(e) => {
+                    if let Some(m) = &mut state.markup {
+                        m.saving = false;
+                    }
+                    state.messages_error(e)
+                }
                 Ok(ok) => fx.extend(op_done(state, ok)),
             }
             fx
@@ -4447,20 +5271,62 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 },
                 PickKind::ModelDir => state.config.sdserver.model_dirs.first().map(PathBuf::from),
                 PickKind::SdServerBinary => PathBuf::from(&state.config.sdserver.binary).parent().map(PathBuf::from),
+                PickKind::KoboldBinary => PathBuf::from(kobold_binary(state)).parent().map(PathBuf::from),
                 PickKind::ExportDir => state.export.as_ref().map(|e| PathBuf::from(&e.dest)),
                 PickKind::Pe(f) => match state.pe.editor.as_ref().map(|e| &e.draft.run) {
-                    Some(PeRun::KoboldCpp { binary, model, mmproj, .. }) => {
+                    Some(PeRun::KoboldCpp { binary, model, mmproj, config, .. }) => {
                         let p = match f {
                             PeFile::Binary => binary,
                             PeFile::Model => model,
                             PeFile::Mmproj if mmproj.is_empty() => model,
                             PeFile::Mmproj => mmproj,
+                            PeFile::Config if config.is_empty() => binary,
+                            PeFile::Config => config,
                         };
                         PathBuf::from(p).parent().map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
                     }
                     _ => None,
                 },
-                PickKind::ImportFiles | PickKind::IdeaImages | PickKind::GenerateRefs | PickKind::TileFile => None,
+                PickKind::Kobold(i, f) => {
+                    let entry = match &state.phase {
+                        Phase::Servers(d) => d.draft.servers.get(i),
+                        _ => None,
+                    };
+                    let p = match entry {
+                        Some(ServerConfig::Kobold(k)) => match (f, &k.run, &k.chat) {
+                            (PeFile::Binary, increart_core::kobold::KoboldRun::Start { binary, .. }, _) => {
+                                binary.clone()
+                            }
+                            (PeFile::Config, increart_core::kobold::KoboldRun::Start { config, binary, .. }, _) => {
+                                if config.is_empty() {
+                                    binary.clone()
+                                } else {
+                                    config.clone()
+                                }
+                            }
+                            (PeFile::Model, _, Some(c)) => c.model.clone(),
+                            (PeFile::Mmproj, _, Some(c)) => {
+                                if c.mmproj.is_empty() {
+                                    c.model.clone()
+                                } else {
+                                    c.mmproj.clone()
+                                }
+                            }
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    let models = state.config.sdserver.model_dirs.first().map(PathBuf::from);
+                    PathBuf::from(p).parent().map(PathBuf::from).filter(|p| p.is_dir()).or(models)
+                }
+                PickKind::WizardBinary | PickKind::WizardModels => match &state.phase {
+                    Phase::Servers(ServerDialog { kobold: Some(k), .. }) => {
+                        let p = PathBuf::from(if kind == PickKind::WizardBinary { &k.binary } else { &k.models_dir });
+                        if p.is_dir() { Some(p) } else { p.parent().map(PathBuf::from).filter(|p| p.is_dir()) }
+                    }
+                    _ => None,
+                },
+                PickKind::ImportFiles | PickKind::IdeaImages | PickKind::GenerateRefs | PickKind::TileFile(_) => None,
             };
             vec![Effect::Pick { kind, start }]
         }
@@ -4476,10 +5342,21 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             PickKind::ImportFiles => update(state, Msg::DropFiles(paths)),
             PickKind::IdeaImages => lib(state, LibOp::ImportImages(paths)),
             PickKind::GenerateRefs => update(state, Msg::DropRefs(paths)),
-            PickKind::TileFile => {
+            PickKind::TileFile(format) => {
+                // the name says what's in the file: another image extension
+                // is replaced, anything else kept and added to
                 let mut path = paths.remove(0);
-                if path.extension().is_none() {
-                    path.set_extension("png");
+                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                let fits = ext == format.ext() || (ext == "jpeg" && format == TileFormat::Jpeg);
+                if !fits {
+                    let image_ext = ext == "jpeg" || TileFormat::available().iter().any(|f| f.ext() == ext);
+                    if image_ext {
+                        path.set_extension(format.ext());
+                    } else {
+                        let name =
+                            format!("{}.{}", path.file_name().unwrap_or_default().to_string_lossy(), format.ext());
+                        path.set_file_name(name);
+                    }
                 }
                 update(state, Msg::TileOut(TileTarget::File(path)))
             }
@@ -4494,18 +5371,49 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 c.binary = paths.remove(0).to_string_lossy().into_owned();
                 update(state, Msg::SetSdServer(c))
             }
+            PickKind::KoboldBinary => {
+                let mut fx = update(state, Msg::SetKoboldBinary(paths.remove(0).to_string_lossy().into_owned()));
+                fx.extend(update(state, Msg::CheckKoboldVersion));
+                fx
+            }
             PickKind::Pe(f) => {
                 let Some(e) = &state.pe.editor else { return vec![] };
                 let mut draft = e.draft.clone();
-                if let PeRun::KoboldCpp { binary, model, mmproj, .. } = &mut draft.run {
+                if let PeRun::KoboldCpp { binary, model, mmproj, config, .. } = &mut draft.run {
                     let path = paths.remove(0).to_string_lossy().into_owned();
                     *match f {
                         PeFile::Binary => binary,
                         PeFile::Model => model,
                         PeFile::Mmproj => mmproj,
+                        PeFile::Config => config,
                     } = path;
                 }
                 update(state, Msg::PeEditorEdit(draft))
+            }
+            PickKind::Kobold(i, f) => {
+                let path = paths.remove(0).to_string_lossy().into_owned();
+                let Phase::Servers(d) = &state.phase else { return vec![] };
+                let Some(ServerConfig::Kobold(k)) = d.draft.servers.get(i) else { return vec![] };
+                let mut k = k.clone();
+                match (f, &mut k.run, &mut k.chat) {
+                    (PeFile::Binary, increart_core::kobold::KoboldRun::Start { binary, .. }, _) => *binary = path,
+                    (PeFile::Config, increart_core::kobold::KoboldRun::Start { config, .. }, _) => *config = path,
+                    (PeFile::Model, _, Some(c)) => c.model = path,
+                    (PeFile::Mmproj, _, Some(c)) => c.mmproj = path,
+                    _ => return vec![],
+                }
+                update(state, Msg::EditServer(i, ServerConfig::Kobold(k)))
+            }
+            PickKind::WizardBinary | PickKind::WizardModels => {
+                let path = paths.remove(0).to_string_lossy().into_owned();
+                let Phase::Servers(ServerDialog { kobold: Some(k), .. }) = &state.phase else { return vec![] };
+                let mut k = (**k).clone();
+                if kind == PickKind::WizardBinary {
+                    k.binary = path;
+                } else {
+                    k.models_dir = path;
+                }
+                update(state, Msg::EditKoboldWizard(k))
             }
             PickKind::ModelDir => {
                 let mut c = state.config.sdserver.clone();
@@ -4536,6 +5444,20 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             state.config.sdserver = c;
             save_config(state)
+        }
+        Msg::SetKoboldBinary(b) => {
+            if b == state.config.koboldcpp {
+                return vec![];
+            }
+            state.config.koboldcpp = b;
+            save_config(state)
+        }
+        Msg::CheckKoboldVersion => kobold_version_once(state),
+        Msg::KoboldVersion(binary, r) => {
+            if let Phase::Servers(d) = &mut state.phase {
+                d.kobold_version = Some((binary, r));
+            }
+            vec![]
         }
         // ------------------------------------------------ folder view
         Msg::FvGo(path) => fv_go(state, path, true),
@@ -4829,12 +5751,13 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     targets.len()
                 )
             };
-            update(state, Msg::Ask(text, Box::new(Msg::FvDeleteConfirmed(targets))))
+            let verb = if place == FvPlace::Collections { "Remove" } else { "Delete" };
+            update(state, Msg::Ask(Confirm::new(text, verb, Msg::FvDeleteConfirmed(targets))))
         }
         Msg::FvDeleteConfirmed(targets) => {
             let mut fx = vec![];
             for t in targets {
-                let is_link = t.extension().is_some_and(|e| e == "png");
+                let is_link = StoreFormat::of_path(&t).is_some();
                 if let Ok(rel) = t.strip_prefix("collections") {
                     fx.extend(update(state, Msg::DeleteNode(Tree::Collections, rel.to_path_buf())));
                 } else if let Ok(rel) = t.strip_prefix("input/library") {
@@ -4903,6 +5826,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::UsageCheck(done, total) => {
             state.usage_check = (done < total).then_some((done, total));
+            state.usage_checked = (done >= total).then_some((total, state.now));
             vec![]
         }
         Msg::ClearMessages => {
@@ -5248,6 +6172,40 @@ pub fn sweep_runs(state: &AppState) -> Result<(Vec<(GenerateForm, SweepTag)>, us
     Ok((runs, unfit.len()))
 }
 
+/// The `<imageN>` numbers the queued prompts would name: the prompt's,
+/// and with a sweep on each style's prompt (its own, or the template with
+/// the style in) or the prompt with its blanks filled.
+pub fn named_image_tags(state: &AppState) -> std::collections::BTreeSet<usize> {
+    use increart_core::prompts::{PresetKey, SweepVary, fill_slots, sweep_presets};
+    let f = &state.generate;
+    let mut prompts = vec![f.prompt.clone()];
+    if f.sweep.on {
+        if f.sweep.vary == SweepVary::Style {
+            for (t, p) in sweep_presets(&state.prompt_presets, &f.sweep) {
+                let key = PresetKey { task: t.name.clone(), name: p.name.clone() };
+                prompts.push(f.sweep.prompt_for(&f.prompt, &key, &p.prompt));
+            }
+        } else {
+            prompts.push(fill_slots(f.prompt.clone(), &f.sweep.slots));
+        }
+    } else {
+        prompts.push(fill_slots(f.prompt.clone(), &f.sweep.slots));
+    }
+    prompts.iter().flat_map(|p| image_tags(p)).map(|(_, n)| n).collect()
+}
+
+/// The references (their `<imageN>` numbers) none of the queued prompts
+/// name, when there are several: likely a tag forgotten, so Queue asks.
+/// One reference on its own is commonly left unnamed.
+pub fn unnamed_refs(state: &AppState) -> Vec<usize> {
+    let n = state.generate.refs().len();
+    if n < 2 {
+        return vec![];
+    }
+    let named = named_image_tags(state);
+    (1..=n).filter(|i| !named.contains(i)).collect()
+}
+
 /// A setting sweep's runs: one per value, the setting changed and the rest
 /// as the form has it (a model sweep takes each model preset's own steps,
 /// CFG and flow shift).
@@ -5421,10 +6379,8 @@ fn queue_sweep(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
     };
     let images = runs.len() as u64 * state.generate.seeds;
     if images > BIG_SWEEP && !confirmed {
-        state.confirm = Some(Confirm {
-            text: format!("Queue {} runs × {} seeds = {images} images?", runs.len(), state.generate.seeds),
-            then: Box::new(Msg::QueueSweep(true)),
-        });
+        let text = format!("Queue {} runs × {} seeds = {images} images?", runs.len(), state.generate.seeds);
+        state.confirm = Some(Confirm::new(text, "Queue", Msg::QueueSweep(true)));
         return vec![];
     }
     // one run at a time would fill the contact sheet a style at a time
@@ -5451,10 +6407,67 @@ fn queue_sweep(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
     lib(state, op)
 }
 
-/// Following stops once Review is moved off the newest image.
+/// Compare with…'s pick: A in the Output library's Grid compare, or
+/// Review's A/B compare (B stays the image it was opened on).
+fn compare_against(state: &mut AppState, a: ImageRef) -> Vec<Effect> {
+    if state.tab == Tab::OutputLibrary {
+        state.output_tab = OutputTab::Grid;
+        state.output_compare = Some(a);
+    } else {
+        state.tab = Tab::Review;
+        state.review_view = ReviewView::Compare;
+        state.review_pinned = Some(a);
+    }
+    vec![]
+}
+
+/// Following stops once Review is moved to another image by hand.
 fn unfollow(state: &mut AppState) {
-    if state.review_cursor + 1 < state.review_queue().len() {
-        state.review_follow = false;
+    state.review_follow = false;
+}
+
+/// Follow starts its time on the image now at the cursor.
+fn follow_shown(state: &mut AppState) {
+    if state.review_follow {
+        state.follow.shown = state.review_queue().get(state.review_cursor).map(|o| o.image.clone());
+        state.follow.elapsed = 0.0;
+        state.follow.at = state.now;
+        state.follow.moved = None;
+    }
+}
+
+/// Follow, after each change: notes new images, keeps to the image shown
+/// (or the one in its place, once it's rated), and moves on once its time
+/// is up and there's another after it.
+fn follow_step(state: &mut AppState) {
+    let now = state.now;
+    let queue: Vec<ImageRef> = state.review_queue().iter().map(|o| o.image.clone()).collect();
+    let f = &mut state.follow;
+    let fresh = queue.iter().filter(|i| f.newest.as_ref().is_none_or(|n| &i.id > n)).count();
+    if fresh > 0 {
+        f.arrivals.extend(std::iter::repeat_n(now, fresh));
+        f.newest = queue.iter().map(|i| i.id.clone()).max();
+    }
+    f.arrivals.retain(|t| now - t <= Follow::WINDOW && *t <= now);
+    match f.shown.as_ref().and_then(|s| queue.iter().position(|i| i == s)) {
+        Some(i) => state.review_cursor = i,
+        None => {
+            state.review_cursor = state.review_cursor.min(queue.len().saturating_sub(1));
+            f.shown = queue.get(state.review_cursor).cloned();
+            f.elapsed = 0.0;
+        }
+    }
+    let away = f.paused || f.held || state.tab != Tab::Review || state.review_view == ReviewView::Sheet;
+    if !away {
+        f.elapsed += (now - f.at).max(0.0);
+    }
+    f.at = now;
+    let ahead = queue.len().saturating_sub(state.review_cursor + 1);
+    if ahead > 0 && f.elapsed >= state.config.review_follow.secs(ahead, f.interval(now)) {
+        f.moved = f.shown.take().map(|i| (now, i));
+        state.review_cursor += 1;
+        f.shown = queue.get(state.review_cursor).cloned();
+        f.elapsed = 0.0;
     }
 }
 
@@ -5639,7 +6652,7 @@ fn ask_text(state: &mut AppState) -> Vec<Effect> {
         images: refs.len(),
         start: start.is_some(),
     };
-    let images: Vec<PathBuf> = refs.iter().chain(&start).map(|r| root.join(r.rel_path())).collect();
+    let images: Vec<PathBuf> = refs.iter().chain(&start).map(|r| r.path(&root)).collect();
     let job = PeJob {
         id: 0,
         key: PeKey::Text(0),
@@ -5655,7 +6668,7 @@ fn ask_text(state: &mut AppState) -> Vec<Effect> {
     let job = queue_job(state, job);
     let t = state.pe.text.as_mut().unwrap();
     (t.waiting, t.error, t.images) = (Some(job.id), None, job.images.len());
-    fx.push(Effect::PeAsk { server, jobs: vec![job] });
+    fx.push(Effect::PeAsk { servers: pool(state, server), jobs: vec![job] });
     fx
 }
 
@@ -5682,6 +6695,7 @@ fn queue_job(state: &mut AppState, mut job: PeJob) -> PeJob {
         asked: now,
         since: now,
         rate: None,
+        on: None,
     });
     job
 }
@@ -5775,17 +6789,35 @@ const MAX_AVOID: usize = 60;
 const NO_CHAT: &str =
     "No chat server in use: add one to a server preset (Servers…), or pick one to continue without sd-servers";
 
+/// The GPUs to tick in the chat server settings, listed when it runs on
+/// GPUs and they aren't listed yet (or were listed by another runtime).
+fn list_gpus_for_editor(state: &mut AppState) -> Vec<Effect> {
+    match draft_runtime(state) {
+        Some(rt) if state.pe.gpus.is_none() || state.pe.gpus_runtime != rt => update(state, Msg::PeListGpus(rt)),
+        _ => vec![],
+    }
+}
+
+/// The GPU runtime of the PE server being edited, when it runs on GPUs.
+fn draft_runtime(state: &AppState) -> Option<increart_core::pe::GpuRuntime> {
+    match &state.pe.editor.as_ref()?.draft.run {
+        PeRun::KoboldCpp { device: increart_core::pe::PeDevice::Gpu { runtime, .. }, .. } => Some(*runtime),
+        _ => None,
+    }
+}
+
 /// A new PE server when there's none to copy: KoboldCpp on every GPU.
-fn new_pe_server() -> increart_core::pe::PeServer {
+fn new_pe_server(runtime: increart_core::pe::GpuRuntime) -> increart_core::pe::PeServer {
     increart_core::pe::PeServer {
         name: "Prompt enhance".into(),
         run: PeRun::KoboldCpp {
             binary: String::new(),
             model: String::new(),
             mmproj: String::new(),
+            config: String::new(),
             host: "127.0.0.1".into(),
             port: 5001,
-            device: increart_core::pe::PeDevice::Gpu { devices: vec![] },
+            device: increart_core::pe::PeDevice::Gpu { devices: vec![], runtime },
             context: 8192,
             args: vec![],
         },
@@ -5898,7 +6930,7 @@ fn ask_styles(
             queue_job(state, j)
         })
         .collect();
-    vec![Effect::PeAsk { server, jobs }]
+    vec![Effect::PeAsk { servers: pool(state, server), jobs }]
 }
 
 /// The request improving a style's prompt, with the prompt built for it
@@ -5917,9 +6949,9 @@ fn style_job(
     let root = state.library.as_ref()?;
     let (mut images, mut start) = (vec![], false);
     if server.vision() && settings.images {
-        images = f.refs().iter().map(|r| root.join(r.rel_path())).collect();
+        images = f.refs().iter().map(|r| r.path(root)).collect();
         if let Some(init) = f.init().filter(|i| !f.refs().contains(i)) {
-            images.push(root.join(init.rel_path()));
+            images.push(init.path(root));
             start = true;
         }
     }
@@ -5964,9 +6996,11 @@ fn blank_job(
     use increart_core::prompts::{PresetKey, slot_names, sweep_presets};
     let f = &state.generate;
     let refs = f.refs().len();
+    // styles only for a style sweep (a single run's blanks are its prompt's)
+    let styled = f.sweep.on && f.sweep.vary == increart_core::prompts::SweepVary::Style;
     let fit: Vec<_> = sweep_presets(&state.prompt_presets, &f.sweep)
         .into_iter()
-        .filter(|(_, p)| crate::state::needs_refs(&p.prompt) <= refs)
+        .filter(|(_, p)| styled && crate::state::needs_refs(&p.prompt) <= refs)
         .collect();
     let has = |p: &str| slot_names([p]).contains(&key.slot);
     let (styles, filled) = match &key.style {
@@ -5986,9 +7020,9 @@ fn blank_job(
     let root = state.library.as_ref()?;
     let (mut images, mut start) = (vec![], false);
     if server.vision() && d.is_none_or(|d| d.images) {
-        images = f.refs().iter().map(|r| root.join(r.rel_path())).collect();
+        images = f.refs().iter().map(|r| r.path(root)).collect();
         if let Some(init) = f.init().filter(|i| !f.refs().contains(i)) {
-            images.push(root.join(init.rel_path()));
+            images.push(init.path(root));
             start = true;
         }
     }
@@ -6042,6 +7076,62 @@ fn start_with_up(state: &mut AppState, progress: &[ServerProgress]) -> Vec<Effec
 
 /// After the Generate form's image list changed: saved soon, and if the
 /// `<imageN>` numbers the prompt uses moved, a prompt edit to confirm.
+/// An edited copy's title: "Edited", then what it was made from.
+fn edited_title(state: &AppState, image: &ImageRef) -> String {
+    let from = match image.store {
+        increart_core::Store::Input => state.input_title(image).filter(|t| !t.is_empty()).map(str::to_string),
+        increart_core::Store::Output => state.image_title(image).map(str::to_string).or_else(|| {
+            let link = state.output_link(image)?;
+            Some(format!("{} seed {}", state.project_of_link(link)?.name(), link.name.seed))
+        }),
+    };
+    from.map_or("Edited image".into(), |f| format!("Edited: {f}"))
+}
+
+/// A saved edited copy: the editor closes and the copy goes where it was
+/// asked to.
+fn edited(state: &mut AppState, image: ImageRef, to: EditedTo) -> Vec<Effect> {
+    state.markup = None;
+    let before = state.generate.refs();
+    match to {
+        EditedTo::Library => {
+            state.messages_info("Edited copy saved (Input library → Show edited copies)");
+            vec![]
+        }
+        EditedTo::Generate(project, i, replace) if state.project.as_ref() == Some(&project) => {
+            let images = &mut state.generate.images;
+            if replace && i < images.len() {
+                // the same <imageN>, now the new copy
+                let old = std::mem::replace(&mut images[i].image, image.clone());
+                let before = before.into_iter().map(|x| if x == old { image.clone() } else { x }).collect();
+                return images_changed(state, before);
+            } else {
+                let at = (i + 1).min(images.len());
+                images.insert(at, increart_core::model::GenerateImage { image, reference: true, start: false });
+            }
+            images_changed(state, before)
+        }
+        EditedTo::Generate(..) => {
+            state.messages_info("Edited copy saved; Generate is on another project now");
+            vec![]
+        }
+        EditedTo::UseInGenerate => {
+            let Some(name) = state.project_entry().map(|p| p.name()) else {
+                state.messages_info("Edited copy saved; select a project to use it in Generate");
+                return vec![];
+            };
+            state.generate.add_reference(image.clone());
+            let tag =
+                state.generate.images.iter().position(|x| x.image == image).and_then(|i| state.generate.tag_of(i));
+            state.messages_info(format!(
+                "Edited copy added to {name}'s Generate form as <image{}>",
+                tag.map_or("?".into(), |t| t.to_string())
+            ));
+            images_changed(state, before)
+        }
+    }
+}
+
 fn images_changed(state: &mut AppState, before: Vec<ImageRef>) -> Vec<Effect> {
     mark_generate(state);
     let after = state.generate.refs();
@@ -6094,7 +7184,7 @@ fn restore_form(state: &mut AppState, d: &increart_core::model::GenerateDraft) {
     }
     if let Some(root) = &state.library {
         let before = f.images.len();
-        f.images.retain(|i| root.join(i.image.rel_path()).is_file());
+        f.images.retain(|i| i.image.path(root).is_file());
         let gone = before - f.images.len();
         if gone > 0 {
             notes.push(format!("{gone} image(s) no longer in the library were left out"));
@@ -6473,7 +7563,7 @@ fn transfer(state: &mut AppState, paths: &[PathBuf], cut: bool, dest: &std::path
             continue;
         }
         if let Ok(to) = dest.strip_prefix("collections") {
-            let is_image = src.extension().is_some_and(|e| e == "png");
+            let is_image = StoreFormat::of_path(src).is_some();
             if is_smart(src) || (is_image && !src.starts_with("collections")) {
                 // an image from a smart folder or a project: added to the collection
                 match state.image_at(src) {
@@ -6503,12 +7593,11 @@ fn transfer(state: &mut AppState, paths: &[PathBuf], cut: bool, dest: &std::path
             state.messages_error(format!("Can't put {} inside itself", src.display()));
             continue;
         }
-        if state.index.projects.iter().any(|p| dest.starts_with(&p.dir)) && !src.extension().is_some_and(|e| e == "png")
-        {
+        if state.index.projects.iter().any(|p| dest.starts_with(&p.dir)) && StoreFormat::of_path(src).is_none() {
             state.messages_error("Folders and projects can't go inside a project");
             continue;
         }
-        if src.extension().is_some_and(|e| e == "png") {
+        if StoreFormat::of_path(src).is_some() {
             // An image link: only between the review folders of its own project.
             let project_of = |p: &std::path::Path| {
                 state.index.projects.iter().find(|x| p.starts_with(&x.dir)).map(|x| x.dir.clone())
@@ -6590,13 +7679,11 @@ fn ask_leaving_generate(state: &mut AppState, then: &Msg) -> bool {
         return false;
     }
     let form = state.project_entry().map_or("the Generate form".into(), |p| format!("{}'s Generate form", p.name()));
-    state.confirm = Some(Confirm {
-        text: format!(
-            "Prompt enhance is still working on {form}: {n} ask(s) for blank values or style prompts \
-             are waiting. Leaving the project stops them (what it already answered is kept)."
-        ),
-        then: Box::new(Msg::LeaveGenerate(Box::new(then.clone()))),
-    });
+    let text = format!(
+        "Prompt enhance is still working on {form}: {n} ask(s) for blank values or style prompts \
+         are waiting. Leaving the project stops them (what it already answered is kept)."
+    );
+    state.confirm = Some(Confirm::new(text, "Leave", Msg::LeaveGenerate(Box::new(then.clone()))));
     true
 }
 
@@ -6664,6 +7751,7 @@ fn op_done(state: &mut AppState, ok: OpOk) -> Vec<Effect> {
     match ok {
         OpOk::Done | OpOk::Idea(_) => {}
         OpOk::Tiled(_) => state.messages_info("Tiled image added to the input library"),
+        OpOk::Edited(id, to) => return edited(state, ImageRef::input(id), to),
         OpOk::ImportedRefs(ids) => {
             return update(state, Msg::AddRefs(ids.into_iter().map(ImageRef::input).collect()));
         }

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, RichText};
 use increart_core::Tree;
-use increart_gui_core::{AppState, Msg, OutputSource, ProjectsTab, ReviewRun, Tab, counts};
+use increart_gui_core::{AppState, Confirm, Msg, OutputSource, ProjectsTab, ReviewRun, Tab, counts};
 
-use crate::widgets::{ACCENT, BAD, drag_source, drop_target, focus_until_done, ic, ph};
+use crate::widgets::{ACCENT, BAD, dialog_buttons, drag_source, drop_target, focus_until_done, ic, ph};
 
 fn children<'a>(folders: &'a [PathBuf], parent: &Path) -> Vec<&'a PathBuf> {
     let mut v: Vec<_> = folders.iter().filter(|f| f.parent() == Some(parent)).collect();
@@ -54,7 +54,7 @@ pub fn rename_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             ui.colored_label(BAD, e);
         }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             let ok = egui::Button::new(
                 RichText::new(ic(ph::CHECK, if creating { "Create   Enter" } else { "Rename   Enter" })).strong(),
             );
@@ -111,7 +111,7 @@ fn folder_menu(ui: &mut egui::Ui, st: &AppState, tree: Tree, path: &Path, out: &
         if ui.button(ic(ph::TRASH, what)).clicked() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let text = format!("Delete folder {name}? {}.", st.delete_summary(tree, path));
-            out.push(Msg::Ask(text, Box::new(Msg::DeleteNode(tree, path.to_path_buf()))));
+            out.push(Msg::Ask(Confirm::new(text, "Delete", Msg::DeleteNode(tree, path.to_path_buf()))));
             ui.close();
         }
     }
@@ -321,7 +321,7 @@ pub fn projects(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                     }
                     if ui.button(ic(ph::TRASH, "Delete… (to the trash)")).clicked() {
                         let text = format!("Delete project {}? {}.", p.name(), st.delete_summary(Tree::Projects, &rel));
-                        out.push(Msg::Ask(text, Box::new(Msg::DeleteNode(Tree::Projects, rel.clone()))));
+                        out.push(Msg::Ask(Confirm::new(text, "Delete", Msg::DeleteNode(Tree::Projects, rel.clone()))));
                         ui.close();
                     }
                 });

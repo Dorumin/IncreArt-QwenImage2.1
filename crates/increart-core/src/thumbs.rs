@@ -24,7 +24,7 @@ pub fn ensure(root: &Path, r: &ImageRef) -> Result<PathBuf> {
     if thumb.is_file() {
         return Ok(thumb);
     }
-    let src = root.join(r.rel_path());
+    let src = r.path(root);
     let img = image::open(&src).map_err(|e| Error::image(&src, e))?;
     let small = img.thumbnail(SIZE, SIZE).to_rgba8();
     let mut out = Vec::new();

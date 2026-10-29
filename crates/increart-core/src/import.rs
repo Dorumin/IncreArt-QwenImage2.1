@@ -30,24 +30,33 @@ impl Original {
     /// The name, path, times, permissions and owner of a file. Call it
     /// before reading the file, which may change its access time.
     pub fn of_file(path: &Path, abs: &Path) -> Original {
-        use std::os::unix::fs::MetadataExt;
-        let secs = |s: i64| chrono::DateTime::from_timestamp(s, 0);
         let whole = |t: std::time::SystemTime| {
             use chrono::SubsecRound;
             Timestamp::from(t).trunc_subsecs(0)
         };
         let meta = std::fs::metadata(path).ok();
-        Original {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut o = Original {
             name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             path: Some(abs.to_string_lossy().into_owned()),
             mtime: meta.as_ref().and_then(|m| m.modified().ok()).map(whole),
-            ctime: meta.as_ref().and_then(|m| secs(m.ctime())),
-            atime: meta.as_ref().and_then(|m| secs(m.atime())),
+            atime: meta.as_ref().and_then(|m| m.accessed().ok()).map(whole),
             created: meta.as_ref().and_then(|m| m.created().ok()).map(whole),
-            mode: meta.as_ref().map(|m| m.mode() & 0o7777),
-            uid: meta.as_ref().map(|m| m.uid()),
-            gid: meta.as_ref().map(|m| m.gid()),
+            ctime: None,
+            mode: None,
+            uid: None,
+            gid: None,
+        };
+        // the inode change time, permissions and owner exist on Unix only
+        #[cfg(unix)]
+        if let Some(m) = &meta {
+            use std::os::unix::fs::MetadataExt;
+            o.ctime = chrono::DateTime::from_timestamp(m.ctime(), 0);
+            o.mode = Some(m.mode() & 0o7777);
+            o.uid = Some(m.uid());
+            o.gid = Some(m.gid());
         }
+        o
     }
 }
 
@@ -180,7 +189,22 @@ pub fn encode_png(pixels: &Pixels, chunks: &[Chunk]) -> Vec<u8> {
     png::set_chunks(&out, chunks).expect("freshly encoded PNG is well formed")
 }
 
-/// Decodes PNG bytes to canonical pixels.
+/// Canonical pixels as PNG, quickly and without chunks (for servers, which
+/// don't read WebP).
+pub fn encode_png_fast(pixels: &Pixels) -> Vec<u8> {
+    let mut out = Vec::new();
+    let enc = image::codecs::png::PngEncoder::new_with_quality(
+        &mut out,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    let color = if pixels.has_alpha() { image::ExtendedColorType::Rgba8 } else { image::ExtendedColorType::Rgb8 };
+    image::ImageEncoder::write_image(enc, &pixels.data, pixels.width, pixels.height, color)
+        .expect("encoding canonical pixels to memory can't fail");
+    out
+}
+
+/// Decodes a store file (PNG or WebP) or server output to canonical pixels.
 pub fn decode_pixels(bytes: &[u8]) -> Result<Pixels, image::ImageError> {
-    Ok(Pixels::from_image(&image::load_from_memory_with_format(bytes, ImageFormat::Png)?))
+    Ok(Pixels::from_image(&image::load_from_memory(bytes)?))
 }

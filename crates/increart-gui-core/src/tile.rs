@@ -13,6 +13,8 @@ use increart_core::config::{TextSize, TileSettings};
 #[derive(Clone, Debug, PartialEq)]
 pub enum TileContent {
     Image(ImageRef),
+    /// Pasted or dropped in: not a library image (held for the session).
+    Pasted(TileImage),
     /// Wrapped, centred text (in the caption colour).
     Text {
         text: String,
@@ -144,6 +146,127 @@ impl TileLayout {
         self.tiles.len() - 1
     }
 
+    /// Images (or pasted ones) from a cell on: each in the first free cell
+    /// after the one before, row by row; with no cell, after the last tile.
+    /// Their indices.
+    pub fn add(&mut self, contents: Vec<TileContent>, at: Option<(u32, u32)>) -> Vec<usize> {
+        let cols = self.cols;
+        let mut next = match at {
+            Some((c, r)) => r as u64 * cols as u64 + c.min(cols - 1) as u64,
+            None => self
+                .tiles
+                .iter()
+                .map(|t| (t.row + t.h - 1) as u64 * cols as u64 + (t.col + t.w) as u64)
+                .max()
+                .unwrap_or(0),
+        };
+        let mut added = vec![];
+        for content in contents {
+            while self.tile_at((next % cols as u64) as u32, (next / cols as u64) as u32).is_some() {
+                next += 1;
+            }
+            let (col, row) = ((next % cols as u64) as u32, (next / cols as u64) as u32);
+            self.tiles.push(Tile { content, col, row, w: 1, h: 1, caption: String::new() });
+            added.push(self.tiles.len() - 1);
+            next += 1;
+        }
+        self.settle(&[]);
+        added
+    }
+
+    /// Images just left of tile `i`: in the empty cells there, else its row
+    /// from it on moves right to make room (widening the grid if it must).
+    pub fn insert_before(&mut self, i: usize, contents: Vec<TileContent>) {
+        let Some(t) = self.tiles.get(i) else { return };
+        let (col, row, n) = (t.col, t.row, contents.len() as u32);
+        let free = (0..col).rev().take_while(|&c| self.tile_at(c, row).is_none()).count() as u32;
+        let shift = n.saturating_sub(free);
+        if shift > 0 {
+            for t in self.tiles.iter_mut().filter(|t| t.row == row && t.col >= col) {
+                t.col += shift;
+            }
+            let end = self.tiles.iter().map(|t| t.col + t.w).max().unwrap_or(1);
+            self.cols = self.cols.max(end).min(MAX_COLS);
+        }
+        let first = col + shift - n;
+        let new: Vec<usize> = (0..contents.len()).map(|k| self.tiles.len() + k).collect();
+        for (k, content) in contents.into_iter().enumerate() {
+            self.tiles.push(Tile { content, col: first + k as u32, row, w: 1, h: 1, caption: String::new() });
+        }
+        self.settle(&new);
+    }
+
+    /// The images' inputs (`inputs` of each) in new columns at the left,
+    /// each row's beside it; an input on rows one after another (and the
+    /// only one) spans them. False when there are none.
+    pub fn inputs_column(&mut self, inputs: impl Fn(&ImageRef) -> Vec<ImageRef>) -> bool {
+        let rows = self.rows();
+        let per_row: Vec<Vec<ImageRef>> = (0..rows)
+            .map(|r| {
+                let mut row: Vec<&Tile> = self.tiles.iter().filter(|t| t.row == r).collect();
+                row.sort_by_key(|t| t.col);
+                let mut v: Vec<ImageRef> = vec![];
+                for i in row.iter().filter_map(|t| t.image()).flat_map(&inputs) {
+                    if !v.contains(&i) {
+                        v.push(i);
+                    }
+                }
+                v
+            })
+            .collect();
+        let k = per_row.iter().map(Vec::len).max().unwrap_or(0) as u32;
+        if k == 0 {
+            return false;
+        }
+        self.cols = (self.cols + k).min(MAX_COLS);
+        for t in &mut self.tiles {
+            t.col += k;
+        }
+        let mut r = 0;
+        while r < rows {
+            let row = &per_row[r as usize];
+            // the same single input on the rows below: one tile down them
+            let mut h = 1;
+            while k == 1 && row.len() == 1 && per_row.get((r + h) as usize) == Some(row) {
+                h += 1;
+            }
+            for (c, image) in row.iter().enumerate() {
+                let content = TileContent::Image(image.clone());
+                self.tiles.push(Tile { content, col: c as u32, row: r, w: 1, h, caption: String::new() });
+            }
+            r += h;
+        }
+        self.settle(&[]);
+        true
+    }
+
+    /// Each image's inputs just before it (repeated where shared), in
+    /// order; twice the columns. False when there are none.
+    pub fn inputs_before(&mut self, inputs: impl Fn(&ImageRef) -> Vec<ImageRef>) -> bool {
+        let mut old = std::mem::take(&mut self.tiles);
+        old.sort_by_key(|t| (t.row, t.col));
+        let mut any = false;
+        for t in old {
+            for i in t.image().map(&inputs).unwrap_or_default() {
+                any = true;
+                self.tiles.push(Tile {
+                    content: TileContent::Image(i),
+                    col: 0,
+                    row: 0,
+                    w: 1,
+                    h: 1,
+                    caption: String::new(),
+                });
+            }
+            self.tiles.push(t);
+        }
+        if any {
+            self.cols = (self.cols * 2).min(MAX_COLS);
+        }
+        self.reflow();
+        any
+    }
+
     pub fn images(&self) -> impl Iterator<Item = &ImageRef> {
         self.tiles.iter().filter_map(Tile::image)
     }
@@ -185,7 +308,7 @@ impl Tile {
     pub fn image(&self) -> Option<&ImageRef> {
         match &self.content {
             TileContent::Image(i) => Some(i),
-            TileContent::Text { .. } => None,
+            TileContent::Pasted(_) | TileContent::Text { .. } => None,
         }
     }
 }
@@ -328,8 +451,11 @@ pub fn compose(root: &Path, layout: &TileLayout, s: &TileSettings) -> Result<Rgb
         .tiles
         .iter()
         .map(|t| {
+            if let TileContent::Pasted(p) = &t.content {
+                return Ok(Some((*p.0).clone()));
+            }
             let Some(image) = t.image() else { return Ok(None) };
-            let path = root.join(image.rel_path());
+            let path = image.path(root);
             image::open(&path).map(|i| Some(i.to_rgba8())).map_err(|e| format!("{}: {e}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -342,9 +468,15 @@ pub fn compose_images(
     images: &[Option<RgbaImage>],
     s: &TileSettings,
 ) -> Result<RgbaImage, String> {
-    let largest = images
-        .iter()
-        .flatten()
+    // cells fit the outputs; inputs and pasted images fit into them (unless
+    // there are only those)
+    let sized = |want: fn(&TileContent) -> bool| {
+        layout.tiles.iter().zip(images).filter(move |(t, _)| want(&t.content)).filter_map(|(_, i)| i.as_ref())
+    };
+    let outputs =
+        |c: &TileContent| matches!(c, TileContent::Image(i) if i.store == increart_core::model::Store::Output);
+    let any = |_: &TileContent| true;
+    let largest = (if sized(outputs).next().is_some() { sized(outputs) } else { sized(any) })
         .fold(None, |a: Option<(u32, u32)>, i| {
             Some(a.map_or(i.dimensions(), |(w, h)| (w.max(i.width()), h.max(i.height()))))
         })
@@ -374,8 +506,8 @@ pub fn compose_images(
                 draw_text(&mut out, &font, text, g.text_px(t), (x, y, w, h), s.caption_color);
                 continue;
             }
-            (TileContent::Image(_), Some(img)) => img,
-            (TileContent::Image(_), None) => continue,
+            (TileContent::Image(_) | TileContent::Pasted(_), Some(img)) => img,
+            (TileContent::Image(_) | TileContent::Pasted(_), None) => continue,
         };
         let (iw, ih) = (img.width() as f64, img.height() as f64);
         let k = if s.fill { (w as f64 / iw).max(h as f64 / ih) } else { (w as f64 / iw).min(h as f64 / ih) };
@@ -538,6 +670,77 @@ mod tests {
         assert_eq!((l.cols, l.rows()), (3, 2));
         assert_eq!(cells(&l), [(0, 0, 1, 1), (2, 0, 1, 1), (1, 1, 1, 1)]);
         assert_eq!(l.tile_at(1, 0), None, "a hole");
+    }
+
+    fn input(n: u32) -> ImageRef {
+        ImageRef::input(format!("2026.01.01-00.00-{n:04}").parse::<Id>().unwrap())
+    }
+
+    #[test]
+    fn adds_images_from_a_cell_or_after_the_last_tile() {
+        let mut l = TileLayout::flow((0..3).map(img).collect(), 2);
+        // from the cell on, skipping taken ones
+        let added = l.add(vec![TileContent::Image(img(7)), TileContent::Image(img(8))], Some((1, 0)));
+        assert_eq!(added, [3, 4]);
+        assert_eq!(cells(&l)[3..], [(1, 1, 1, 1), (0, 2, 1, 1)]);
+        // no cell: after the last
+        l.add(vec![TileContent::Image(img(9))], None);
+        assert_eq!(cells(&l)[5], (1, 2, 1, 1));
+    }
+
+    #[test]
+    fn inputs_go_in_a_column_or_before_each_image() {
+        // A B made from X, C from Y
+        let of = |i: &ImageRef| match i {
+            i if *i == img(0) || *i == img(1) => vec![input(10)],
+            i if *i == img(2) => vec![input(11)],
+            _ => vec![],
+        };
+        let mut l = TileLayout::flow((0..3).map(img).collect(), 2);
+        assert!(l.inputs_column(of));
+        assert_eq!(l.cols, 3);
+        let at = |l: &TileLayout, c, r| l.tile_at(c, r).and_then(|i| l.tiles[i].image().cloned());
+        assert_eq!((at(&l, 0, 0), at(&l, 1, 0), at(&l, 2, 0)), (Some(input(10)), Some(img(0)), Some(img(1))));
+        assert_eq!((at(&l, 0, 1), at(&l, 1, 1)), (Some(input(11)), Some(img(2))));
+        // one input on rows one after another: spans them
+        let mut l = TileLayout::flow((0..2).map(img).collect(), 1);
+        assert!(l.inputs_column(of));
+        assert_eq!(l.tiles.len(), 3);
+        assert_eq!(cells(&l)[2], (0, 0, 1, 2));
+
+        let mut l = TileLayout::flow((0..3).map(img).collect(), 2);
+        assert!(l.inputs_before(of));
+        assert_eq!(l.cols, 4);
+        let order: Vec<_> = (0..6).map(|k| at(&l, k % 4, k / 4)).collect();
+        assert_eq!(order, [input(10), img(0), input(10), img(1), input(11), img(2)].map(Some));
+        // text only: nothing changes
+        let mut l = TileLayout::flow(vec![img(5)], 1);
+        assert!(!l.inputs_column(of) && !l.inputs_before(of));
+        assert_eq!(l.tiles.len(), 1);
+    }
+
+    #[test]
+    fn inputs_before_a_tile_take_the_empty_cells_or_push_its_row() {
+        let mut l = TileLayout::at(vec![(img(0), 2, 0), (img(1), 0, 1)]);
+        l.insert_before(0, vec![TileContent::Image(input(10))]);
+        assert_eq!(cells(&l)[2], (1, 0, 1, 1), "the empty cell left of it");
+        l.insert_before(1, vec![TileContent::Image(input(11))]);
+        assert_eq!((cells(&l)[1], cells(&l)[3]), ((1, 1, 1, 1), (0, 1, 1, 1)), "its row moves over");
+    }
+
+    #[test]
+    fn cells_fit_the_outputs_not_the_inputs_or_pasted() {
+        let big = RgbaImage::new(40, 40);
+        let small = RgbaImage::new(10, 10);
+        let mut l = TileLayout::flow(vec![img(0), input(1)], 3);
+        l.add(vec![TileContent::Pasted(TileImage(Arc::new(big.clone())))], None);
+        let s = TileSettings { gap: 0, ..TileSettings::default() };
+        let out = compose_images(&l, &[Some(small.clone()), Some(big.clone()), Some(big.clone())], &s).unwrap();
+        assert_eq!(out.dimensions(), (30, 10));
+        // only pasted: those size the cells
+        let mut l = TileLayout { cols: 1, ..TileLayout::default() };
+        l.add(vec![TileContent::Pasted(TileImage(Arc::new(big.clone())))], None);
+        assert_eq!(compose_images(&l, &[Some(big)], &s).unwrap().dimensions(), (40, 40));
     }
 
     #[test]

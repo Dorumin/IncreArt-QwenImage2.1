@@ -11,21 +11,27 @@
 //!   store links.
 
 pub mod config;
+pub mod container;
 pub mod engine;
 pub mod error;
+pub mod export;
 pub mod fsutil;
 pub mod history;
 pub mod id;
 pub mod import;
+pub mod kobold;
+pub mod kobold_image;
 pub mod launcher;
 pub mod library;
 pub mod link;
+pub mod markup;
 pub mod model;
 pub mod modelhash;
 pub mod notify;
 pub mod pe;
 pub mod pixel;
 pub mod png;
+pub mod process;
 pub mod prompts;
 pub mod request;
 pub mod rsnfmt;
@@ -33,6 +39,8 @@ pub mod scan;
 pub mod scheduler;
 pub mod sdserver;
 pub mod thumbs;
+pub mod tiers;
+pub mod webp;
 
 pub use error::{Error, Result};
 pub use id::{Id, IdKind};

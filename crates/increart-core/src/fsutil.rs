@@ -19,6 +19,44 @@ pub fn sync(f: &fs::File) -> std::io::Result<()> {
     if FSYNC.load(std::sync::atomic::Ordering::Relaxed) { f.sync_all() } else { Ok(()) }
 }
 
+/// Reads `buf.len()` bytes at `at` (the file's position may move).
+pub fn read_exact_at(f: &fs::File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_exact_at(f, buf, at)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            match std::os::windows::fs::FileExt::seek_read(f, &mut buf[done..], at + done as u64)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                n => done += n,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes all of `buf` at `at` (the file's position may move).
+pub fn write_all_at(f: &fs::File, buf: &[u8], at: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::write_all_at(f, buf, at)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            match std::os::windows::fs::FileExt::seek_write(f, &buf[done..], at + done as u64)? {
+                0 => return Err(std::io::ErrorKind::WriteZero.into()),
+                n => done += n,
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Writes via a temporary sibling and a rename, so readers never see a half
 /// written file.
 /// A symlink is written through: its target is replaced, the link kept.

@@ -135,6 +135,9 @@ enum Report {
     },
     /// Polling failed: the server is unwell; its jobs are abandoned.
     PollFailed(ApiError),
+    /// A load waits (for another server's load, or for free RAM): shown as
+    /// its state until `None`.
+    Waiting(Option<String>),
 }
 
 pub struct Engine {
@@ -181,6 +184,7 @@ impl Engine {
             opts,
             runs: HashMap::new(),
             shown: vec![],
+            waiting: vec![],
             events: etx,
             notify,
         };
@@ -239,6 +243,8 @@ struct Coordinator {
     runs: HashMap<Id, Run>,
     /// Last server state sent as an event.
     shown: Vec<Option<(String, Option<ModelKey>, bool)>>,
+    /// Why a server's load waits, shown in place of "loading …".
+    waiting: Vec<Option<String>>,
     events: Sender<Event>,
     notify: Option<Box<dyn Fn() + Send>>,
 }
@@ -257,6 +263,7 @@ fn state_label(s: &ServerState) -> String {
 impl Coordinator {
     fn run(&mut self, rx: Receiver<Msg>) {
         self.shown = vec![None; self.servers.len()];
+        self.waiting = vec![None; self.servers.len()];
         loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
@@ -291,7 +298,11 @@ impl Coordinator {
             self.perform(action);
         }
         for i in 0..self.servers.len() {
-            let (state, model) = (state_label(self.sched.server_state(i)), self.sched.model_of(i).cloned());
+            let mut state = state_label(self.sched.server_state(i));
+            if let (ServerState::Loading { .. }, Some(w)) = (self.sched.server_state(i), &self.waiting[i]) {
+                state = w.clone();
+            }
+            let model = self.sched.model_of(i).cloned();
             let idle =
                 matches!(self.sched.server_state(i), ServerState::Ready) && self.sched.in_flight(i).next().is_none();
             if self.shown[i].as_ref() != Some(&(state.clone(), model.clone(), idle)) {
@@ -360,7 +371,9 @@ impl Coordinator {
                     }
                     self.sched.warmed(s, r.is_ok(), now)
                 }
+                Report::Waiting(w) => self.waiting[s] = w,
                 Report::Loaded(r) => {
+                    self.waiting[s] = None;
                     let target = match self.sched.server_state(s) {
                         ServerState::Loading { target } => target.clone(),
                         _ => return,
@@ -495,7 +508,7 @@ impl Coordinator {
                 elapsed_s: job.elapsed_s().unwrap_or(0.0) as f32,
                 queued_s: job.started.map_or(0.0, |t| (t - job.created).max(0) as f32 / 1000.0),
                 step_s,
-                sdcpp: self.opts.sdcpp.clone(),
+                sdcpp: self.servers[s].client.software().unwrap_or_else(|| self.opts.sdcpp.clone()),
             };
             let recipe = request::recipe(run, seed.seed, &p);
             self.lib().write_output(&seed.run, seed.rev, seed.seed, &png, &recipe).map_err(|e| e.to_string())
@@ -558,6 +571,57 @@ impl Polled {
     }
 }
 
+/// One model load at a time among the servers on this machine: two at
+/// once read and pin tens of GB together, which stalled the desktop.
+static LOCAL_LOADS: Mutex<()> = Mutex::new(());
+
+/// The RAM a load leaves free for everything else (GiB).
+const RAM_HEADROOM_GIB: f64 = 8.0;
+
+/// Loads `model`. On this machine: after any other server's load, and once
+/// the RAM it pins is free with [`RAM_HEADROOM_GIB`] to spare. `None`: the
+/// engine has gone.
+fn load(client: &Client, model: &ModelKey, report: &impl Fn(Report) -> bool) -> Option<Result<ModelStatus, ApiError>> {
+    if !client.is_local() {
+        return Some(client.load_model(model));
+    }
+    let _one = match LOCAL_LOADS.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            if !report(Report::Waiting(Some("waiting for another server's load".into()))) {
+                return None;
+            }
+            LOCAL_LOADS.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    };
+    const GIB: f64 = (1u64 << 30) as f64;
+    let need = client.load_ram_need(model) as f64 / GIB;
+    if need > 0.0 {
+        if let Some(total) = crate::tiers::total_ram_gib()
+            && need + RAM_HEADROOM_GIB > total
+        {
+            return Some(Err(ApiError::ModelLoadFailed(format!(
+                "it needs {need:.0} GiB of RAM for its offloaded weights; this machine has {total:.0} GiB"
+            ))));
+        }
+        let mut shown = None;
+        while let Some(free) = crate::tiers::available_ram_gib()
+            && free < need + RAM_HEADROOM_GIB
+        {
+            let text = format!("waiting for RAM: needs {need:.0} GiB, {free:.0} GiB free");
+            if shown.as_ref() != Some(&text) {
+                if !report(Report::Waiting(Some(text.clone()))) {
+                    return None;
+                }
+                shown = Some(text);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+    report(Report::Waiting(None));
+    Some(client.load_model(model))
+}
+
 fn worker(server: ServerIdx, client: Client, cmds: Receiver<Cmd>, reports: Sender<Msg>, poll: Duration) {
     let report = |r: Report| reports.send(Msg::Report(server, r)).is_ok();
     let mut jobs: Vec<Polled> = vec![];
@@ -571,7 +635,10 @@ fn worker(server: ServerIdx, client: Client, cmds: Receiver<Cmd>, reports: Sende
         let alive = match cmd {
             None => true,
             Some(Cmd::Probe) => report(Report::Probed(client.model_status())),
-            Some(Cmd::Load(model)) => report(Report::Loaded(client.load_model(&model))),
+            Some(Cmd::Load(model)) => match load(&client, &model, &report) {
+                Some(r) => report(Report::Loaded(r)),
+                None => false,
+            },
             Some(Cmd::WarmUp(body)) => report(Report::Warmed(warm_up(&client, &body, poll))),
             Some(Cmd::Submit { ticket, body }) => {
                 if let Some(p) = cancelled_early.iter().position(|t| *t == ticket) {
@@ -620,7 +687,10 @@ fn worker(server: ServerIdx, client: Client, cmds: Receiver<Cmd>, reports: Sende
                     {
                         j.last = Some((p.pass, p.step));
                         j.step_seen(p.pass, p.step);
-                        let preview = base64::engine::general_purpose::STANDARD.decode(&p.b64_json).ok();
+                        let preview = base64::engine::general_purpose::STANDARD
+                            .decode(&p.b64_json)
+                            .ok()
+                            .filter(|b| !b.is_empty());
                         let _ = report(Report::Progress { ticket, step: p.step, total: p.total_steps, preview });
                     }
                 }

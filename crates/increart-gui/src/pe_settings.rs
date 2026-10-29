@@ -2,10 +2,10 @@
 //! runs on and when it starts (DESIGN.md, Prompt enhance).
 
 use eframe::egui::{self, RichText};
-use increart_core::pe::{PeDevice, PeRun, PeServer, PeStart};
+use increart_core::pe::{GpuRuntime, PeDevice, PeRun, PeServer, PeStart};
 use increart_gui_core::{AppState, Msg, PeFile, PeStatus, PickKind};
 
-use crate::widgets::{BAD, ic, ph};
+use crate::widgets::{BAD, dialog_buttons, ic, ph};
 
 /// The chat server in use in one line, with ways to start and stop it: the
 /// server status window's PE row.
@@ -57,20 +57,23 @@ pub fn describe(server: &PeServer) -> String {
         PeStart::AtLaunch => "started with its preset",
     };
     match &server.run {
-        PeRun::KoboldCpp { model, mmproj, device, .. } => {
+        PeRun::KoboldCpp { model, mmproj, config, device, .. } => {
             let file =
                 |p: &str| std::path::Path::new(p).file_name().map_or(p.to_string(), |f| f.to_string_lossy().into());
             let vision = if mmproj.is_empty() { "no vision".to_string() } else { format!("vision: {}", file(mmproj)) };
             let on = match device {
                 PeDevice::Auto => String::new(),
                 PeDevice::Cpu { .. } => " on the CPU".into(),
-                PeDevice::Gpu { devices } if devices.is_empty() => " on every GPU".into(),
-                PeDevice::Gpu { devices } => {
+                PeDevice::Gpu { devices, runtime } if devices.is_empty() => {
+                    format!(" on every GPU ({})", runtime.label())
+                }
+                PeDevice::Gpu { devices, runtime } => {
                     let n: Vec<String> = devices.iter().map(u32::to_string).collect();
-                    format!(" on GPU {}", n.join(", "))
+                    format!(" on {} GPU {}", runtime.label(), n.join(", "))
                 }
             };
-            format!("KoboldCpp{on} at {}, {when}: {} ({vision})", server.base_url(), file(model))
+            let model = if model.is_empty() { file(config) } else { file(model) };
+            format!("KoboldCpp{on} at {}, {when}: {model} ({vision})", server.base_url())
         }
         PeRun::Connect { url } => format!("Connects to {url}, {when}"),
     }
@@ -93,7 +96,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             ui.horizontal(|ui| {
                 let kobold = matches!(d.run, PeRun::KoboldCpp { .. });
                 if ui.radio(kobold, "KoboldCpp, started by IncreArt").clicked() && !kobold {
-                    d.run = kobold_from(&d.run);
+                    d.run = kobold_from(&d.run, st.gpu_runtime);
                 }
                 if ui.radio(!kobold, "Connect to one running").clicked() && kobold {
                     d.run = PeRun::Connect { url: d.base_url() };
@@ -101,9 +104,11 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             });
             ui.end_row();
             match &mut d.run {
-                PeRun::KoboldCpp { binary, model, mmproj, host, port, device, context, args } => {
-                    file_row(ui, "Binary", binary, "koboldcpp", PeFile::Binary, out);
-                    file_row(ui, "Model", model, ".gguf", PeFile::Model, out);
+                PeRun::KoboldCpp { binary, model, mmproj, config, host, port, device, context, args } => {
+                    file_row(ui, "Binary", binary, "koboldcpp, or a command line (python3 koboldcpp.py)", PeFile::Binary, out);
+                    file_row(ui, "Settings", config, ".kcpps from KoboldCpp's launcher (optional; the rest goes over it)", PeFile::Config, out);
+                    let hint = if config.is_empty() { ".gguf" } else { ".gguf (empty: the settings file's)" };
+                    file_row(ui, "Model", model, hint, PeFile::Model, out);
                     file_row(ui, "Vision", mmproj, "mmproj .gguf (empty: text only, no image reading)", PeFile::Mmproj, out);
                     ui.label("Address");
                     ui.horizontal(|ui| {
@@ -161,12 +166,13 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             ui.weak("Opening the preset again restarts the one in use with these settings.");
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let save = if e.index.is_some() { "Done" } else { "Add" };
-            if ui.button(RichText::new(ic(ph::CHECK, save)).strong()).clicked() {
+        let enter = st.confirm.is_none() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        dialog_buttons(ui, |ui| {
+            let save = if e.index.is_some() { "Save   Enter" } else { "Add   Enter" };
+            if ui.button(RichText::new(ic(ph::CHECK, save)).strong()).clicked() || enter {
                 out.push(Msg::PeEditorSave);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::PeEditorClose);
             }
         });
@@ -181,7 +187,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
 
 /// KoboldCpp settings for a server that connected before (its address
 /// kept).
-fn kobold_from(run: &PeRun) -> PeRun {
+fn kobold_from(run: &PeRun, runtime: GpuRuntime) -> PeRun {
     let (host, port) = match run {
         PeRun::Connect { url } => {
             let rest = url.split_once("://").map_or(url.as_str(), |(_, r)| r).trim_end_matches('/');
@@ -196,9 +202,10 @@ fn kobold_from(run: &PeRun) -> PeRun {
         binary: String::new(),
         model: String::new(),
         mmproj: String::new(),
+        config: String::new(),
         host: if host.is_empty() { "127.0.0.1".into() } else { host },
         port,
-        device: PeDevice::Gpu { devices: vec![] },
+        device: PeDevice::Gpu { devices: vec![], runtime },
         context: 8192,
         args: vec![],
     }
@@ -221,11 +228,11 @@ fn device_choice(ui: &mut egui::Ui, st: &AppState, device: &mut PeDevice, out: &
     ui.horizontal(|ui| {
         if ui
             .radio(matches!(device, PeDevice::Gpu { .. }), "GPU")
-            .on_hover_text("Vulkan, every layer on the GPU: much quicker")
+            .on_hover_text("Every layer on the GPU: much quicker")
             .clicked()
             && !matches!(device, PeDevice::Gpu { .. })
         {
-            *device = PeDevice::Gpu { devices: vec![] };
+            *device = PeDevice::Gpu { devices: vec![], runtime: st.gpu_runtime };
         }
         if ui
             .radio(matches!(device, PeDevice::Cpu { .. }), "CPU")
@@ -248,7 +255,14 @@ fn device_choice(ui: &mut egui::Ui, st: &AppState, device: &mut PeDevice, out: &
                 ui.weak(if *threads == 0 { "(KoboldCpp's choice)" } else { "" });
             });
         }
-        PeDevice::Gpu { devices } => {
+        PeDevice::Gpu { devices, runtime } => {
+            ui.horizontal(|ui| {
+                ui.label("Runtime");
+                // numbered differently (listed again once edited)
+                if runtime_choice(ui, "pe_runtime", runtime) {
+                    devices.clear();
+                }
+            });
             match &st.pe.gpus {
                 None => {
                     ui.horizontal(|ui| {
@@ -286,10 +300,35 @@ fn device_choice(ui: &mut egui::Ui, st: &AppState, device: &mut PeDevice, out: &
                     "the model split across these"
                 });
                 if st.pe.gpus.is_some() && ui.small_button(ic(ph::ARROWS_CLOCKWISE, "List again")).clicked() {
-                    out.push(Msg::PeListGpus);
+                    out.push(Msg::PeListGpus(*runtime));
                 }
             });
             ui.weak("Shares GPU memory with image generation: about 7 GB for an 8B model.");
         }
     }
+}
+
+/// Vulkan / CUDA / ROCm, or Metal on a Mac; true when changed.
+pub(crate) fn runtime_choice(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    runtime: &mut GpuRuntime,
+) -> bool {
+    let before = *runtime;
+    egui::ComboBox::from_id_salt(id).selected_text(runtime.label()).show_ui(ui, |ui| {
+        let mut list = GpuRuntime::here();
+        if !list.contains(&before) {
+            list.push(before);
+        }
+        for r in list {
+            let hover = match r {
+                GpuRuntime::Vulkan => "Any GPU with a Vulkan driver; every KoboldCpp build but the Mac one has it",
+                GpuRuntime::Cuda => "NVIDIA GPUs, with KoboldCpp's CUDA build (not the nocuda one)",
+                GpuRuntime::Rocm => "AMD GPUs, with a ROCm build of KoboldCpp (koboldcpp-rocm)",
+                GpuRuntime::Metal => "Apple silicon, with KoboldCpp's Mac build",
+            };
+            ui.selectable_value(runtime, r, r.label()).on_hover_text(hover);
+        }
+    });
+    *runtime != before
 }

@@ -10,13 +10,14 @@ use increart_gui_core::{AppState, Msg, Phase, ProjectsTab, Runtime, Tab, update}
 
 use crate::textures::Textures;
 use crate::tour::Tour;
-use crate::widgets::{BAD, GOOD, NEUTRAL, ic, ph};
+use crate::widgets::{BAD, GOOD, NEUTRAL, dialog_buttons, dialog_footer, ic, ph};
 use crate::{ideas, projects, review};
 
 pub struct App {
     st: AppState,
     rt: Runtime,
     tex: Textures,
+    logs: crate::logs::Cache,
     tour: Option<Tour>,
     shown_library: Option<PathBuf>,
     /// The app's clock (`Msg::Tick`).
@@ -37,6 +38,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let rt = Runtime::new(move || ctx.request_repaint());
         let mut st = AppState::new(config, config_path);
+        st.gpu_runtime = increart_core::pe::GpuRuntime::likely();
         for w in warnings {
             st.messages_info(w);
         }
@@ -59,6 +61,7 @@ impl App {
             st,
             rt,
             tex: Textures::new(&cc.egui_ctx),
+            logs: Default::default(),
             tour,
             shown_library: None,
             started: std::time::Instant::now(),
@@ -218,6 +221,22 @@ impl App {
                     .on_hover_text("Checking each image's usage counts against the runs (after opening the library)");
                     ui.weak(RichText::new("checking images").small());
                     ui.separator();
+                }
+                // done: shown full a few seconds more
+                let shown = increart_gui_core::USAGE_CHECKED_SHOWN;
+                if let Some((total, at)) = st.usage_checked.filter(|(_, at)| st.now - at < shown) {
+                    ui.add(
+                        egui::ProgressBar::new(1.0)
+                            .desired_width(120.0)
+                            .desired_height(12.0)
+                            .text(RichText::new(format!("{total} / {total}")).small()),
+                    )
+                    .on_hover_text(
+                        "Each image's usage counts were checked against the runs (after opening the library)",
+                    );
+                    ui.weak(RichText::new(format!("checked {total} images")).small());
+                    ui.separator();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(shown - (st.now - at)));
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     if st.busy > 0 {
@@ -628,7 +647,7 @@ fn jobs_indicator(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, force_op
             }
             ui.separator();
             ui.label(RichText::new(ic(ph::HARD_DRIVES, "Servers")).strong());
-            crate::projects::server_list(ui, st);
+            crate::projects::server_list(ui, st, out);
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Open Projects → Jobs").clicked() {
@@ -644,44 +663,42 @@ fn jobs_indicator(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, force_op
         });
 }
 
-/// The Export… dialog: destination, metadata, file names.
+/// The Export… dialog: destination, metadata, file names. Enter exports,
+/// Escape or a click outside cancels.
 fn export_window(ctx: &egui::Context, e: &increart_gui_core::ExportDialog, out: &mut Vec<Msg>) {
     let mut d = e.clone();
-    let mut open = true;
-    egui::Window::new(ic(ph::EXPORT, &format!("Export {}", e.what)))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label(format!("{} image(s), copied as PNG; the library is unchanged.", d.images.len()));
-            ui.horizontal(|ui| {
-                ui.label("To");
-                ui.add(egui::TextEdit::singleline(&mut d.dest).desired_width(320.0).hint_text("/path/to/folder"));
-                if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
-                    out.push(Msg::Pick(increart_gui_core::PickKind::ExportDir));
-                }
-            });
-            ui.checkbox(&mut d.keep_metadata, "keep metadata (recipe, sd-server parameters, EXIF)");
-            ui.horizontal(|ui| {
-                ui.label("Names:");
-                ui.radio_value(&mut d.by_id, false, "run / revision / seed");
-                ui.radio_value(&mut d.by_id, true, "image ID");
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(RichText::new(ic(ph::EXPORT, "Export")).strong()).clicked() {
-                    out.push(Msg::RunExport);
-                }
-                if ui.button("Cancel").clicked() {
-                    out.push(Msg::CloseExport);
-                }
-            });
+    let m = egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
+        ui.heading(ic(ph::EXPORT, &format!("Export {}", e.what)));
+        ui.label(format!("{} image(s), copied as PNG; the library is unchanged.", d.images.len()));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("To");
+            ui.add(egui::TextEdit::singleline(&mut d.dest).desired_width(320.0).hint_text("/path/to/folder"));
+            if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
+                out.push(Msg::Pick(increart_gui_core::PickKind::ExportDir));
+            }
         });
+        ui.checkbox(&mut d.keep_metadata, "keep metadata (recipe, sd-server parameters, EXIF)");
+        ui.horizontal(|ui| {
+            ui.label("Names:");
+            ui.radio_value(&mut d.by_id, false, "run / revision / seed");
+            ui.radio_value(&mut d.by_id, true, "image ID");
+        });
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(8.0);
+        dialog_buttons(ui, |ui| {
+            if ui.button(RichText::new(ic(ph::EXPORT, "Export   Enter")).strong()).clicked() || enter {
+                out.push(Msg::RunExport);
+            }
+            if ui.button("Cancel   Esc").clicked() {
+                out.push(Msg::CloseExport);
+            }
+        });
+    });
     if &d != e {
         out.push(Msg::EditExport(d));
     }
-    if !open {
+    if m.should_close() {
         out.push(Msg::CloseExport);
     }
 }
@@ -693,7 +710,7 @@ fn server_status_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) 
         ui.set_width(520.0);
         ui.heading(ic(ph::HARD_DRIVES, "Servers"));
         ui.add_space(6.0);
-        crate::projects::server_list(ui, st);
+        crate::projects::server_list(ui, st, out);
         if st.background.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -718,19 +735,26 @@ fn server_status_window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) 
         ui.label(RichText::new(ic(ph::MAGIC_WAND, "Prompt enhance (PE)")).strong());
         pe_section(ui, st, out);
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new(ic(ph::GEAR, "Change servers…")).strong()).clicked() {
-                out.push(Msg::OpenServerDialog);
-            }
-            if ui.button(ic(ph::QUEUE, "Jobs")).on_hover_text("Projects → Jobs").clicked() {
-                out.push(Msg::ServerStatus(false));
-                out.push(Msg::Tab(Tab::Projects));
-                out.push(Msg::ProjectsTab(ProjectsTab::Jobs));
-            }
-            if ui.button("Close").clicked() {
-                out.push(Msg::ServerStatus(false));
-            }
-        });
+        let (logs, _) = dialog_footer(
+            ui,
+            |ui| ui.button(ic(ph::SCROLL, "Logs…")).on_hover_text("the logs of the servers IncreArt started").clicked(),
+            |ui| {
+                if ui.button(RichText::new(ic(ph::GEAR, "Change servers…")).strong()).clicked() {
+                    out.push(Msg::OpenServerDialog);
+                }
+                if ui.button(ic(ph::QUEUE, "Jobs")).on_hover_text("Projects → Jobs").clicked() {
+                    out.push(Msg::ServerStatus(false));
+                    out.push(Msg::Tab(Tab::Projects));
+                    out.push(Msg::ProjectsTab(ProjectsTab::Jobs));
+                }
+                if ui.button("Close   Esc").clicked() {
+                    out.push(Msg::ServerStatus(false));
+                }
+            },
+        );
+        if logs {
+            out.push(Msg::OpenLogs(None));
+        }
     });
     if m.should_close() {
         out.push(Msg::ServerStatus(false));
@@ -753,11 +777,11 @@ fn title_window(ctx: &egui::Context, e: &increart_gui_core::TitleEdit, out: &mut
         }
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             if ui.button(RichText::new("Save   Enter").strong()).clicked() || enter {
                 out.push(Msg::CommitTitle);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::TitleDialog(None));
             }
         });
@@ -777,7 +801,7 @@ fn no_server_window(ctx: &egui::Context, out: &mut Vec<Msg>) {
             "The run will wait in the queue until a server joins. You won't be asked again until IncreArt restarts.",
         );
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        dialog_buttons(ui, |ui| {
             if ui.button(RichText::new(ic(ph::GEAR, "Set up servers…")).strong()).clicked() {
                 out.push(Msg::CloseNoServerWarning);
                 out.push(Msg::OpenServerDialog);
@@ -786,7 +810,7 @@ fn no_server_window(ctx: &egui::Context, out: &mut Vec<Msg>) {
                 out.push(Msg::CloseNoServerWarning);
                 out.push(Msg::QueueGenerate);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel   Esc").clicked() {
                 out.push(Msg::CloseNoServerWarning);
             }
         });
@@ -799,7 +823,7 @@ fn no_server_window(ctx: &egui::Context, out: &mut Vec<Msg>) {
 /// Back / forward from the keyboard and the mouse's side buttons, except
 /// in a folder view (which goes through its own history with them).
 fn nav_keys(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
-    if st.folder_view_shown() || st.confirm.is_some() || ctx.egui_wants_keyboard_input() {
+    if st.folder_view_shown() || st.confirm.is_some() || st.logs.is_some() || ctx.egui_wants_keyboard_input() {
         return;
     }
     ctx.input(|i| {
@@ -816,15 +840,15 @@ fn nav_keys(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     });
 }
 
-/// The Yes / Cancel question of `AppState::confirm`.
-fn confirm_window(ctx: &egui::Context, text: &str, out: &mut Vec<Msg>) {
+/// The question of `AppState::confirm`: its verb, or Cancel.
+fn confirm_window(ctx: &egui::Context, c: &increart_gui_core::Confirm, out: &mut Vec<Msg>) {
     let m = egui::Modal::new(egui::Id::unique("confirm")).show(ctx, |ui| {
         ui.set_max_width(420.0);
         ui.heading("Are you sure?");
-        ui.label(text);
+        ui.label(&c.text);
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new("Yes").color(BAD)).clicked() {
+        dialog_buttons(ui, |ui| {
+            if ui.button(RichText::new(&c.verb).color(BAD).strong()).clicked() {
                 out.push(Msg::ConfirmYes);
             }
             if ui.button("Cancel   Esc").clicked() {
@@ -946,7 +970,10 @@ impl eframe::App for App {
             crate::ideas::edit_window(&ctx, &self.st, &mut self.tex, &mut out);
             crate::settings::window(&ctx, &self.st, &mut out);
             crate::projects::resolutions_window(&ctx, &self.st, &mut out);
+            crate::projects::recipes_window(&ctx, &self.st, &mut out);
             crate::projects::scale_window(&ctx, &self.st, &mut out);
+            // under the modals it opens (picker, preview, job details)
+            crate::tiles::window(&ctx, &self.st, &mut self.tex, &mut out);
             // under the preview, which its images open
             crate::projects::job_window(&ctx, &self.st, &mut self.tex, &mut out);
             crate::refpicker::window(&ctx, &self.st, &mut self.tex, &mut out);
@@ -971,19 +998,24 @@ impl eframe::App for App {
             if let Some(e) = &self.st.export {
                 export_window(&ctx, e, &mut out);
             }
-            crate::tiles::window(&ctx, &self.st, &mut self.tex, &mut out);
             if self.st.server_status {
                 server_status_window(&ctx, &self.st, &mut out);
             }
             if self.st.no_server_warning {
                 no_server_window(&ctx, &mut out);
             }
+            // over the preview and the Tile window it may be opened from
+            crate::markup::window(&ctx, &self.st, &mut self.tex, &mut out);
         }
         // over the server dialog or the status window
         crate::pe_settings::window(&ctx, &self.st, &mut out);
         crate::presets::added_blanks_window(&ctx, &self.st, &mut out);
         if let Some(c) = &self.st.confirm {
-            confirm_window(&ctx, &c.text, &mut out);
+            confirm_window(&ctx, c, &mut out);
+        }
+        // over whichever window it was opened from
+        if let Some(v) = &self.st.logs {
+            crate::logs::window(&ctx, &self.st, v, &mut self.logs, &mut out);
         }
         for m in out {
             self.dispatch(m);
@@ -1004,7 +1036,10 @@ impl eframe::App for App {
 pub fn pe_state(ui: &egui::Ui, st: &AppState) -> (&'static str, String, Color32) {
     use increart_gui_core::PeStatus;
     let weak = ui.visuals().weak_text_color();
-    let Some(server) = st.pe.server.as_ref() else { return ("○", "no chat server".into(), weak) };
+    let Some(first) = st.pe.server.as_ref() else { return ("○", "no chat server".into(), weak) };
+    let total = st.pe.pool_size();
+    let name = if total > 1 { format!("{} + {} more", first.name, total - 1) } else { first.name.clone() };
+    let server = increart_core::pe::PeServer { name, ..first.clone() };
     let waiting = st.pe.jobs.len();
     if waiting > 0 || st.pe.status == PeStatus::Starting {
         // the times shown go on
@@ -1017,8 +1052,11 @@ pub fn pe_state(ui: &egui::Ui, st: &AppState) -> (&'static str, String, Color32)
         PeStatus::Off => ("○", format!("{}: starts when asked", server.name), weak),
         PeStatus::Starting => ("◌", format!("{}: {}", server.name, crate::rewrite::starting(st)), NEUTRAL),
         PeStatus::Ready if waiting > 0 => {
-            let now = crate::rewrite::progress(st, &st.pe.jobs[0]);
+            let now = st.pe.working().map(|j| crate::rewrite::progress(st, j)).unwrap_or_default();
             ("●", format!("{}: working ({waiting}): {now}", server.name), NEUTRAL)
+        }
+        PeStatus::Ready if st.pe.ready < total => {
+            ("●", format!("{}: {} of {total} ready", server.name, st.pe.ready), NEUTRAL)
         }
         PeStatus::Ready => ("●", format!("{}: ready", server.name), GOOD),
         PeStatus::Failed(_) => ("●", format!("{}: failed", server.name), BAD),

@@ -264,10 +264,9 @@ pub fn find_header_chunk(path: &Path, key: &str) -> Result<Option<(u64, Chunk, b
 /// Writes `chunk` over the chunk starting at `at`, which has the same length:
 /// its type, data and CRC in one write, then a sync. The file keeps its size.
 pub fn patch_chunk(path: &Path, at: u64, chunk: &Chunk) -> Result<()> {
-    use std::os::unix::fs::FileExt;
     let f = std::fs::OpenOptions::new().read(true).write(true).open(path).at(path)?;
     let mut len = [0; 4];
-    f.read_exact_at(&mut len, at).at(path)?;
+    crate::fsutil::read_exact_at(&f, &mut len, at).at(path)?;
     if u32::from_be_bytes(len) as usize != chunk.data.len() {
         return Err(Error::format(path, "chunk to patch has another length"));
     }
@@ -275,7 +274,7 @@ pub fn patch_chunk(path: &Path, at: u64, chunk: &Chunk) -> Result<()> {
     bytes.extend(&chunk.data);
     let crc = crc32fast::hash(&bytes);
     bytes.extend(crc.to_be_bytes());
-    f.write_all_at(&bytes, at + 4).and_then(|_| crate::fsutil::sync(&f)).at(path)
+    crate::fsutil::write_all_at(&f, &bytes, at + 4).and_then(|_| crate::fsutil::sync(&f)).at(path)
 }
 
 #[cfg(test)]

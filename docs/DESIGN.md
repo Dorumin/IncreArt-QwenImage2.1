@@ -62,10 +62,26 @@ ideas ──► INPUT QUEUE ──review──► INPUT LIBRARY ──promote (P
 - The output queue (Review) is worked oldest-first by default (the Idea
   inbox grid shows the newest first); the output queue can also be
   filtered to one run. **newest ›** jumps to its last image once;
-  **Follow** (in the bar, for the session) stays on the newest unreviewed
-  image as new ones arrive (Single, Grid, and Compare's B; after a rating,
-  the newest left). Going to another image (←, a click, Swap, Go to)
-  turns it off.
+  **Follow** (in the bar, for the session) moves on through the unreviewed
+  images by itself, one at a time, up to the newest, then waits for the
+  next (Single, Grid, and Compare's B). A ring beside it counts down to the
+  next image; clicking the ring pauses. Its pace (⚙, config
+  `review_follow`): **Auto** (default) gives each image as long as one
+  takes to make (over the last 10 min) times (lag + 1) / (ahead + 1), so
+  it holds `lag` (4) images behind the newest, quicker when further behind
+  and slower when closer, kept to 3–60 s; with nothing made lately, or in
+  **Fixed**, 8 s an image. Also: start at the newest (else the image
+  shown), and hold while the pointer is over the image. The clock stops
+  while paused, held, off the Review tab or on the contact sheet. A rating
+  within 0.4 s of a move on rates the image it moved from; rating the image
+  shown starts the next one's time. → (and End) keep following and restart
+  the time; going back or picking another image (←, Home, a click, Swap,
+  Go to) turns it off.
+- Review's bar has **Generate ›** (Ctrl+G): the project of the image shown
+  (the cursor's; on the contact sheet, the selected row's), else the
+  scope's project, opened in Generate as it is. Its ▾ opens it with that
+  run's settings or that image's recipe & seed instead. The counterpart of
+  **Review N new** on the Generate strip.
 - Review's scope tree has its own **Sort** (config `review_order`, A–Z by
   default), independent of the Projects tab: Created, Last run and A–Z as
   the project tree orders projects (folders follow the same choice, by the
@@ -148,8 +164,9 @@ servers connected and skips the servers screen: drafts are saved, the engine
 stops (runs with seeds left continue when their library is opened again; while
 runs are generating it asks first), the new library opens, and the engine
 restarts on it. Everything else about the old library is dropped (selection,
-back / forward history, searches, folder views); settings, servers and prompt
-presets stay.
+back / forward history, searches, folder views, prompt enhance's asks, which
+are stopped); settings, servers (the chat servers in use and their state
+too) and prompt presets stay.
 
 Picking from the wizards, or a library that fails to open, shows the library
 screen titled **Switch library**, with **Back to <library>** (`Esc`) to return
@@ -163,7 +180,8 @@ When the app starts (after the library is opened) a modal dialog asks for
 the session's servers: the sd-servers to generate with and, optionally, the
 chat server prompt enhance uses (see Prompt rewriting). One choice covers
 both: **presets** saved in `config.rsn` (see Config file → Servers), each a
-list of servers that may include one chat server:
+list of servers that may include chat servers (prompt enhance shares its
+asks among them):
 
 - The preset list (the dialog is one column; editing and settings open
   modals). The one used last is tagged "last used",
@@ -187,28 +205,113 @@ list of servers that may include one chat server:
   ("Stop ROCm0 and open Other? ROCm1 stay as they are.") or drop images
   being made (and says how many runs are generating); otherwise it opens
   at once. A preset with only a chat server stops the sd-servers in use.
-- With no presets, **Set up servers…** opens a wizard: the sd-server
+- With no presets, **Set up servers…** opens a wizard. It starts on
+  **KoboldCpp, Qwen-Image set up for your GPUs (recommended)**: the
+  KoboldCpp binary and a models folder, then the GPUs **through** a GPU
+  runtime (Vulkan, CUDA or ROCm; CUDA when `nvidia-smi` runs, else Vulkan;
+  on a Mac only Metal)
+  as that runtime's tool lists them (`tiers::detect_gpus`: `vulkaninfo`,
+  each one's largest device-local heap; `nvidia-smi`; `rocm-smi`, in HIP's
+  node order; Metal: one GPU, the share of the RAM macOS lets it keep,
+  about 2/3 up to 36 GB and 3/4 above, with no offload in its presets and
+  no RAM note, the weights already being in RAM; another runtime lists
+  them again, numbered its own way;
+  CPU devices left out, integrated ones listed but not ticked, **Add a
+  GPU by hand**, its memory typed in). Each ticked GPU takes the biggest
+  of the shipped VRAM presets ([vram-tiers.md](vram-tiers.md),
+  `crates/increart-core/kcppt/`, read by `tiers.rs`) it holds at 90% (a
+  "32 GB" card reports 29.9–31.9 GiB); under 8 GB it can't be used. The
+  **Presets** table lists them all with their measured speed, peak VRAM
+  and pinned RAM, the ones in use highlighted and tagged with their GPUs;
+  below the plan, a line per GPU says why ("23.98 GB is at least 90% of
+  24 GB (21.6); the 32 GB preset needs 28.8 GB") and the RAM the pinned
+  weights need against what's available. **Choose presets myself** gives
+  each image GPU a menu (Auto or a preset; a row's click sets them all);
+  a preset bigger than its memory takes, or any under 8 GB, is warned
+  about (its peak VRAM against the card's), not refused, and unticking
+  goes back to Auto. Prompt enhance's own card takes no preset (it needs
+  8 GB) and doesn't set the quantization. One GPU runs images and prompt
+  enhance in one KoboldCpp (swapping below 24 GB, see **Swapping**
+  below). With two or more, **How to use N GPUs** offers each layout by
+  what it gives, naming the GPUs: "2 images at a time — GPU 1: images +
+  prompt enhance, GPU 2: images" (the default: prompt enhance beside the
+  image model) or "1 image at a time — GPU 1: images, GPU 2: prompt
+  enhance only" (a prompt-enhance KoboldCpp started at launch, any other
+  GPUs making images too). **Prompt enhance on** ticks its GPUs, each running
+  the chat model, the asks shared among them. By default, with images on
+  every GPU, it's ticked on each whose preset has room to keep the chat
+  model loaded beside the image model (24 GB and up; smaller ones would
+  swap); if none has, the biggest. With a GPU of its own, the second
+  biggest (ties to the lower number). Ticking by hand sticks until the
+  layout changes; the last one can't be unticked. With a runtime other than Vulkan the
+  notes say the times were measured on Linux with Vulkan, and warn when the binary
+  is a `nocuda` build (Vulkan only). Each GPU row says what it does ("Images + prompt enhance
+  (stays loaded)", "… (swaps, ~15 s per image)", "Images", "Prompt
+  enhance only, always loaded", "not used"), and a bold summary heads
+  the plan ("2 images at a time; prompt enhance always loaded on GPU
+  1."). Every image
+  server uses one quantization, the smallest preset's, so one
+  recipe runs on all. **Download, save as preset and open** fetches the
+  files into `<models>/koboldcpp/` (Hugging Face, through `.part` files,
+  one already there kept; one found by name in the model folders or
+  Hugging Face's cache (`$HF_HOME`, else `~/.cache/huggingface`, five
+  folders down, not `blobs`/`xet`), the same size as Hugging Face's HEAD
+  says, linked instead; a progress bar and **Cancel download**), adds
+  the folder to the model folders, adds a recipe preset ("Qwen-Image 2.1
+  GGUF Q8_0 (CFG 2, refs)", 20 steps, CFG 2), and saves and opens the
+  server preset ("KoboldCpp Vulkan1", with " (2)" when taken). The other
+  choice, **sd-server, with your own models**, is the sd-server
   binary and models folder, then the devices from `--list-devices` with
   every GPU ticked (not the CPU) on ports 1234, 1235, …, or a server
   already running to connect to, then optionally **Add a chat server…**
   for prompt enhance (the chat server settings below). **Save as preset
   and open** names the preset after its devices ("ROCm0 + ROCm1", or
   "Running server") and opens it.
-- **sd-server settings…** (bottom right) opens a modal with what every
-  preset's Start servers share: the binary, the models folder, leave
-  started servers running, and the devices (`sd-server --list-devices`,
-  **List again**). When a preset starts servers and the binary or models
-  folder is missing, the dialog says so with **Fix…**, which opens it.
+- KoboldCpp comes first throughout: the screen's intro names it beside
+  sd-server, **Set up KoboldCpp for your GPUs…** (the wizard) sits beside
+  **New preset** once there are presets, and preset summaries say which
+  server each entry is ("Start sd-server on ROCm0 :1234", "Start KoboldCpp
+  on :5001 (and chat)").
+- **Server settings…** (bottom right) opens a modal with what every preset
+  shares, in three sections. **KoboldCpp**: the binary new KoboldCpp
+  entries and the wizard start (`Config::koboldcpp`; empty: the one in use,
+  `Config::known_koboldcpp`: prompt enhance's, else a preset entry's; with
+  none, found at startup by `kobold::find_binary` on `PATH`, in `~`,
+  `~/Downloads`, `~/.local/bin` or a `~/koboldcpp*` folder (`~` is
+  `USERPROFILE` on Windows), `koboldcpp` or a release build
+  (`koboldcpp-…`/`koboldcpp_…`, with `.exe` on Windows and no extension
+  elsewhere), and kept; else `koboldcpp`; the wizard sets it), with its version from
+  `--version` (checked when the settings open, the field is left or a file
+  picked) or why it can't run. **sd-server**: the binary and the devices
+  (`sd-server --list-devices`, **List again**). **Both**: the models
+  folder (KoboldCpp loads the recipes' files from it too) and leave started
+  servers running. When a preset starts sd-servers and the binary or
+  models folder is missing, the dialog says so with **Fix…**, which opens
+  it.
 - ✎ or **New preset** opens the editor modal: the name, then the server
-  rows. **+ Start server** adds a device and port (1234, 1235, … by
-  default); the app launches it and stops it when it exits. The listed
-  devices are buttons too: a click adds a Start server on that one (devices
-  already in the preset are greyed). **+ Connect** adds a URL; connected
-  servers are left running when the app exits. A preset can mix both kinds.
-  **+ Chat server** (greyed once the preset has one) opens the chat server
-  settings, starting from the presets' first chat server (else KoboldCpp
-  on the GPUs); its row shows the name with **Settings…** and ×. The
-  settings window's **Add** / **Done** puts it in the preset being edited;
+  rows. **+ KoboldCpp** (first, in the accent colour) adds a KoboldCpp
+  image server (port 5001 up, the shared binary); its row has its settings
+  under it: started by IncreArt (the shared binary again when switched
+  back) or already running, binary, settings file, address, runs on (its
+  choice / CPU / GPUs: a runtime, Vulkan / CUDA / ROCm, and the numbers its
+  tool lists), more args, or address / password / device,
+  and **Chat** to make it one of prompt enhance's chat servers too, with the chat
+  model for a started one (ticked: the wizard's Qwen3-VL and projector if
+  they're in a model folder's `koboldcpp/`, context 8192; see KoboldCpp as
+  an image server). Every path (binary, settings, chat model, mmproj, and
+  the wizard's binary and models folder) has a Browse… picker starting in
+  its folder, else the first model folder. **+ sd-server** adds a device and
+  port (1234, 1235, … by default); the app launches it and stops it when it
+  exits. **+ Connect to sd-server** adds a URL; connected servers are left
+  running when the app exits. With sd-server rows, the listed devices are
+  buttons too: a click adds an sd-server on that one (devices already in
+  the preset are greyed). A preset can mix all kinds.
+  **+ Chat server** opens the chat server settings, starting from the
+  presets' first chat server (else KoboldCpp on the GPUs; another beside
+  ones the preset has gets a numbered name and the next free port); a
+  preset may have several, and prompt enhance shares its asks among them
+  and its KoboldCpp entries with Chat. Each row shows the name with **Settings…** and ×. The
+  settings window's **Add** / **Save** puts it in the preset being edited;
   it's stored when the preset is saved. A preset may have only a chat
   server. Esc cancels; a click outside doesn't. The editor's buttons:
   - **Save** stores the preset, renaming it in place.
@@ -260,9 +363,21 @@ list of servers that may include one chat server:
   (or Esc) goes back keeping the servers in use, and **Continue without
   servers** becomes **Stop the servers, continue without** while servers
   are in use.
+- Started servers (sd-server, KoboldCpp) stop with the app even when it
+  dies without stopping them (killed, crashed), unless **Leave started
+  servers running** is on (`increart-core/src/process.rs`). Linux: the
+  kernel sends them SIGTERM when it goes (`PR_SET_PDEATHSIG`, asked for by
+  a spawning thread that lasts as long as the app); that reaches only the
+  server itself, so for a server in its own process group (KoboldCpp) a
+  small shell watcher with the same signal stops the whole group (TERM,
+  then KILL after 5 s). Windows: they join a
+  job object that kills them when the app's handle to it closes. macOS: a
+  small shell watcher per server sends SIGTERM once the app is gone
+  (checked every second). On Windows no console window opens for a server
+  or a helper command.
 - A **Start** server finds an sd-server already answering on its port (e.g.
-  one left over from a crash) and uses it instead of failing on a port in
-  use.
+  one left running by an earlier session) and uses it instead of failing on
+  a port in use.
 
 Only the native async API (`/sdcpp/v1/...`) is used:
 
@@ -329,6 +444,90 @@ Switching between base and Turbo changes the model selection and therefore
 triggers a load (see Scheduling). Dimensions are snapped to multiples of 32;
 the recipes default to 2048², but the GUI's default is 1024² (see measurements
 below).
+
+### KoboldCpp as an image server
+
+A server preset can have **KoboldCpp** entries in place of (or beside)
+sd-servers (**+ KoboldCpp** in the preset editor). The engine drives one as
+it drives an sd-server: a client (`kobold_image`) puts KoboldCpp's A1111-style
+API behind sd-server's job calls, so scheduling, previews, cancel and recipes
+work the same.
+
+```rsn
+Kobold(KoboldServer {
+    name: "kcpp0",
+    run: Start {
+        binary: "/workspace/local/koboldcpp/koboldcpp",  // or "python3 …/koboldcpp.py"
+        // config: "…/qwen-image.kcpps",  // from KoboldCpp's launcher; what follows goes over it
+        port: 5001,
+        device: Gpu { devices: [1] },     // as for prompt enhance (runtime: Vulkan unless set); missing: KoboldCpp's choice
+        // args: ["--sdflashattention"],
+    },
+    // chat: Some(KoboldChat { model: "…/Qwen3VL-8B-Instruct-Q4_K_M.gguf", mmproj: "…", context: 8192 }),
+}),
+// Kobold(KoboldServer { name: "box", run: Connect { url: "http://10.0.0.2:5001", password: "", device: "Vulkan1" } }),
+```
+
+- **Started** (`Start`): launched with no image model (`--nomodel`, or the
+  chat model) and admin mode on: `--admin --admindir
+  <state>/koboldcpp/<name> --adminpassword <made once, kept there>`, so a
+  server left running from an earlier session still takes the app's
+  reloads. It logs to `logs/koboldcpp-<name>.log` (**Logs…**), runs in its
+  own process group, and stopping it stops the group (its admin mode runs
+  the server as a child process it restarts).
+- **Loading a model**: the run's model files are looked up under the
+  server settings' model folders (the same recipe presets serve both)
+  and given as `--sdmodel` (`diffusion_model`), `--sdllm` (`llm`), `--sdvae`
+  (`vae`), `--sdclip1` (`clip_l`), `--sdclip2` (`clip_g`, `t5xxl`); other
+  slots can't be loaded. KoboldCpp writes the settings itself
+  (`--exportconfig`, the launch arguments plus the files, about 1.5 s) into
+  the admin folder, and `POST /api/admin/reload_config` restarts its worker
+  with them (it answers for a moment, goes, comes back when loaded). Loaded
+  means it then reports `txt2img` and that diffusion model. If the load
+  fails KoboldCpp goes back to its launch settings; the error says why,
+  from its log ("Cannot find image model file: …"). A chat model running
+  beside it restarts too (asks in flight fail).
+- **Connected** (`Connect`): used as it runs. A run whose diffusion model
+  is the one it runs generates there; any other can't load ("it runs X and
+  can't switch to Y"), and the scheduler leaves those runs to other
+  servers.
+- **Generating**: `POST /sdapi/v1/txt2img` (`img2img` with an init image and
+  `denoising_strength`), which answers with the image; jobs wait in the
+  client and go one at a time. Prompt, negative, size, seed, steps,
+  `cfg_scale`, `sampler_name`, `scheduler`, `flow_shift`, and the refs as
+  `extra_images` (at most 4) are sent, with `remove_limits` and step / CFG
+  limits above the run's, so nothing is clamped. What it can't do fails the
+  seed with the reason instead of being dropped: custom sigmas, more than 4
+  refs, a sampler the model doesn't list (KoboldCpp would quietly use its
+  default). Seeds are taken modulo 2³² (as KoboldCpp does).
+- **Progress**: `GET /sdapi/v1/progress?genkey=<job>` while generating, with
+  the preview image when previews are on (its kind is KoboldCpp's launch
+  setting).
+- **Cancel**: a waiting job goes at once; a generating one is stopped by
+  closing its connection (KoboldCpp aborts an image whose client goes; it
+  has no abort by key for images).
+- **Recipes** record `koboldcpp <version>` (from `/api/extra/version`) where
+  an sd-server's record its sd.cpp commit, and the entry's device
+  (`Vulkan1`, `CUDA0`, `ROCm0,1`, `CPU`, or as configured).
+- **Chat too**: with `chat`, it is prompt enhance's chat server when its
+  preset opens (unless the preset has a chat entry of its own), asked at its
+  address as a Connect chat server. A started one runs the chat model
+  beside the image model (`--model --mmproj --contextsize --jinja`).
+- **Swapping** (`swap`, set by the wizard for 8–16 GB cards): the chat
+  model and the image model take turns on the card, one loaded at a time.
+  The app does the swapping, not KoboldCpp's autoswap: autoswap reloads
+  on the request path and kills an image in progress when a chat request
+  comes. Each chat ask (`pe::Client` through `kobold_image::chat_turn`)
+  waits for the image being made, reloads the launch settings (the chat
+  model, no image model), and holds its turn until answered; images wait
+  while asks are waiting (asks first: they're interactive), then reload
+  the image settings (exported without the chat model). A swap costs ~5 s
+  toward chat and ~9 s toward images.
+- Checked against KoboldCpp 1.123.1's source and, on the CPU, a real
+  KoboldCpp (`INCREART_KOBOLDCPP=… cargo test --test real_koboldcpp`:
+  launch, settings written, a failing reload recovering with its reason,
+  stopping). Not yet checked on a GPU: Qwen-Image's refs and quality,
+  previews, cancel by closing, and that a seed gives the same image again.
 
 ## Transparency (RGBA)
 
@@ -417,8 +616,9 @@ rewrites).
       Chat(PeServer {
           name: "Qwen3-VL 8B (GPU)",
           run: KoboldCpp {
-              binary: "/workspace/local/koboldcpp/koboldcpp",
-              model: "…/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+              binary: "/workspace/local/koboldcpp/koboldcpp",  // or a command line: "python3 /opt/koboldcpp/koboldcpp.py"
+              // config: "…/qwen3vl.kcpps",  // settings saved from KoboldCpp's launcher; what's below goes over it
+              model: "…/Qwen3VL-8B-Instruct-Q4_K_M.gguf",  // may be left out with a config
               mmproj: "…/mmproj-Qwen3VL-8B-Instruct-F16.gguf",  // vision; empty: text only
               host: "127.0.0.1",
               port: 1240,
@@ -444,26 +644,39 @@ rewrites).
   the status bar says what moved.
 - The chat server in use is the open preset's, or the one picked to
   continue without sd-servers; none until then.
-- `device`: `Cpu { threads }` adds `--usecpu [--threads N]`; `Gpu { devices }`
-  adds `--usevulkan [ids…] --gpulayers 999` (every layer on the GPU; no ids:
-  every GPU, the model split across them). The ids are Vulkan's numbering,
-  listed by `vulkaninfo --summary` (software renderers left out); on this
-  machine 0 is the Intel iGPU and 1, 2 the R9700s (03:00.0, 06:00.0), and one
+- `device`: `Cpu { threads }` adds `--usecpu [--threads N]`; `Gpu { devices,
+  runtime }` puts every layer on the GPUs (no ids: every GPU, the model split
+  across them) through `runtime` (`Vulkan` when missing, so older configs
+  read as before): `Vulkan` adds `--usevulkan [ids…] --gpulayers 999`;
+  `Metal` (KoboldCpp's Mac build, which has no Vulkan) only `--gpulayers 999`;
+  `Cuda` and `Rocm` add `--usecuda --gpulayers 999` and pick the GPUs with
+  `CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` (`--usecuda` takes one id
+  or all), CUDA with `CUDA_DEVICE_ORDER=PCI_BUS_ID` so its numbers are
+  `nvidia-smi`'s. The ids are the runtime's own numbering, listed by
+  `vulkaninfo --summary` (software renderers left out), `nvidia-smi`, or
+  `rocm-smi` (by node, as HIP numbers them). CUDA and ROCm need KoboldCpp's
+  CUDA build or a ROCm build (koboldcpp-rocm); its `nocuda` build has
+  Vulkan only. On this machine Vulkan's 0 is the Intel iGPU and 1, 2 the
+  R9700s (03:00.0, 06:00.0), ROCm's 0, 1 the same R9700s, and one
   GPU is quicker than a split. Measured on 13 blanks: about 0.5–1 s an ask on
   one R9700, against 3–7 s on 16 CPU threads; it takes about 7.2 GB of the
   card beside sd-server's (the 8B Q4 model 4.5, its 8192-token cache 1.2,
   the vision projector 1.1, working memory 0.5).
 - `start`: `OnDemand` starts it on the first request; `AtLaunch` when its
   preset opens (or it's picked to continue without sd-servers), so the
-  first ask doesn't wait for the model to load. Another chat server taking
-  over stops the one running first (it holds memory).
+  first ask doesn't wait for the model to load. A preset's chat servers in
+  use change together: ones no longer used stop first (they hold memory,
+  and may have the port a new one wants), ones that run the same keep
+  running.
 - **Chat server** settings (a preset's chat row **Settings…**, or **+ Chat
   server**, in the preset editor and the setup wizard): name, KoboldCpp or
-  Connect, binary / model / vision files (Browse…), address and port,
-  **Runs on** GPU (the listed GPUs ticked; none: every GPU) / CPU (threads)
+  Connect, binary / settings / model / vision files (Browse…), address and port,
+  **Runs on** GPU (a **Runtime**, Vulkan / CUDA / ROCm, and the GPUs it
+  lists ticked; none: every GPU) / CPU (threads)
   / KoboldCpp's choice, context, more args, and **Starts** when first asked
-  / when the preset opens. **Add** / **Done** checks the name is set and
-  the files needed are named, and puts it in the preset being edited; it's
+  / when the preset opens. **Add** / **Save** checks the name is set and
+  the files needed are named (the binary, and a model or a settings file),
+  and puts it in the preset being edited; it's
   stored when the preset is saved, and a change to how the one in use runs
   takes effect when the preset is opened again (it restarts then). The
   server status window's PE row has the chat server in use, its state,
@@ -472,23 +685,34 @@ rewrites).
   stopped while starting is Off, not Failed). Asking with no chat server
   in use says to add one to a preset (Servers…); the Generate panel's
   prompt-enhance hints have a **Servers…** button for it.
-- `KoboldCpp` is started as `start` says (`--model --mmproj --host --port
+- `KoboldCpp` is started as `start` says (`--config` first, so the rest
+  overrides it, then `--model --mmproj` when set, `--host --port
   --skiplauncher --quiet --jinja`, the `device` and `context` flags, then
-  `args`), logging to
+  `args`). `binary` is a file, or else a command line split on spaces (a
+  Python install: `python3 …/koboldcpp.py`). It logs to
   `logs/pe-<name>.log`; one already answering on that port is used as is. It
   gets up to 5 minutes to load, and is stopped with the app. Its Linux build
   is a launcher running the server as its child, so it runs in its own
   process group, and stopping it stops the group (TERM, then KILL after 5 s).
   It is also started with the parent-death signal (`PR_SET_PDEATHSIG`,
-  SIGTERM; the launcher passes it on), so a killed or crashed app doesn't
-  leave it running. The app itself closes as its close button does on
+  SIGTERM) plus the group watcher above, since the launcher doesn't pass the
+  signal on to everything it started (in admin mode the model process
+  outlived it), so a killed or crashed app doesn't leave it running. The app itself closes as its close button does on
   SIGTERM, SIGINT or SIGHUP (drafts saved, servers it started stopped).
   Changing how it runs (`run`) starts it afresh on the next request; its
   system prompts and sampling don't (they go with each request). Starts
   and stops go through the same queue as the requests, in order, so a
   restarted server's port is free before the new one starts.
   `Connect` only checks the server answers (`/v1/models`).
-- Requests go one at a time from a queue on their own thread: one chat
+- Requests wait in one queue shared by the chat servers in use: each has a
+  worker that opens it (all at once) and then takes the next ask when free,
+  so N servers answer N asks at a time; `PeOn` says which took an ask
+  (shown as "… on <name>" with more than one). The status is Ready once any
+  is (the PE row reads "A + 1 more: 1 of 2 ready" until all are), Starting
+  while all are, and Failed (the asks dropped) once all failed; one failing
+  beside others that work is reported as a problem and the rest go on. A
+  stop drops asks still queued (or on their way there) and cuts short the
+  one being answered. Each ask is one chat
   completion each (`/v1/chat/completions`, at most 300 tokens for blanks,
   50 per value asked when more, and 700 for text; a fresh connection each,
   as KoboldCpp closes one after answering). Each carries the job's
@@ -639,8 +863,10 @@ read by other tools).
 
 ## Config file
 
-User settings live in one RSN file, `config.rsn`, in
-`$XDG_CONFIG_HOME/increart/` (default `~/.config/increart/config.rsn`). It
+User settings live in one RSN file, `config.rsn`, in the app's config
+folder: `$XDG_CONFIG_HOME/increart/` when that is set, else
+`~/.config/increart/` on Linux, `%APPDATA%\increart\` on Windows and
+`~/Library/Application Support/increart/` on macOS. It
 holds machine and user preferences, not library data, plus the recent
 libraries (see Startup: library). Older configs' single `library` entry is
 read into that list, and their PE servers into the server presets (see
@@ -719,8 +945,9 @@ Config {
 - `name` is optional. The dropdown shows `W × H` followed by the name.
 - Duplicate sizes are allowed in the file but flagged in the editor.
 
-**Resolution editor** (window opened from an **Edit…** button next to the size
-dropdown in the Generate panel):
+**Resolution editor** (a modal opened from an **Edit…** button next to the
+size dropdown in the Generate panel; Escape or Cancel closes it, a click
+outside doesn't, as that would lose the edits):
 
 - One row per entry: name, width, height, then derived aspect ratio (reduced,
   e.g. `3:2`, or `≈16:9` when close), megapixels, and an estimated time per
@@ -733,7 +960,8 @@ dropdown in the Generate panel):
   note when snapping changed the value. Sides outside 256–2048 get a warning
   (not an error).
 - Row actions: set default, duplicate, swap W/H, move up/down, delete (not the
-  last entry). Window actions: add, reset to built-ins, save, cancel.
+  last entry). Footer: **Save**, **Cancel** on the left; **Reset to
+  built-ins**, **+ Add** on the right.
 - Saving writes `config.rsn` immediately. Existing runs are unaffected: a run
   stores its exact width and height, never a reference to a list entry.
 
@@ -827,6 +1055,9 @@ An `Idea` is a small folder: `idea.rsn` plus any attached images.
 Ways in: a text box / "new idea" hotkey, paste from clipboard (text or image),
 drag and drop files, and a watched drop folder (`input/inbox_drop/`) so ideas
 can be added from outside the app (phone sync, browser saves, scripts).
+The inbox grid says so in a line at its top, with the folder's full path
+and an Open button. Its cards have their own size zoom (like the Input
+library's, saved separately).
 
 Whatever the way in, images are imported into `input_images/` straight away
 (re-encoded as PNG, see Image stores) and the new idea in the Idea inbox links
@@ -886,8 +1117,10 @@ its project. Clean up keeps any output another run refers to.
   start** with a strength (`init_image`: sampling starts from a noised copy,
   keeping the layout; the recipe's `parent`). A copied project keeps it.
 - Actions on an image (Review: keys, right-click in Single and Grid; Output
-  library: right-click), each following the target project's setting:
-  - **Use in current project**: adds it to the selected project's form.
+  library: right-click; Compare: right-click either side), each following
+  the target project's setting:
+  - **Use as a reference in ‹project›**: adds it to the selected project's
+    form as a reference (disabled with no project selected).
   - `E` **Edit this image**: a fresh form in the image's own project with the
     image; with references the prompt starts as `<image1> ` for the change.
   - `N` **New project from this image**: a project next to the image's,
@@ -966,7 +1199,8 @@ lower than the runs show is raised. The check reads every store image (about
 6 s for 500 images on a cold spinning disk), so `Library::open` leaves it to
 the caller: the GUI runs it in the background after opening, one image at a
 time (library operations go on meanwhile), with a progress bar in the status
-bar ("checking images 120 / 950"); opening another library stops it. A failure to update the counts is listed
+bar ("checking images 120 / 950") from its start, kept full ("checked 950
+images") for 5 s once done; opening another library stops it. A failure to update the counts is listed
 as a problem; it doesn't stop the run.
 
 sd-server also embeds its own `parameters` tEXt chunk (A1111-style text plus
@@ -1006,8 +1240,8 @@ file bytes.
 
 ### Image stores
 
-All images live in two flat stores, named by image ID, and every image there
-is a PNG:
+All images live in two flat stores, named by image ID. Each one is a PNG or
+a lossless WebP (see Store format below):
 
 - `input_images/<image-id>.png`: everything that came in from outside
   (idea attachments, reference images, edit sources).
@@ -1018,7 +1252,7 @@ Store files are never renamed or moved. Idea folders and project folders hold
 review still works by moving files, but moving or deleting a link never
 touches the image.
 
-**Inputs are re-encoded as PNG on import.** Lossy formats (JPEG, WebP) decode
+**Inputs are re-encoded losslessly on import** (PNG, or WebP; see Store format). Lossy formats (JPEG, WebP, AVIF with the `avif` feature) decode
 slightly differently across decoder versions, so their pixel hash wouldn't be
 stable, and one format keeps everything downstream simple. On import:
 
@@ -1026,7 +1260,7 @@ stable, and one format keeps everything downstream simple. On import:
    otherwise; reduce to 8-bit RGB or RGBA (keeping alpha if the file has it).
 2. Compute `pixel_sha256`. If the input store already has an image with that
    hash (pixel index, below), reuse it.
-3. Otherwise allocate an image ID and write the PNG with these chunks:
+3. Otherwise allocate an image ID and write the file with these chunks:
    - `increart:id` (`tEXt`): the image ID.
    - `increart:pixels` (`tEXt`): the pixel hash.
    - `increart:blake3` (`tEXt`): the BLAKE3 pixel hash.
@@ -1061,17 +1295,56 @@ original file's bytes are not kept. When an identical picture is imported
 again, the store file keeps the first import's `increart:source`; each idea's
 `source` still records where its copy came from.
 
-**Outputs are PNG only.** Requests set `output_format: "png"` (also
+**Outputs arrive as PNG.** Requests set `output_format: "png"` (also
 sd-server's default). IncreArt then adds `increart:id`, `increart:pixels`,
-`increart:blake3`, `increart:usage` and `increart:recipe` as extra chunks without re-encoding the pixels, keeps
+`increart:blake3`, `increart:usage` and `increart:recipe` as extra chunks, keeps
 sd-server's `parameters` chunk, and writes the result to
-`output_images/<image-id>.png`.
+`output_images/<image-id>.png`. In a PNG library the pixels are not
+re-encoded; in a WebP library they are encoded as WebP with the same chunks.
 
 `increart:id` lets the app identify a file reached through a hard link or a
 copy (see Links), whose own name is not the ID. `increart:pixels` is checked
 against a real hash when an image is first indexed. The **pixel index**
 (`pixel_sha256 → image ID`, per store) is kept in `cache/`, and rebuilt from
 the `increart:pixels` chunks by a scan when missing.
+
+**Store format.** Settings → **Library** (this library only) picks the
+format for new store files: **PNG** (the default) or **WebP, lossless**,
+about half the size of PNG (48.9 % on 20 real outputs; libwebp, method 4,
+`exact`, so the colour under transparent pixels is kept too). It is kept in
+`library.rsn` (`store_format`, left out while PNG). WebP can't hold a side
+over 16383 pixels; such an image stays PNG whatever is chosen. A library can
+therefore be mixed: an image is `<image-id>.png` or `<image-id>.webp`, never
+both, and every link to it has the same extension as its file.
+
+A WebP store file is a lossless `VP8L` image in an extended (`VP8X`)
+container: `RIFF/WEBP`, `VP8X` (its alpha flag set only when the image has
+an alpha channel, so the pixel hash's channel count survives), then one
+`PNGt` chunk per PNG text chunk (the PNG chunk's type, data and CRC,
+big-endian, exactly as in a PNG), then `VP8L`, then `EXIF` if any. Decoders
+skip the unknown `PNGt` chunks; IncreArt reads them like a PNG's, and since
+they come before the image data, `increart:id` and `increart:usage` are read
+and patched in place the same way (the CRC catches a torn write). sd-server
+can't read WebP: refs and init images from a WebP store are sent as PNG,
+encoded quickly without metadata.
+
+**Convert N images to X…** (asks first) re-encodes every store file not
+already in the chosen format. Files are encoded in parallel outside the
+library lock (all cores but one, at most 8), each checked by decoding it
+again and comparing its pixel hash with `increart:pixels`; then each batch
+is installed under the lock: the new file is written atomically with the old
+file's modification time, every link to the image (project outputs,
+collections, idea folders) is remade with the new extension, and the old
+file is deleted. Stop ends it after the current batch; running it again
+carries on, and an image found in both formats (an interruption between
+writing and deleting) is reported when the library opens, and fixed by
+converting again. Files that can't be converted (unreadable, or too large
+for WebP) are skipped and counted.
+
+`library.rsn` has format 1 while the library is all PNG and format 2 once
+WebP is chosen or WebP files exist, so an older IncreArt, which can't read
+them, refuses to open it instead of seeing missing images. Converting back
+to PNG returns it to format 1.
 
 **Clean up.** Deleting a project or a discarded idea only removes links, so
 store images can become unreferenced. A **Clean up library** command (never
@@ -1128,21 +1401,33 @@ its details window, and for every run at once in the Jobs header:
   single server, runs for a second model therefore wait until the first
   model's work is done (no reload ping-pong). A model whose load fails
   leaves its runs waiting (shown as stuck) instead of retrying in a loop.
+- **One load at a time on this machine**: servers on `localhost` /
+  `127.0.0.1` load models one after another (a server waiting shows
+  "waiting for another server's load"). A KoboldCpp that offloads its
+  weights (`--sdoffloadcpu`) pins about its files' size in RAM, less the
+  model it drops; its load waits until that much RAM plus 8 GiB is free
+  ("waiting for RAM: needs 13 GiB, 9 GiB free"), and fails at once if the
+  machine hasn't that much at all (RAM from `/proc/meminfo` on Linux,
+  `GlobalMemoryStatusEx` on Windows, `hw.memsize` and `vm_stat`'s free,
+  inactive and speculative pages on macOS). Two loads at once, with pinned weights,
+  had starved the desktop (no swap; increbot shares the RAM). Remote
+  servers load freely.
 - **Warm-up**: after launch or load, each server runs one small throwaway job
   (e.g. 512², 1 step) so lazy weight loading doesn't land on the first real
   seed.
 
 32 GB per GPU fits the int8 diffusion model + int8 text encoder;
-`--offload-to-cpu` is a per-server config option if it doesn't.
+`--offload-to-cpu` is a per-server config option if it doesn't (on ROCm it
+costs ~4% speed and frees ~21 GiB: see Measurements so far).
 
 ## Filesystem layout
 
 ```
 <library_root>/                       e.g. /mnt/storage/sdcpp/increart_lib
-  library.rsn                         format version + link mode (see Links)
+  library.rsn                         format version, link mode (see Links), store format
   library.lock                        held while the app has the library open
-  input_images/<image-id>.png         input image store (PNG, see Image stores)
-  output_images/<image-id>.png        output image store (PNG)
+  input_images/<image-id>.png         input image store (PNG or .webp, see Image stores)
+  output_images/<image-id>.png        output image store (PNG or .webp)
   input/                              input queue + input library
     inbox_drop/                       watched; anything dropped here becomes an idea
       imported/                       originals already imported
@@ -1151,6 +1436,7 @@ its details window, and for every run at once in the Jobs header:
       1-glaze.png                     link → ../../../input_images/<image-id>.png
     library/<folder>/…/<idea-id>/     input library: folder tree of kept ideas
     discarded/<idea-id>/              discarded ideas (recoverable)
+    edited/<idea-id>/                 cropped and marked copies (Crop / mark…), hidden
   projects/                           folder tree (see Project folders)
     <folder>/…/<project>/             output queue + output library (per project)
       project.rsn                     project id + source idea ids (+ cover image, image titles)
@@ -1173,7 +1459,8 @@ Output links are named `<run-id>_r<rev>_s<seed>.png`, e.g.
 `r`/`s` markers keep the name from reading like an image ID; within a project
 the links sort by run, then revision, then seed (in numeric order as long as
 the seeds in a run have the same number of digits, which padding guarantees
-below 10000). The image's own ID is the link's target.
+below 10000). The image's own ID is the link's target. A link's extension is its
+target's (`.webp` for an image stored as WebP, see Image stores).
 
 ### Links
 
@@ -1302,11 +1589,13 @@ A project's window, **Generate history**, also shows the settings and runs:
 
 ### Prompt presets
 
-Ready-made prompts for the Generate form, by task: **Modify style** (69
-styles under headings: Anime & cartoon, Painting, Drawing, 3D & craft, Photo &
-film, Retro & print, Graphic), **Remove background**, **Repair / restore**,
-**Edit content**, **Relight / mood**, **Extend / reframe**, **Character**,
-**Combine images**, **Text**; 106 built in, in
+Ready-made prompts for the Generate form, by task: the three style tasks
+(below), **Remove background**, **Repair / restore**, **Edit content**,
+**Relight / mood**, **Extend / reframe**, **Character** (one thing changed,
+the rest of the character locked, under headings: Pose & setting, Drawing
+style, Colour, Clothing, Equipment, Action; each group's prompts end
+saying what stays: "Keep the line art, shading, design and pose
+identical."), **Combine images**, **Text**; 240 built in, in
 `crates/increart-core/default-presets.rsn` (embedded in the app; its header
 notes the conventions below). They are shared by every library, in a
 `prompt-presets` folder next to `config.rsn`:
@@ -1421,8 +1710,19 @@ pixel art.
   the cursor goes after it.
 - A preset needing more references than the form has (its highest
   `<imageN>`) is greyed out, its tooltip saying how many.
-- While the prompt has a `{slot}`, a red line under it names them and
-  **Queue** refuses, selecting the first one.
+- While the prompt has a `{slot}` (a single run, or a setting sweep), the
+  **Blanks** table under it gives each a value, with prompt enhance's
+  suggestions and Suggest / Random picks as in a style sweep's Shared
+  values (the same values, `sweep.slots`; asked with the prompt alone, no
+  styles); the run is queued with them filled in, the form keeping its
+  blanks. Typing over a blank in the prompt works too. **Queue** refuses
+  while one has no value, selecting it in the prompt.
+- With two or more references, **Queue** first asks (a modal, **Queue
+  anyway** or Cancel) when some `<imageN>` is named by neither the prompt
+  nor any of the sweep's prompts (each style's, or the prompt with its
+  blanks filled): likely a tag forgotten. A single unnamed reference is
+  usual and isn't asked about. The Images pane's "not named in the prompt
+  (or the sweep)" under a reference goes by the same prompts.
 - ☆ / ★ marks a favourite (saved at once).
 - **Edit presets…**: a modal over a working copy. Tasks (add, delete,
   rename, description), the task's presets (add after the selected one,
@@ -1445,10 +1745,45 @@ sweep is a group of ordinary runs, one per prompt preset or per value, made
 by one **Queue**; nothing about generating or storing them is special.
 
 The **Queue** button ("Queue sweep: K runs × N seed(s)", or "Queue N
-seed(s)"), **Clear**, the unsaved-changes note, the time estimate, why Queue
-refuses, and the no-servers note are a strip pinned under the Generate form,
-so they stay in view however long the form (a sweep's tables) gets.
+seed(s)"), **Clear**, **Review N new**, the unsaved-changes note, the time
+estimate, why Queue refuses, and the no-servers note are a strip pinned
+under the Generate form, so they stay in view however long the form (a
+sweep's tables) gets. **Review N new** opens Review on the open project's
+unreviewed images (every run and sweep, oldest first, as the project
+tile's **Review** does); with none it's greyed ("nothing to review yet"),
+and its tooltip says how many more are generating.
 
+- Generate's **Model preset**: the model presets (config `recipes`) the open servers
+  can run. Once a server is open the app asks what it can load: an
+  sd-server its `model-files`, a started KoboldCpp the files in its model
+  folders, one started elsewhere the diffusion model it runs (matched by
+  file name). A preset is offered when one server has all its files; the
+  others are named under the list ("Not on these servers: …", each
+  server's reason on hover), and a model a KoboldCpp runs that no preset
+  uses is named too. A started KoboldCpp doesn't count the `.safetensors`
+  with int8 (`I8`) weights in its folders, sd-server's `int8_convrot`
+  files: it can't load them, and falls back to a full-size buffer (31 GB
+  pinned for Qwen-Image's). Queueing a preset no open server runs (a draft
+  from before, or a model sweep) asks first, OK/Cancel: "No open server
+  can run this model preset", each server's reason, **Queue anyway** or
+  Cancel. If the chosen
+  preset isn't runnable, the first one that is is chosen; until a server
+  has answered, every preset is offered. A model sweep's checkboxes
+  follow the same list (a ticked preset stays to be unticked).
+- The **⚙** beside the Model preset list opens **Model presets**, a modal editor of
+  config `recipes`: the list (a ✓ when an open server runs it, naming which
+  on hover; new, duplicate, move, delete) and the selected one's name,
+  recipe, steps, CFG, flow shift (off: the recipe's), custom sigmas
+  (comma-separated; empty: the recipe's) and files: a slot (`diffusion_model`,
+  `llm`, `vae`, `clip_l`, …) and a file ID per row, typed or picked from the
+  files the open servers list (one no server lists is shown amber). Save is
+  refused, with the reason beside it, for an empty or repeated name, no
+  recipe, no diffusion model file, an empty file or sigmas that aren't
+  numbers. Saving keeps Generate on its model through renames and moves (a
+  model sweep's ticks follow renames); if that preset's settings changed
+  the form takes them, and if it was deleted the first preset is chosen.
+  Other projects' drafts name their preset, so a rename moves them to the
+  form's current one when opened. **Reset to built-ins** replaces the list.
 - Generate's **Mode**: **Single prompt** | **Sweep**, and the sweep box's
   **Vary**: **Style** (a prompt preset per run, below) or a setting (see
   *Setting sweeps*). In a style sweep the prompt is a **template**: `{preset}` marks where each preset's prompt goes
@@ -1726,7 +2061,9 @@ out as one image.
   Tile… · Clear**, and in Review 1/G, 2/N, 3/B rate every picked image (each
   is a separate Ctrl+Z). Rated images leave Review's queue, so the picks go
   with them there; the contact sheet keeps them.
-- **Tile…** (T) opens the Tile window. Picks from the contact sheet keep
+- **Tile…** (T) opens the Tile window (a modal: the rest dims; Close or
+  Esc closes it, a click outside doesn't, so the layout isn't lost by
+  accident). Picks from the contact sheet keep
   their rows and columns as shown (bands side by side; holes included); others start about square
   (⌈√n⌉ columns). Drag a tile onto another to swap them, or onto any empty
   cell (an extra row below takes drops); click one to give it a caption or
@@ -1737,6 +2074,32 @@ out as one image.
   text here**. A text block is a tile like an image (drag, span, remove)
   holding lines of text, word-wrapped and centred in its cells, in the
   caption colour; it has no caption and isn't a source.
+- Generate's Images panel has **Tile…** (by Add file… / From library…):
+  the Tile window with all its images (references, the start image and
+  parked ones), in the strip's order, about square; the picks are untouched.
+  Greyed with none. The start image's `{kind}` is "start".
+- **More images**: **+ Images…** (or an empty cell's right-click → **Add
+  images…**) opens the reference picker (Generate's From library…) for the
+  tiling: the chosen go from that cell on (the next free cells, row by
+  row), else after the last tile, in the order chosen. Its sources gain
+  **Inputs of these images** (the tiled outputs' start images and
+  references) and the **Idea inbox** (for Generate too); images already
+  tiled are marked but can be chosen again.
+- **Inputs**: **+ Inputs ▾** adds what the tiled outputs were made from
+  (start image, then references): **as a column** (each row's inputs in
+  new columns at its left; one input on rows one after another spans
+  them) or **before each image** (input → output pairs, repeated where
+  shared; twice the columns). An image tile's right-click → **Add its
+  inputs here** puts them just left of it (in the empty cells there, else
+  its row moves over, widening the grid if it must). Greyed for images
+  made from text only.
+- **Pasted images**: Ctrl+V over a cell (or right-click → **Paste image
+  here**, or **Paste**) adds the clipboard's image; image files' paths or
+  `file://` URIs as text are read instead; image files dropped on a cell
+  are added too. They are held in memory for the session, are not sources
+  of the tiled idea, and fit into the cells, which are sized by the
+  outputs (by the inputs or pasted images only when there are no outputs;
+  the preview reads their sizes from the files).
 - **Title / subtitle**: lines centred above the grid (a gap below them), the
   subtitle at half the title's size, in the caption colour. Their text
   belongs to the layout, not the settings.
@@ -1758,24 +2121,94 @@ out as one image.
   one by one; size (above) and colour. A caption can hold placeholders, filled per
   image when shown and composed: `{n}` (the tile's number), `{style}`,
   `{seed}`, `{settings}`, `{steps}`, `{cfg}`, `{shift}`, `{strength}`,
-  `{title}`, `{run}`, `{prompt}`, `{project}`; unknown ones stay as typed.
+  `{title}`, `{run}`, `{prompt}`, `{project}`, `{kind}` (output, input,
+  start or pasted); unknown ones stay as typed. Captions from… gives an input
+  "input" (its idea's title for Title) and a pasted image "pasted".
   **Format … Apply** gives every image the same one (the format is kept in
   `tile`). The
   settings are kept in `config.rsn` (`tile`); the layout is not.
-- **Copy** puts the tiled image on the clipboard, **Save PNG…** writes a
-  file, **Add to input library** makes a new idea at the top of the input
+- **Copy** puts the tiled image on the clipboard, **Save {format}…** writes a
+  file in the format chosen under **Save**: PNG, WebP (lossless, at most
+  16383 on a side), JPEG (transparency flattened onto white) or AVIF (only
+  in builds with the `avif` feature); the lossy ones (JPEG, AVIF) have a
+  quality slider, 70 % by default. The file name's extension follows the
+  format. Both are kept in `tile` (`save_format`, `save_quality`); **Add to input library** makes a new idea at the top of the input
   library with the image, its source `Tiled { images }` (they count as used,
   so Clean up keeps them). Composing reads the full-size images on its own
   thread; over 250 MP is refused.
+
+### Crop and mark
+
+**Crop / mark…** crops an image and draws over it, mainly to show the edit
+model what to change ("replace the cup circled in red in `<image2>`").
+It opens from a Generate image (its pencil button or right-click menu)
+and from the image right-click menu everywhere else (Review, both
+libraries, the full-size preview, the Tile window's tiles).
+
+- The editor is a modal over nearly the whole window: a toolbar, the
+  image, a footer. Tools: **Crop** (drag a box; drag inside it to move it,
+  a corner to resize; aspect free, the original's or Generate's size;
+  optionally rounded to multiples of 32 when the drag ends), **Pencil**,
+  **Rectangle** and **Ellipse** (Shift: square / circle), **Eraser**
+  (removes whole marks). A colour (six swatches or any), an opacity
+  (25, 50, 75 or 100%; 100% to start; lower lets what's under a mark
+  show), a width in thousandths of the image's longer side (3 to start). Keys C, P, R, O, E; Ctrl+Z /
+  Ctrl+Shift+Z; scroll zooms about the pointer, right- or middle-drag pans,
+  0 fits. Enter saves; Escape or Cancel closes (a click outside doesn't: it
+  would lose the marks). Footer left: **Clear marks**, **Reset crop**.
+- What is drawn stays vectors in the original's pixels
+  (`ImageEdits { crop, marks }`) until Save; the copy is drawn on the
+  library's thread (marks with soft edges, each blended once at its
+  opacity, so a line crossing itself isn't darker; then the crop;
+  transparency kept) and imported into the input store.
+- The copy is an idea in `input/edited/` with the source
+  `Edited { image, edits }`: out of the inbox, the input library's lists and
+  counts. **show edited copies** in the Input library's filters lists them
+  (with no folder selected); the library picker has **Edited copies,
+  hidden**; an idea's details list its images' **Edited copies**, and a
+  copy's Source shows what it was made from. Clean up keeps the original
+  (it can be edited again).
+- From Generate, Save puts the copy in as a reference right below the
+  image, which keeps its role and `<imageN>` (later numbers move on, asking
+  to retag the prompt as usual). Opening an edited copy reopens its
+  original with the crop and marks as drawn; from Generate, Save then
+  replaces that copy in place (same `<imageN>`). Elsewhere Save only makes
+  the copy; **Save and use in Generate** also adds it to the selected
+  project's form. Each save makes a new copy; earlier ones stay.
 
 ### Opening the file manager
 
 **Open in file manager** / **Show in file manager** (folders, projects,
 idea folders, collections, the drop folder, images, the library path in
 the status bar) opens the folder (a file's folder) with `file_manager`
-from `config.rsn` if set (the command, the folder appended), else the
-first of `xdg-open`, `gio open`, `thunar`, `nautilus`, `dolphin`, `nemo`,
-`pcmanfm` that works; if none does, the status bar says how to set one up.
+from `config.rsn` if set (the command, the folder appended), else
+Explorer on Windows, Finder (`open`) on macOS, and on Linux the first of
+`xdg-open`, `gio open`, `thunar`, `nautilus`, `dolphin`, `nemo`, `pcmanfm`
+that works; if none does, the status bar says how to set one up. Text
+files (config, logs) open in `editor` if set, else Notepad on Windows,
+TextEdit (`open -t`) on macOS, and on Linux the desktop's app for them.
+
+### Server logs
+
+The servers IncreArt starts write their output to the log folder, `logs`
+in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
+`~/.local/state/increart` on Linux, `%LOCALAPPDATA%\increart` on Windows,
+`~/Library/Application Support/increart` on macOS):
+`sd-server-<name>.log`, `koboldcpp-<name>.log` (KoboldCpp image servers),
+`pe-<name>.log`. Servers it only connects to have none.
+
+- **Logs…** (the startup Servers screen's footer, the top bar's Servers
+  window) opens the log viewer, a modal; a started server's row there has a
+  log button that opens it on that server's log.
+- Left: the logs, newest first (size and age on hover). Right: the chosen
+  log's last 1 MB as a terminal shows it (lines rewritten with `\r`, such
+  as progress bars, as their last state; colour codes out), refreshed as it
+  grows; **follow** keeps to the end (untick to scroll back), **wrap**,
+  and a search that shows only the lines containing it.
+- Footer left: **Open in editor** (`editor` in `config.rsn`, the file
+  appended; else the desktop's default app for it, then gnome-text-editor,
+  gedit, kate, mousepad, xed), **Show in folder**, **Copy** (the lines
+  shown). Esc or Close closes.
 
 ### Project folders
 
@@ -1917,10 +2350,13 @@ the keys and mouse buttons go through that view's own history instead.
     Input library and Discarded), double-click shows the first image full
     size (the editor when there's no image), and a pencil button on the
     image (on hover, or when selected) opens the editor. Keys as in the
-    table above, plus `Enter`/`T` = open the **Edit idea** window (title, tags,
+    table above, plus `Home`/`End` = the first / last idea, `Enter`/`T` = open the **Edit idea** window (title, tags,
     text, variants, images, and a finished PE rewrite's diff with Accept /
-    Reject). Right-click a card: keep in input library ★ / keep in input library / discard, promote, rewrite
-    with PE, accept all ready rewrites, edit, copy text.
+    Reject). Right-click a card, in groups: promote (`P`), edit (`Enter`),
+    rewrite with PE (in the Edit window, so Use changes its text) · keep in
+    input library ★ / keep in input library / discard (`1`/`2`/`3`) · copy
+    text, copy image and describe image with PE (its first image) · open
+    folder in file manager. (Planned: accept all ready rewrites.)
   - **New idea** (`Ctrl+N` from anywhere): title, text, tags, images (drop /
     paste / browse), **Rewrite with PE**. **Add to inbox** (review it later),
     **Add & keep** (straight into the input library, into a chosen folder),
@@ -1943,8 +2379,8 @@ the keys and mouse buttons go through that view's own history instead.
     image reused"); import settings (strip GPS, delete `imported/`
     originals after N days, clear them now; see Open questions).
   - **Discarded**: discarded ideas (`input/discarded/`), newest first.
-    Right-click: restore to the Idea inbox, restore to the input library,
-    delete permanently (asks first; the idea's folder goes to the system
+    Right-click: restore to the Idea inbox, restore to the input library ·
+    copy text, copy image, describe image with PE · delete permanently (asks first; the idea's folder goes to the system
     trash, its images stay until Clean up). **Empty discarded…** deletes them
     all. Restores can be undone with `Ctrl+Z`.
 - **Input library**: tabs **Grid** (default) · **Folder** (see Projects →
@@ -1953,10 +2389,14 @@ the keys and mouse buttons go through that view's own history instead.
   has-images / promoted-or-not), selection actions, and the library folder
   tree (see Input library folders); the grid shows the selected folder's
   ideas, newest first (or most used first); cards show PE rewrite state like the inbox's. Multi-select → promote
-  (button or `Space`); drag an image into a project's reference strip; drag
-  cards onto a folder to file them. Right-click a card: star/unstar, promote,
-  add its images as refs to the current project, rewrite with PE, accept all
-  ready rewrites, edit, copy text, back to the Idea inbox, discard. When the card is part of a multi-selection, the
+  (button or `P`/`Space`); ← → ↑ ↓ and `Home`/`End` select the previous /
+  next / first / last idea and show it in the panel, `Ctrl+A` selects all,
+  `Enter`/`T` edits; a **Keys** list is pinned at the bottom left; drag an image into a project's reference strip; drag
+  cards onto a folder to file them. Right-click a card, in groups as in the
+  inbox: promote, edit, rewrite with PE, add its images as refs to the
+  current project, star/unstar · back to the Idea inbox, discard · copy
+  text, copy image, describe image with PE · open folder in file manager.
+  (Planned: accept all ready rewrites.) When the card is part of a multi-selection, the
   bulk actions (star, promote, rewrite, back to inbox, discard) apply to the
   whole selection. A plain click on a card opens the **idea panel** on the
   right: the idea's images (double-click: full size), text, tags, created
@@ -2104,7 +2544,23 @@ the keys and mouse buttons go through that view's own history instead.
   queue; "review this project" actions (double-click in Projects → Grid,
   opening an unreviewed image in a folder view) set it. Single view + grid view + A/B compare (`C` or
   the A/B button pins the current image as A and shows the next as B; both can
-  be rated, and A/B can be swapped), over a
+  be rated, and their sides swapped; **Compare with…** (`Shift+C`, the
+  toolbar, the compare bar, right-click A → Replace A with…, or any
+  image's right-click menu) makes A an image picked in the From library…
+  picker instead, B staying the image it was opened on: one click picks,
+  and its tree starts with **This image**, the image's references (its
+  start image first) and its project's (every run's, newest run first),
+  opening on the first that has any, else where it was last; an input
+  image as A has no rating buttons. B, the image the arrows
+  change ("B (← →)"), is on the left and the pinned A on the right;
+  **Swap sides** changes that (again: back), each keeping its label;
+  which image is pinned doesn't change. A made into B (its start image or a
+  reference) is tagged so ("B's reference 2 · <image2>"), and under Its
+  references the picker's thumbnails say "start" or "ref N". The Output library's
+  right-click Compare with… turns its Grid into the same A | B view, B the
+  selected image, which ←/→ (or the bar's arrows) move through the images
+  shown, the lineage panel following B; Esc or **Leave compare** goes back
+  to the grid, as does changing tab), over a
   checkerboard for alpha images. Single and Grid have an info panel on the
   right: "3 / 18", the image, and its recipe (project, run, **queued** (its
   revision's time), **generated** (when it was stored, from the run's
@@ -2131,7 +2587,10 @@ the keys and mouse buttons go through that view's own history instead.
   closes the preview. The bar's ⌨ button opens a popover listing the keys
   that apply there (navigate, rate, use, zoom, close). The keys are listed in a collapsible
   **Keys** section pinned to the bottom of the scope panel: `1`/`2`/`3` (or `G`/`N`/`B`) =
-  good/neutral/bad, arrows = next/prev, `Space` = toggle grid/single, `C` =
+  good/neutral/bad, arrows = next/prev, `Home`/`End` = the oldest / newest
+  (on the contact sheet the row's first / last seed, with `Ctrl` the
+  sheet's; Grid, the strip and the sheet scroll to the image moved to),
+  `Space` = toggle grid/single, `C` =
   compare with pinned, `E` = new edit run from this image, `R` = add to input
   library as ref, `I` = new idea from this image, `Ctrl+Z` = undo last review
   action.
@@ -2144,7 +2603,10 @@ the keys and mouse buttons go through that view's own history instead.
   it holds, every folder shown open; switching takes the text along), the
   filters (has refs, has alpha, and one checkbox per rating: good, neutral,
   bad, unreviewed), then the **sources**, collections first and smart folders
-  after; whichever is picked drives Grid and Folder:
+  after; whichever is picked drives Grid and Folder. In Grid, a **Keys**
+  list is pinned at the bottom of that panel; ← → ↑ ↓ and `Home`/`End`
+  select the previous / next / first / last image (shown in the lineage
+  panel, scrolled to). The sources:
   - **All projects** (the default), first in the collections list as a
     virtual collection of everything, then **All collections**.
   - **Collections**: your own folder tree of kept images, independent of
@@ -2220,7 +2682,25 @@ the keys and mouse buttons go through that view's own history instead.
   - **Export…** (an image, a selection, a collection, a smart folder, or a
     folder in either folder view): copies the PNGs to a chosen folder, with
     or without the embedded metadata, named by run/revision/seed or by image
-    ID. The library is unchanged.
+    ID. The library is unchanged. A modal: Enter exports, Escape or a click
+    outside cancels.
+- **Dialog buttons**, the same everywhere:
+  - The footer row's ways to finish are right-aligned: the main action in
+    the corner and bold, the other ways to finish to its left, then
+    **Cancel** / **Close** furthest left (as GNOME and macOS do). Tools
+    that don't finish the dialog (Add, Reset, Copy, Open folder, tick all,
+    a wizard's Back…) and status text go on the left of the same row, and
+    are what gives way when the row is narrow. One helper lays every row
+    out (`widgets::dialog_footer`).
+  - Names say what happens: Save, Apply, Create, Export…, never "OK" or
+    "Done". A confirmation's button is its verb (**Delete**, **Stop now**,
+    **Switch library**, **Queue**, **Leave**…), not "Yes". **Cancel**
+    when something would be lost, **Close** when nothing is pending.
+  - Key hints in the label: `Esc` on Cancel / Close where Escape closes;
+    `Enter` on the main action where Enter does it (every single-step
+    dialog).
+  - One way out of a modal: no ✕ beside its Cancel / Close (movable
+    windows keep their title bar's ✕).
 - **Icons**: Phosphor (regular) via the `egui-phosphor` crate, registered as
   a fallback font after the text font.
 
@@ -2254,7 +2734,9 @@ Durations read as "0.84 s", "34.2 s", "4 min 12 s", "2 h 05 min".
 
 ### Notifications
 
-**Settings** (⚙ at the far right of the top bar) has a **Notifications** tab with three
+**Settings** (⚙ at the far right of the top bar; a modal, changes apply as made) has two tabs:
+**Library** (the open library's store format and its conversion, see Image
+stores) and **Notifications**, with three
 independent alerts. The two conditions below each sound when its condition starts holding, then
 again every *repeat* minutes while it still holds; once the condition ends it
 is reset, and the next time it holds it counts again from the start.
@@ -2395,6 +2877,44 @@ subjects side by side in one row, left to right: the red fox from image 1,
   refs. Default CFG for runs with refs: 2 (base model), pending a wider
   A/B.
 
+Server configurations (2026-10-28, [benchmark-servers.html](benchmark-servers.html),
+`scripts/bench-servers.sh`): one 1 MP edit with one 1024² ref, CFG 2,
+20 steps, and PE with Qwen3-VL 8B, on each single-GPU setup:
+
+- sd-server on ROCm with flash attention is fastest: 102 s per image with
+  the conditioning cached (126 s for a new prompt), 25.6 GiB VRAM.
+- `--offload-to-cpu` on ROCm costs 4% (105 s) and cuts VRAM to 4.5 GiB
+  (17.3 GiB RAM instead). On Vulkan it saves little (18 GiB VRAM).
+- Without flash attention ROCm is 3.5× slower; sd-server on Vulkan is 4.7×
+  slower, and ~50 min per image without flash attention.
+- KoboldCpp 1.123.1 works with GGUF files set up as its official
+  Qwen-Image 2.1 `.kcppt` (Q4_K diffusion, Qwen3-VL Q4_K_M + mmproj as
+  `--sdclip1`, `--sdclipdevice main`): ~201 s per image, 14.5 GiB VRAM
+  with offload, 22 GiB with Q8_0 and no offload. It encodes the prompt again
+  for every image (no conditioning cache). Its default runs the text encoder
+  on the CPU (minutes per image), and the int8 files expand to 29 GiB and
+  fail.
+- PE on the GPU: 2–3 s per answer, ~58 tokens/s, 7.2 GiB VRAM. On the CPU:
+  ~9 tokens/s, 6–80 s per answer.
+- PE and image editing on one card overflow its 32 GiB: images +41% and PE
+  down to ~3 tokens/s while both work. Keep PE on the other card.
+
+KoboldCpp presets by VRAM (2026-10-29, [vram-tiers.md](vram-tiers.md)):
+image editing and PE in one KoboldCpp on one card of 8–32 GB. The image
+VRAM cap (`--sdvramlimit`) is the lever: speed holds down to a 7 GiB cap,
+then drops ~75%. 24 and 32 GB keep PE resident (207–217 s per image,
+18.1 and 22.7 GiB peak). 12 and 16 GB swap PE and the image model with
+autoswap (~208 s per image, plus ~5–9 s per swap; the app swaps them
+itself, see **Swapping** above). 8 GB swaps too, with
+the text encoder on the CPU (364 s, 6.3 GiB).
+
+Why ROCm beats Vulkan on the R9700 (2026-10-29,
+[backend-performance.md](backend-performance.md)): not int8 convrot, which
+KoboldCpp lacks on every backend (a ROCm build included). RADV on Mesa
+25.0.7 exposes no cooperative matrix for RDNA4, so Vulkan matmuls skip the
+matrix cores that hipBLAS uses. The same sd-server and int8 model takes
+103 s per image on ROCm and 480 s on Vulkan.
+
 ## Open questions
 
 - EXIF from imported photos is kept verbatim, including GPS location if the
@@ -2426,7 +2946,8 @@ subjects side by side in one row, left to right: the red fox from image 1,
 
 ## To benchmark
 
-- HIP vs Vulkan speed/memory on gfx1201 (both builds exist).
+- PE beside an offloading image server on one card (should fit; see the
+  server benchmark).
 - Splitting one model across both GPUs (`diffusion=ROCm0&ROCm1`) vs one server
   per GPU: per-GPU is expected to win on throughput for batches.
 - 2048² time per image, to decide whether it stays a preset or becomes a

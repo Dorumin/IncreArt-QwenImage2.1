@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use increart_core::config::{RecipePreset, SdServerConfig, ServerConfig};
 use increart_core::engine::{Endpoint, Engine, EngineOptions};
 use increart_core::launcher::{self, ServerProcess};
-use increart_core::model::{IdeaSource, Mode, ModelFile, ModelSelection, Sample};
+use increart_core::model::{IdeaSource, Mode, ModelFile, ModelSelection, Sample, StoreFormat};
 use increart_core::request::GenOptions;
 use increart_core::{Id, IdeaLoc, ImageRef, Library, NewIdea, NewRun, Tree, Verdict, modelhash};
 
@@ -36,14 +36,35 @@ struct Shared {
     opening: Arc<std::sync::atomic::AtomicUsize>,
     /// The open library's watch for outside changes.
     watch: Option<crate::watch::LibraryWatch>,
-    /// The PE server in use, and the settings it was opened with.
-    pe: Option<(increart_core::pe::PeServer, increart_core::pe::PeProcess)>,
-    /// Set to stop a PE server still starting.
-    pe_cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// PE asks stopped: skipped if still queued, cut short if being answered.
+    /// The PE servers in use, each answering asks from `pe_queue`.
+    pe: Vec<PeSlot>,
+    /// Asks waiting for a PE server.
+    pe_queue: std::collections::VecDeque<crate::update::PeJob>,
+    /// The status and ready count last reported for `pe`.
+    pe_reported: Option<(crate::state::PeStatus, usize)>,
+    /// The number of the next PE slot.
+    pe_next: u64,
+    /// Set to stop the store conversion going on.
+    convert_cancel: Arc<std::sync::atomic::AtomicBool>,
+    download_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// PE asks stopped: dropped if queued (or when they come), cut short
+    /// if being answered.
     pe_stopped: std::collections::HashSet<u64>,
-    /// The PE ask being answered.
-    pe_current: Option<u64>,
+}
+
+/// A PE server in use and the worker answering asks with it.
+struct PeSlot {
+    /// Its worker's number (gone from `Shared::pe`: the worker ends).
+    id: u64,
+    server: increart_core::pe::PeServer,
+    /// Once open.
+    process: Option<increart_core::pe::PeProcess>,
+    /// Why it didn't open.
+    failed: Option<String>,
+    /// Set to stop it while starting.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The ask it's answering.
+    current: Option<u64>,
 }
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -52,21 +73,20 @@ pub struct Runtime {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     work: Sender<Effect>,
-    /// PE requests, carried out in order on their own thread.
-    /// Asks for the PE server, in order; None: stop it.
-    pe_work: Sender<Option<(increart_core::pe::PeServer, Vec<crate::update::PeJob>)>>,
+    /// PE servers to use and asks for them, in order; None: stop them.
+    pe_work: Sender<Option<(Vec<increart_core::pe::PeServer>, Vec<crate::update::PeJob>)>>,
     shared: Arc<Mutex<Shared>>,
+    /// Wakes PE workers: asks queued, or their slot gone.
+    pe_signal: Arc<std::sync::Condvar>,
     wake: Wake,
 }
 
-/// `$XDG_STATE_HOME/increart/logs`, else `~/.local/state/increart/logs`.
+/// `logs` in the app's state folder (`~/.local/state/increart` on Linux;
+/// see [`user_dir`](increart_core::config::user_dir)).
 pub fn log_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("increart").join("logs")
+    increart_core::config::user_dir("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")
+        .unwrap_or_else(|| std::env::temp_dir().join("increart"))
+        .join("logs")
 }
 
 impl Runtime {
@@ -87,35 +107,30 @@ impl Runtime {
                         open_servers(&wtx, &wwake, &wshared, servers, shared, attempt);
                         continue;
                     }
+                    let started = matches!(fx, Effect::StartEngine { .. });
                     let msgs = work_on(&wshared, &wwake, fx);
                     for m in msgs {
                         let _ = wtx.send(m);
+                    }
+                    if started {
+                        list_loadable(&wtx, &wwake, &wshared);
                     }
                     wwake();
                 }
             })
             .expect("spawn library worker");
         let (pe_work, pe_jobs) = mpsc::channel();
-        let (ptx, pshared, pwake) = (tx.clone(), shared.clone(), wake.clone());
+        let pe_signal = Arc::new(std::sync::Condvar::new());
+        let pe = PeCtx { tx: tx.clone(), wake: wake.clone(), shared: shared.clone(), signal: pe_signal.clone() };
         std::thread::Builder::new()
             .name("prompt enhance".into())
             .spawn(move || {
                 for work in pe_jobs {
-                    match work {
-                        Some((server, jobs)) => pe_ask(&ptx, &pwake, &pshared, server, jobs),
-                        None => {
-                            // dropping it stops the process (and waits for
-                            // it: one started next may want its port)
-                            let p = pshared.lock().unwrap().pe.take();
-                            drop(p);
-                            let _ = ptx.send(Msg::PeStatus(crate::state::PeStatus::Off));
-                            pwake();
-                        }
-                    }
+                    pe_configure(&pe, work);
                 }
             })
             .expect("spawn PE worker");
-        Runtime { tx, rx, work, pe_work, shared, wake }
+        Runtime { tx, rx, work, pe_work, shared, pe_signal, wake }
     }
 
     pub fn run(&self, fx: Effect) {
@@ -136,6 +151,39 @@ impl Runtime {
                 });
             }
 
+            Effect::KoboldVersion(binary) => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    let r = increart_core::kobold::version(&binary);
+                    let _ = tx.send(Msg::KoboldVersion(binary, r));
+                    wake();
+                });
+            }
+            Effect::DetectGpus(runtime) => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    let r = increart_core::tiers::detect_gpus(runtime);
+                    let _ = tx.send(Msg::WizardGpus(r, increart_core::tiers::available_ram_gib()));
+                    wake();
+                });
+            }
+            Effect::DownloadModels { dir, files, model_dirs } => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.shared.lock().unwrap().download_cancel = cancel.clone();
+                std::thread::Builder::new()
+                    .name("model download".into())
+                    .spawn(move || {
+                        let search = increart_core::tiers::search_dirs(&model_dirs);
+                        let r = download_models(&dir, &files, &search, &cancel, &tx, &wake);
+                        let _ = tx.send(Msg::WizardDownloaded(r));
+                        wake();
+                    })
+                    .expect("spawn model download");
+            }
+            Effect::CancelDownload => {
+                self.shared.lock().unwrap().download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             Effect::FolderPreviews { root, dir, names } => {
                 let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 std::thread::spawn(move || {
@@ -155,6 +203,19 @@ impl Runtime {
                     .spawn(move || check_usage(&lib, &shared, &tx, &wake))
                     .expect("spawn usage check");
             }
+            Effect::ConvertStore(to) => {
+                let Some(lib) = library(&self.shared) else { return };
+                let (tx, wake, shared) = (self.tx.clone(), self.wake.clone(), self.shared.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.shared.lock().unwrap().convert_cancel = cancel.clone();
+                std::thread::Builder::new()
+                    .name("store conversion".into())
+                    .spawn(move || convert_store(&lib, &shared, to, &cancel, &tx, &wake))
+                    .expect("spawn store conversion");
+            }
+            Effect::CancelConvert => {
+                self.shared.lock().unwrap().convert_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             Effect::WatchLibrary(root) => {
                 let w = crate::watch::start(root, self.tx.clone(), self.wake.clone());
                 self.shared.lock().unwrap().watch = Some(w);
@@ -164,7 +225,10 @@ impl Runtime {
                 std::thread::spawn(move || {
                     let r = crate::tile::compose(&root, &layout, &settings).and_then(|img| {
                         if let TileTarget::File(path) = &to {
-                            img.save(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                            let bytes =
+                                increart_core::export::encode(&img, settings.save_format, settings.save_quality)
+                                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                            std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
                         }
                         Ok(crate::tile::TileImage(Arc::new(img)))
                     });
@@ -172,31 +236,45 @@ impl Runtime {
                     wake();
                 });
             }
-            Effect::PeAsk { server, jobs } => {
-                let _ = self.pe_work.send(Some((server, jobs)));
+            Effect::PeAsk { servers, jobs } => {
+                let _ = self.pe_work.send(Some((servers, jobs)));
             }
             Effect::PeStop(ids) => {
                 let mut s = self.shared.lock().unwrap();
+                // (asks may still be on their way to the queue)
                 s.pe_stopped.extend(&ids);
+                s.pe_queue.retain(|j| !ids.contains(&j.id));
                 // the server stops writing (it would finish the answer
                 // nobody reads before starting the next)
-                let current = s.pe_current.is_some_and(|c| ids.contains(&c));
-                if let (true, Some((cfg, p))) = (current, &s.pe)
-                    && matches!(cfg.run, increart_core::pe::PeRun::KoboldCpp { .. })
-                {
-                    let client = p.client.clone();
-                    std::thread::spawn(move || client.abort());
+                for p in &s.pe {
+                    if p.current.is_some_and(|c| ids.contains(&c))
+                        && matches!(p.server.run, increart_core::pe::PeRun::KoboldCpp { .. })
+                        && let Some(client) = p.process.as_ref().map(|p| p.client.clone())
+                    {
+                        std::thread::spawn(move || client.abort());
+                    }
                 }
             }
             Effect::PeShutdown => {
-                // one starting gives up
-                self.shared.lock().unwrap().pe_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                // ones starting give up
+                for p in &self.shared.lock().unwrap().pe {
+                    p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = self.pe_work.send(None);
             }
-            Effect::PeListGpus => {
+            Effect::OpenInEditor { path, command } => {
                 let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 std::thread::spawn(move || {
-                    let _ = tx.send(Msg::PeGpus(increart_core::pe::list_gpus()));
+                    if let Err(e) = open_in_editor(&path, &command) {
+                        let _ = tx.send(Msg::Problem(e));
+                        wake();
+                    }
+                });
+            }
+            Effect::PeListGpus(runtime) => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::PeGpus(runtime, increart_core::pe::list_gpus(runtime)));
                     wake();
                 });
             }
@@ -254,7 +332,9 @@ impl Runtime {
             s.opening.clone()
         });
         if let Ok(s) = self.shared.lock() {
-            s.pe_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            for p in &s.pe {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         if let Ok(opening) = opening {
             let deadline = std::time::Instant::now() + Duration::from_millis(1500);
@@ -271,8 +351,10 @@ impl Runtime {
             }
             s.servers.clear();
             // a KoboldCpp the app started stops with it
-            s.pe = None;
+            s.pe.clear();
+            s.pe_queue.clear();
         }
+        self.pe_signal.notify_all();
     }
 }
 
@@ -291,93 +373,185 @@ const PE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How long a started KoboldCpp may take to load its model.
 const PE_START_WAIT: Duration = Duration::from_secs(300);
 
-/// Carries out PE jobs in order: opens the server first (reopening it if
-/// how it runs changed), then one chat request per job. No jobs: only
-/// opens it.
-fn pe_ask(
-    tx: &Sender<Msg>,
-    wake: &Wake,
-    shared: &Arc<Mutex<Shared>>,
-    server: increart_core::pe::PeServer,
-    jobs: Vec<crate::update::PeJob>,
-) {
-    use crate::state::{PeStatus, PeStep};
+/// What PE threads share.
+#[derive(Clone)]
+struct PeCtx {
+    tx: Sender<Msg>,
+    wake: Wake,
+    shared: Arc<Mutex<Shared>>,
+    signal: Arc<std::sync::Condvar>,
+}
+
+impl PeCtx {
+    fn send(&self, m: Msg) {
+        let _ = self.tx.send(m);
+        (self.wake)();
+    }
+}
+
+/// Uses `servers` from now (None: none), keeping ones open or starting
+/// that run as the same process, and queues `jobs` for them. Ones no
+/// longer used stop before new ones start (one may want the other's
+/// port).
+fn pe_configure(pe: &PeCtx, work: Option<(Vec<increart_core::pe::PeServer>, Vec<crate::update::PeJob>)>) {
+    let (servers, jobs) = work.unwrap_or_default();
+    let (removed, started) = {
+        let mut s = pe.shared.lock().unwrap();
+        let mut old = std::mem::take(&mut s.pe);
+        let mut started = vec![];
+        for server in servers {
+            match old.iter().position(|p| p.failed.is_none() && p.server.same_process(&server)) {
+                Some(i) => s.pe.push(old.remove(i)),
+                None => {
+                    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let id = s.pe_next;
+                    s.pe_next += 1;
+                    started.push((id, server.clone(), cancel.clone()));
+                    s.pe.push(PeSlot { id, server, process: None, failed: None, cancel, current: None });
+                }
+            }
+        }
+        for p in &old {
+            p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if s.pe.is_empty() {
+            s.pe_queue.clear();
+        }
+        for j in jobs {
+            if !s.pe_stopped.remove(&j.id) {
+                s.pe_queue.push_back(j);
+            }
+        }
+        (old, started)
+    };
+    pe.signal.notify_all();
+    // dropping them stops their processes (and waits for them)
+    drop(removed);
+    pe_report(pe);
+    for (id, server, cancel) in started {
+        let pe = pe.clone();
+        std::thread::Builder::new()
+            .name(format!("prompt enhance {}", server.name))
+            .spawn(move || pe_worker(&pe, id, server, &cancel))
+            .expect("spawn PE worker");
+    }
+}
+
+/// Reports how the PE servers are getting on, when that changed: Ready
+/// once any is, Failed (dropping the asks queued) once all failed.
+fn pe_report(pe: &PeCtx) {
+    use crate::state::PeStatus;
+    let (status, ready) = {
+        let mut s = pe.shared.lock().unwrap();
+        let ready = s.pe.iter().filter(|p| p.process.is_some()).count();
+        let status = if s.pe.is_empty() {
+            PeStatus::Off
+        } else if ready > 0 {
+            PeStatus::Ready
+        } else if s.pe.iter().any(|p| p.failed.is_none()) {
+            PeStatus::Starting
+        } else {
+            let failed: Vec<String> = s.pe.iter().filter_map(|p| p.failed.clone()).collect();
+            s.pe_queue.clear();
+            PeStatus::Failed(failed.join("\n"))
+        };
+        let before = s.pe_reported.replace((status.clone(), ready));
+        if before.as_ref() == Some(&(status.clone(), ready)) {
+            return;
+        }
+        if before.is_some_and(|(b, _)| b == status) { (None, ready) } else { (Some(status), ready) }
+    };
+    pe.send(Msg::PeReady(ready));
+    if let Some(status) = status {
+        pe.send(Msg::PeStatus(status));
+    }
+}
+
+/// Opens `server`, then answers queued asks with it, one at a time, until
+/// its slot (`id`) is gone.
+fn pe_worker(pe: &PeCtx, id: u64, server: increart_core::pe::PeServer, cancel: &std::sync::atomic::AtomicBool) {
     use increart_core::pe;
-    let send = |m: Msg| {
-        let _ = tx.send(m);
-        wake();
-    };
-    let current = {
-        let s = shared.lock().unwrap();
-        s.pe.as_ref().filter(|(cfg, _)| cfg.same_process(&server)).map(|(_, p)| p.client.clone())
-    };
-    let client = match current {
-        Some(c) => c,
-        None => {
-            let cancel = {
-                let mut s = shared.lock().unwrap();
-                s.pe = None;
-                s.pe_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                s.pe_cancel.clone()
-            };
-            send(Msg::PeStatus(PeStatus::Starting));
-            match pe::open(&server, &log_dir(), PE_START_WAIT, &cancel) {
-                Ok(p) => {
-                    let c = p.client.clone();
-                    shared.lock().unwrap().pe = Some((server.clone(), p));
-                    send(Msg::PeStatus(PeStatus::Ready));
-                    c
-                }
-                // stopped while starting: not a failure
-                Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
-                    send(Msg::PeStatus(PeStatus::Off));
-                    return;
-                }
-                Err(e) => {
-                    send(Msg::PeStatus(PeStatus::Failed(e)));
-                    return;
-                }
+    let opened = pe::open(&server, &log_dir(), PE_START_WAIT, cancel);
+    let (client, unused, problem) = {
+        let mut s = pe.shared.lock().unwrap();
+        let others_ready = s.pe.iter().any(|p| p.id != id && p.process.is_some());
+        match (s.pe.iter_mut().find(|p| p.id == id), opened) {
+            (Some(slot), Ok(p)) => {
+                let c = p.client.clone();
+                slot.process = Some(p);
+                (Some(c), None, None)
+            }
+            // stopped while starting: not a failure
+            (None, r) => (None, r.ok(), None),
+            (Some(slot), Err(e)) => {
+                slot.failed = Some(e.clone());
+                (None, None, others_ready.then(|| format!("{}: {e}", server.name)))
             }
         }
     };
-    for job in jobs {
-        let stopped = |shared: &Arc<Mutex<Shared>>| shared.lock().unwrap().pe_stopped.contains(&job.id);
-        {
-            let mut s = shared.lock().unwrap();
-            if s.pe_stopped.remove(&job.id) {
-                continue;
-            }
-            s.pe_current = Some(job.id);
-        }
-        if !job.images.is_empty() {
-            send(Msg::PeProgress(job.id, PeStep::Preparing));
-        }
-        let images: Result<Vec<_>, String> =
-            job.images.iter().map(|p| pe::image_for_request(p, job.image_size)).collect();
-        send(Msg::PeProgress(job.id, PeStep::Reading { images: job.images.len() }));
-        // the answer so far, a few times a second
-        let mut last = Instant::now() - PE_PROGRESS_EVERY;
-        let r = images.and_then(|imgs| {
-            client.chat_stream(&job.system, &job.text, &imgs, job.max_tokens, job.sampling, |pieces, text| {
-                if last.elapsed() >= PE_PROGRESS_EVERY {
-                    last = Instant::now();
-                    send(Msg::PeProgress(job.id, PeStep::Writing { pieces, text: text.to_string() }));
+    drop(unused);
+    if let Some(p) = problem {
+        pe.send(Msg::Problem(p));
+    }
+    pe_report(pe);
+    let Some(client) = client else { return };
+    loop {
+        let job = {
+            let mut s = pe.shared.lock().unwrap();
+            loop {
+                if !s.pe.iter().any(|p| p.id == id) {
+                    return;
                 }
-                !stopped(shared)
-            })
-        });
+                if let Some(j) = s.pe_queue.pop_front() {
+                    if let Some(slot) = s.pe.iter_mut().find(|p| p.id == id) {
+                        slot.current = Some(j.id);
+                    }
+                    break j;
+                }
+                s = pe.signal.wait(s).unwrap();
+            }
+        };
+        pe.send(Msg::PeOn(job.id, server.name.clone()));
+        let r = pe_answer(pe, &client, &job);
         let was_stopped = {
-            let mut s = shared.lock().unwrap();
-            s.pe_current = None;
+            let mut s = pe.shared.lock().unwrap();
+            if let Some(slot) = s.pe.iter_mut().find(|p| p.id == id) {
+                slot.current = None;
+            }
             s.pe_stopped.remove(&job.id)
         };
         if !was_stopped {
-            send(Msg::PeAnswer(job.id, r));
+            pe.send(Msg::PeAnswer(job.id, r));
         }
     }
 }
 
+/// One chat request for `job`, reporting the answer so far a few times a
+/// second.
+fn pe_answer(pe: &PeCtx, client: &increart_core::pe::Client, job: &crate::update::PeJob) -> Result<String, String> {
+    use crate::state::PeStep;
+    use increart_core::pe;
+    if !job.images.is_empty() {
+        pe.send(Msg::PeProgress(job.id, PeStep::Preparing));
+    }
+    let images: Result<Vec<_>, String> = job.images.iter().map(|p| pe::image_for_request(p, job.image_size)).collect();
+    pe.send(Msg::PeProgress(job.id, PeStep::Reading { images: job.images.len() }));
+    let mut last = Instant::now() - PE_PROGRESS_EVERY;
+    images.and_then(|imgs| {
+        client.chat_stream(&job.system, &job.text, &imgs, job.max_tokens, job.sampling, |pieces, text| {
+            if last.elapsed() >= PE_PROGRESS_EVERY {
+                last = Instant::now();
+                pe.send(Msg::PeProgress(job.id, PeStep::Writing { pieces, text: text.to_string() }));
+            }
+            !pe.shared.lock().unwrap().pe_stopped.contains(&job.id)
+        })
+    })
+}
+
+#[cfg(not(feature = "avif"))]
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+#[cfg(feature = "avif")]
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif"];
 
 /// The system file picker: the desktop portal when reachable, else zenity
 /// (rfd's fallback). Empty when cancelled.
@@ -392,14 +566,23 @@ fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
             .pick_folder()
             .into_iter()
             .collect(),
-        PickKind::ModelDir => d.set_title("Model folder (sd-server --model-dir)").pick_folder().into_iter().collect(),
+        PickKind::ModelDir => {
+            d.set_title("Models folder (KoboldCpp and sd-server)").pick_folder().into_iter().collect()
+        }
         PickKind::SdServerBinary => d.set_title("sd-server binary").pick_file().into_iter().collect(),
-        PickKind::Pe(f) => {
+        PickKind::KoboldBinary | PickKind::WizardBinary => {
+            d.set_title("KoboldCpp binary").pick_file().into_iter().collect()
+        }
+        PickKind::WizardModels => d.set_title("Models folder for KoboldCpp").pick_folder().into_iter().collect(),
+        PickKind::Pe(f) | PickKind::Kobold(_, f) => {
             let d = match f {
                 crate::state::PeFile::Binary => d.set_title("KoboldCpp binary"),
                 crate::state::PeFile::Model => d.set_title("Model (.gguf)").add_filter("GGUF", &["gguf"]),
                 crate::state::PeFile::Mmproj => {
                     d.set_title("Vision projector (mmproj .gguf)").add_filter("GGUF", &["gguf"])
+                }
+                crate::state::PeFile::Config => {
+                    d.set_title("KoboldCpp settings (.kcpps)").add_filter("KoboldCpp settings", &["kcpps", "json"])
                 }
             };
             d.pick_file().into_iter().collect()
@@ -408,10 +591,10 @@ fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
             d.set_title("Images for the new idea").add_filter("Images", IMAGE_EXTS).pick_files().unwrap_or_default()
         }
         PickKind::ExportDir => d.set_title("Export to").pick_folder().into_iter().collect(),
-        PickKind::TileFile => d
+        PickKind::TileFile(format) => d
             .set_title("Save the tiled image")
-            .set_file_name("tiles.png")
-            .add_filter("PNG", &["png"])
+            .set_file_name(format!("tiles.{}", format.ext()))
+            .add_filter(format.name(), &[format.ext()])
             .save_file()
             .into_iter()
             .collect(),
@@ -424,6 +607,19 @@ fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
             d.set_title("Import as new ideas").add_filter("Images and text", &exts).pick_files().unwrap_or_default()
         }
     }
+}
+
+/// What each open server can load, for the model presets it can run, as
+/// [`Msg::ServerModels`] (asked in the background: model folders are walked).
+fn list_loadable(tx: &Sender<Msg>, wake: &Wake, shared: &Arc<Mutex<Shared>>) {
+    let clients: Vec<_> =
+        shared.lock().unwrap().servers.iter().flatten().map(|(_, p)| (p.name.clone(), p.client.clone())).collect();
+    let (tx, wake) = (tx.clone(), wake.clone());
+    std::thread::spawn(move || {
+        let found = clients.into_iter().filter_map(|(name, c)| c.loadable().ok().map(|l| (name, l))).collect();
+        let _ = tx.send(Msg::ServerModels(found));
+        wake();
+    });
 }
 
 /// Opens the servers of one attempt in parallel; reports each, then settles.
@@ -449,8 +645,7 @@ fn open_servers(
             .iter()
             .map(|c| {
                 let same = |o: &Option<(ServerConfig, ServerProcess)>| {
-                    o.as_ref()
-                        .is_some_and(|(x, _)| x == c && (same_settings || !matches!(c, ServerConfig::Start { .. })))
+                    o.as_ref().is_some_and(|(x, _)| x == c && (same_settings || !c.is_started()))
                 };
                 old.iter().position(same).and_then(|i| old[i].take())
             })
@@ -484,7 +679,7 @@ fn open_servers(
                         return;
                     }
                     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    if matches!(server, ServerConfig::Start { .. }) {
+                    if server.is_started() {
                         watch_start_log(&server, attempt, i, &tx, &wake, &done);
                     }
                     let opened = launcher::open_cancellable(&server, &cfg, &log_dir(), START_WAIT, &cancel);
@@ -552,22 +747,17 @@ fn export(lib: &Library, images: &[ImageRef], dest: &Path, keep_metadata: bool, 
     let mut n = 0;
     for img in images {
         let bytes = std::fs::read(lib.image_path(img)).map_err(|e| e.to_string())?;
-        let bytes = if keep_metadata {
-            bytes
-        } else {
-            let keep = |k: &[u8; 4]| !matches!(k, b"tEXt" | b"iTXt" | b"zTXt" | b"eXIf");
-            let chunks = increart_core::png::read_chunks(&bytes)?;
-            increart_core::png::write_chunks(&chunks.into_iter().filter(|c| keep(&c.kind)).collect::<Vec<_>>())
-        };
+        let bytes = if keep_metadata { bytes } else { increart_core::container::strip_metadata(&bytes)? };
+        let format = lib.format_of(img);
         let link = ix.projects.iter().flat_map(|p| &p.outputs).find(|o| &o.image == img);
-        let base = match (by_id, link) {
-            (false, Some(o)) => o.name.file_name(),
-            _ => format!("{}.png", img.id),
+        let stem = match (by_id, link) {
+            (false, Some(o)) => format!("{}_r{}_s{:04}", o.name.run, o.name.rev, o.name.seed),
+            _ => img.id.to_string(),
         };
-        let mut target = dest.join(&base);
+        let mut target = dest.join(format!("{stem}.{}", format.ext()));
         let mut k = 2;
         while target.exists() {
-            target = dest.join(format!("{} {k}.png", base.trim_end_matches(".png")));
+            target = dest.join(format!("{stem} {k}.{}", format.ext()));
             k += 1;
         }
         std::fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
@@ -577,29 +767,72 @@ fn export(lib: &Library, images: &[ImageRef], dest: &Path, keep_metadata: bool, 
 }
 
 /// Opens a folder (a file: its folder) in the file manager: `command` if
-/// set, else the first of xdg-open, gio, thunar, nautilus, dolphin, nemo,
-/// pcmanfm that works.
+/// set, else the desktop's (Explorer, Finder, or on Linux the first of
+/// xdg-open, gio, thunar, nautilus, dolphin, nemo, pcmanfm that works).
 fn show_in_file_manager(path: &Path, command: &str) -> Result<(), String> {
+    let dir = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+    let managers: &[&[&str]] = if cfg!(any(windows, target_os = "macos")) {
+        &[]
+    } else {
+        &[&["thunar"], &["nautilus"], &["dolphin"], &["nemo"], &["pcmanfm"]]
+    };
+    open_with(dir, command, managers, false).map_err(|e| match command.trim().is_empty() {
+        true => "No file manager found: install one (e.g. thunar) or set `file_manager` in config.rsn".into(),
+        false => e,
+    })
+}
+
+/// Opens a text file in `command` if set, else Notepad on Windows,
+/// TextEdit (`open -t`) on macOS (`.rsn` has no app of its own there), or
+/// on Linux the desktop's app for it or a known editor.
+fn open_in_editor(path: &Path, command: &str) -> Result<(), String> {
+    let (editors, first): (&[&[&str]], bool) = if cfg!(windows) {
+        (&[&["notepad"]], true)
+    } else if cfg!(target_os = "macos") {
+        (&[&["open", "-t"]], true)
+    } else {
+        (&[&["gnome-text-editor"], &["gedit"], &["kate"], &["mousepad"], &["xed"]], false)
+    };
+    open_with(path, command, editors, first).map_err(|e| match command.trim().is_empty() {
+        true => "No text editor found: install one (e.g. mousepad) or set `editor` in config.rsn".into(),
+        false => e,
+    })
+}
+
+/// Opens `target` with `command` (the target appended) if set, else the
+/// desktop's opener, else the first of `apps` that starts (`apps_first`:
+/// the apps before the opener).
+fn open_with(target: &Path, command: &str, apps: &[&[&str]], apps_first: bool) -> Result<(), String> {
     use std::process::{Command, Stdio};
-    let dir = if path.is_dir() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
     let spawn = |argv: &[&str], wait: bool| -> bool {
         let Some((prog, args)) = argv.split_first() else { return false };
         let mut c = Command::new(prog);
-        c.args(args).arg(&dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        increart_core::process::background(&mut c, false);
+        c.args(args).arg(target).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         if wait { c.status().is_ok_and(|s| s.success()) } else { c.spawn().is_ok() }
     };
     if !command.trim().is_empty() {
         let argv: Vec<&str> = command.split_whitespace().collect();
         return if spawn(&argv, false) { Ok(()) } else { Err(format!("couldn't run `{command}`")) };
     }
-    // Openers exit at once (their status says whether a handler was found);
-    // file managers keep running.
-    let openers: &[&[&str]] = &[&["xdg-open"], &["gio", "open"]];
-    let managers: &[&[&str]] = &[&["thunar"], &["nautilus"], &["dolphin"], &["nemo"], &["pcmanfm"]];
-    if openers.iter().any(|a| spawn(a, true)) || managers.iter().any(|a| spawn(a, false)) {
+    // Openers exit at once, their status saying whether a handler was found
+    // (not Explorer's: it is only started); the apps keep running.
+    let opener = || {
+        if cfg!(windows) {
+            spawn(&["explorer"], false)
+        } else if cfg!(target_os = "macos") {
+            spawn(&["open"], true)
+        } else {
+            spawn(&["xdg-open"], true) || spawn(&["gio", "open"], true)
+        }
+    };
+    let app = || apps.iter().any(|a| spawn(a, false));
+    let (first, then): (&dyn Fn() -> bool, &dyn Fn() -> bool) =
+        if apps_first { (&app, &opener) } else { (&opener, &app) };
+    if first() || then() {
         return Ok(());
     }
-    Err("No file manager found: install one (e.g. thunar) or set `file_manager` in config.rsn".into())
+    Err("nothing to open it with".into())
 }
 
 /// A folder of the library for the folder view: folders, projects, runs,
@@ -646,7 +879,7 @@ fn list_dir(root: &Path, rel: &Path) -> Vec<FvEntry> {
             }
         } else if name.ends_with(".rsn") || name.ends_with(".jsonl") {
             (EntryKind::Meta, meta.map_or(0, |m| m.len()), "metadata".to_string())
-        } else if name.ends_with(".png") {
+        } else if StoreFormat::of_name(&name).is_some() {
             match link::read_ref(&path, store) {
                 Ok(Some(r)) => {
                     let what = rel.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
@@ -724,7 +957,7 @@ fn walk_images(
             }
             if p.is_dir() {
                 queue.push_back(p);
-            } else if name.ends_with(".png")
+            } else if StoreFormat::of_name(&name).is_some()
                 && keep(&name)
                 && let Ok(Some(r)) = link::read_ref(&p, store)
                 && !out.contains(&r)
@@ -754,6 +987,15 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
                 shared.lock().unwrap().library = Some(Arc::new(Mutex::new(lib)));
                 Ok((root, ix))
             }))]
+        }
+        Effect::StoreInfo => {
+            let Some(lib) = library(shared) else { return vec![] };
+            vec![Msg::StoreInfo(store_info(&lib.lock().unwrap()))]
+        }
+        Effect::SetStoreFormat(format) => {
+            let Some(lib) = library(shared) else { return vec![] };
+            let mut l = lib.lock().unwrap();
+            vec![Msg::StoreInfo(l.set_store_format(format).map_err(err).and_then(|()| store_info(&l)))]
         }
         Effect::SaveDraft(d) => {
             let Some(lib) = library(shared) else { return vec![] };
@@ -857,19 +1099,18 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
         Effect::StartEngine { shared: cfg, order } => {
             let Some(lib) = library(shared) else { return vec![] };
             // Runs with seeds left, found before taking any other lock (the
-            // library lock is held once, never nested).
-            let pending: Vec<_> = {
-                let l = lib.lock().unwrap();
-                match l.scan() {
-                    Ok(ix) => ix
-                        .projects
-                        .iter()
-                        .flat_map(|p| &p.runs)
-                        .filter(|r| l.pending_seeds(&r.id).is_ok_and(|s| !s.is_empty()))
-                        .map(|r| r.id.clone())
-                        .collect(),
-                    Err(_) => vec![],
-                }
+            // library lock is held once, never nested). From one scan: the
+            // library's per-run look-up walks every project, which on a cold
+            // disk held this queue (and Saves behind it) for half a minute.
+            let scanned = lib.lock().unwrap().scan();
+            let pending: Vec<_> = match scanned {
+                Ok(ix) => ix
+                    .projects
+                    .iter()
+                    .flat_map(|p| p.runs.iter().filter(|r| p.pending_seeds(r).next().is_some()))
+                    .map(|r| r.id.clone())
+                    .collect(),
+                Err(_) => vec![],
             };
             let endpoints: Vec<Endpoint> = shared
                 .lock()
@@ -931,20 +1172,63 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
             vec![Msg::OpDone(result, ix)]
         }
         Effect::ListDevices(_)
+        | Effect::DetectGpus(_)
+        | Effect::KoboldVersion(_)
+        | Effect::DownloadModels { .. }
+        | Effect::CancelDownload
         | Effect::PlaySound { .. }
         | Effect::OpenServers { .. }
         | Effect::Pick { .. }
         | Effect::PeAsk { .. }
         | Effect::PeStop(_)
         | Effect::PeShutdown
-        | Effect::PeListGpus
+        | Effect::PeListGpus(_)
         | Effect::FolderPreviews { .. }
         | Effect::ComposeTiles { .. }
         | Effect::WatchLibrary(_)
+        | Effect::OpenInEditor { .. }
+        | Effect::ConvertStore(_)
+        | Effect::CancelConvert
         | Effect::CheckUsage => {
             unreachable!("handled on their own threads")
         }
     }
+}
+
+/// The wizard's model files, one after the other, reporting progress a
+/// few times a second.
+fn download_models(
+    dir: &str,
+    files: &[increart_core::tiers::Download],
+    search: &[PathBuf],
+    cancel: &std::sync::atomic::AtomicBool,
+    tx: &Sender<Msg>,
+    wake: &Wake,
+) -> Result<(), String> {
+    use increart_core::tiers;
+    for (i, f) in files.iter().enumerate() {
+        let mut last = Instant::now();
+        let report = |done, total| {
+            let _ = tx.send(Msg::WizardDownload(crate::state::WizardDownload { file: i, done, total }));
+            wake();
+        };
+        report(0, None);
+        let dest = std::path::Path::new(dir).join(&f.file);
+        // one on disk already (same name and size): linked, not fetched
+        if std::fs::symlink_metadata(&dest).is_err()
+            && let Some(src) = tiers::reusable(&f.url, search, || tiers::remote_size(&f.url))
+            && tiers::link(&src, &dest).is_ok()
+        {
+            continue;
+        }
+        tiers::download(&f.url, &dest, cancel, |done, total| {
+            if last.elapsed().as_millis() >= 250 {
+                last = Instant::now();
+                report(done, total);
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// The usage check after opening, one image at a time so library
@@ -953,6 +1237,9 @@ fn check_usage(lib: &Arc<Mutex<Library>>, shared: &Arc<Mutex<Shared>>, tx: &Send
     let check = lib.lock().unwrap().usage_check();
     let Ok(check) = check else { return };
     let total = check.images.len();
+    // shown from the start, however quick
+    let _ = tx.send(Msg::UsageCheck(0, total));
+    wake();
     let mut sent = std::time::Instant::now();
     for (i, r) in check.images.iter().enumerate() {
         if !library(shared).is_some_and(|l| Arc::ptr_eq(&l, lib)) {
@@ -960,7 +1247,11 @@ fn check_usage(lib: &Arc<Mutex<Library>>, shared: &Arc<Mutex<Shared>>, tx: &Send
             wake();
             return;
         }
-        lib.lock().unwrap().check_usage(&check, r);
+        // read without the lock (a cold disk makes this the slow part, and
+        // holding the lock through it kept Saves waiting); lock to fix
+        if !check.covers(r) {
+            lib.lock().unwrap().check_usage(&check, r);
+        }
         if sent.elapsed() > std::time::Duration::from_millis(100) {
             sent = std::time::Instant::now();
             let _ = tx.send(Msg::UsageCheck(i + 1, total));
@@ -969,6 +1260,76 @@ fn check_usage(lib: &Arc<Mutex<Library>>, shared: &Arc<Mutex<Shared>>, tx: &Send
     }
     let _ = tx.send(Msg::UsageCheck(total, total));
     wake();
+}
+
+fn store_info(lib: &Library) -> Result<crate::state::StoreInfo, String> {
+    Ok(crate::state::StoreInfo { format: lib.store_format(), counts: lib.store_counts().map_err(err)? })
+}
+
+/// Converts every store image to `to` (DESIGN.md, Image stores): a batch at
+/// a time is re-encoded on a few threads without the library lock (the
+/// slow part), then installed under it, so library operations and
+/// generating go on meanwhile. Stops when cancelled or another library is
+/// opened; what's done stays done.
+fn convert_store(
+    lib: &Arc<Mutex<Library>>,
+    shared: &Arc<Mutex<Shared>>,
+    to: StoreFormat,
+    cancel: &std::sync::atomic::AtomicBool,
+    tx: &Sender<Msg>,
+    wake: &Wake,
+) {
+    let send = |m: Msg| {
+        let _ = tx.send(m);
+        wake();
+    };
+    let conv = match lib.lock().unwrap().conversion(to) {
+        Ok(c) => c,
+        Err(e) => {
+            return send(Msg::Converted { converted: 0, skipped: 0, failed: vec![e.to_string()], cancelled: false });
+        }
+    };
+    let total = conv.images.len();
+    send(Msg::Converting(0, total));
+    // leave a core for the app and the servers
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1)).clamp(1, 8);
+    let (mut done, mut converted, mut skipped, mut failed, mut cancelled) = (0, 0, 0, vec![], false);
+    let name = |r: &ImageRef| format!("{:?} image {}", r.store, r.id);
+    for batch in conv.images.chunks(threads * 2) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) || !library(shared).is_some_and(|l| Arc::ptr_eq(&l, lib)) {
+            cancelled = true;
+            break;
+        }
+        let encoded: Vec<_> = std::thread::scope(|s| {
+            let parts: Vec<_> = batch
+                .chunks(batch.len().div_ceil(threads))
+                .map(|part| s.spawn(|| part.iter().map(|r| (r, conv.encode(r))).collect::<Vec<_>>()))
+                .collect();
+            parts.into_iter().flat_map(|h| h.join().expect("encoding thread")).collect()
+        });
+        let mut ready = vec![];
+        for (r, res) in encoded {
+            match res {
+                Ok(Some(c)) => ready.push(c),
+                Ok(None) => skipped += 1,
+                Err(e) => failed.push(format!("{}: {e}", name(r))),
+            }
+        }
+        let n = ready.len();
+        match lib.lock().unwrap().install(ready) {
+            Ok(f) => {
+                converted += n - f.len();
+                failed.extend(f.into_iter().map(|(r, e)| format!("{}: {e}", name(&r))));
+            }
+            Err(e) => {
+                failed.push(e.to_string());
+                break;
+            }
+        }
+        done += batch.len();
+        send(Msg::Converting(done, total));
+    }
+    send(Msg::Converted { converted, skipped, failed, cancelled });
 }
 
 fn library(shared: &Arc<Mutex<Shared>>) -> Option<Arc<Mutex<Library>>> {
@@ -1067,6 +1428,14 @@ pub fn lib_op(lib: &mut Library, op: LibOp) -> Result<OpOk, String> {
             Ok(OpOk::ProjectReady { path, form: Box::new(form) })
         }
         LibOp::CopyProject(path, name) => lib.duplicate_project(&path, &name).map(OpOk::Duplicated).map_err(err),
+        LibOp::EditedCopy { image, edits, title, to } => {
+            let path = lib.image_path(&image);
+            let img = image::open(&path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgba8();
+            let out = increart_core::markup::render(&img, &edits);
+            let mut png = std::io::Cursor::new(vec![]);
+            out.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+            lib.edited_copy(png.get_ref(), image, edits, &title).map(|i| OpOk::Edited(i.image, to)).map_err(err)
+        }
         LibOp::IdeaFromTiles { image, sources } => {
             let mut png = std::io::Cursor::new(vec![]);
             image.0.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;

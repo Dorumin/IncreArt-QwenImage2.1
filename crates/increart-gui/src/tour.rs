@@ -24,19 +24,29 @@ const SCENES: &[&str] = &[
     "55-library-open-wizard",
     "02-server-dialog",
     "02b-pe-settings",
+    "02c-koboldcpp-entry",
     "54-server-wizard",
+    "54a-server-wizard-choose",
+    "54c-server-wizard-pe-own-gpu",
+    "54d-server-wizard-pe-on-one",
+    "54b-server-wizard-sd-server",
     "03-idea-inbox-grid",
     "04-idea-inbox-new-idea",
     "05-input-library",
     "06-projects-grid",
     "07-projects-generate",
+    "07b-generate-blanks",
     "08-projects-jobs",
     "09-review",
     "10-output-library",
     "11-jobs-popover",
     "12-review-grid",
     "13-review-compare",
+    "13b-review-follow",
+    "13c-review-compare-with",
+    "13d-review-compare-input",
     "14-output-library-rejected",
+    "14b-output-library-compare",
     "15-generate-img2img",
     "16-servers-opening",
     "17-prompt-history",
@@ -44,6 +54,7 @@ const SCENES: &[&str] = &[
     "19-idea-inbox-import",
     "20-input-library-filters",
     "21-resolutions",
+    "21b-model-presets",
     "22-output-library-lineage",
     "23-export",
     "24-projects-grid-tile-actions",
@@ -145,6 +156,8 @@ const EXTRA_SCENES: &[&str] = &[
     "97c-tile-menu",
     "97d-tile-cell-menu",
     "97e-tile-text-title",
+    "97h-tile-picker",
+    "15b-crop-mark",
     "97f-project-runs",
     "97g-output-by-project-runs",
     "97h-input-library-panel",
@@ -157,6 +170,7 @@ const EXTRA_SCENES: &[&str] = &[
     "98e-check-show-outputs-reveal",
     "98f-show-outputs-reveal",
     "98g-presets-group",
+    "98h-server-logs",
     "99-quit-with-unsaved-draft",
 ];
 
@@ -247,6 +261,7 @@ impl Tour {
             // after 07 (a project with a prompt), without servers
             "56-server-status" => vec![Msg::ContinueWithoutServers, Msg::ServerStatus(true)],
             "57-no-server-warning" => vec![Msg::ServerStatus(false), Msg::QueueGenerate],
+            "98h-server-logs" => vec![Msg::OpenLogs(None)],
             "58-server-dialog-from-main" => vec![Msg::CloseNoServerWarning, Msg::OpenServerDialog],
             "59-continue-without-servers" => vec![Msg::AskContinueWithoutServers],
             "60-server-settings" => vec![Msg::CancelEdit, Msg::ServerSettings(true)],
@@ -573,7 +588,8 @@ impl Tour {
             | "97b-check-tile-drag"
             | "97c-tile-menu"
             | "97d-tile-cell-menu"
-            | "97e-tile-text-title" => {
+            | "97e-tile-text-title"
+            | "97h-tile-picker" => {
                 // the drags' positions are those of one row per line at the
                 // default size
                 let mut v = vec![
@@ -603,6 +619,9 @@ impl Tour {
                         v.push(Msg::TileText(6, "Pixel art and Watercolour\nkept for r03".into()));
                         v.push(Msg::TileTitle("Sticker styles".into(), "sweep r02 · seeds 0–2".into()));
                         v.push(Msg::TileCaptionFormat("#{n} {style} · seed {seed}".into()));
+                    }
+                    if name == "97h-tile-picker" {
+                        v.push(Msg::TilePicker(Some((0, 2))));
                     }
                 }
                 v
@@ -754,10 +773,61 @@ impl Tour {
                     None => vec![],
                 }
             }
+            "02c-koboldcpp-entry" => {
+                // a KoboldCpp entry in the first preset, as the chat server too
+                vec![Msg::PeEditorClose, Msg::CancelEdit, Msg::EditPreset(0), Msg::AddKoboldServer]
+            }
             "54-server-wizard" => {
+                // KoboldCpp: two 24 GB cards and an integrated GPU (not ticked)
+                use increart_core::tiers::Gpu;
+                let gpu =
+                    |number, name: &str, vram_gib, integrated| Gpu { number, name: name.into(), vram_gib, integrated };
+                let gpus = vec![
+                    gpu(0, "AMD Radeon Graphics (RADV RAPHAEL_MENDOCINO)", 15.6, true),
+                    gpu(1, "AMD Radeon RX 7900 XTX (RADV NAVI31)", 23.98, false),
+                    gpu(2, "AMD Radeon RX 7900 XTX (RADV NAVI31)", 23.98, false),
+                ];
+                vec![
+                    Msg::PeEditorClose,
+                    Msg::CancelEdit,
+                    Msg::ServerWizard(true),
+                    Msg::WizardGpus(Ok(gpus), Some(60.0)),
+                ]
+            }
+            "54a-server-wizard-choose" => {
+                // presets chosen: the first card's bigger than its memory takes
+                let Phase::Servers(ServerDialog { kobold: Some(k), .. }) = &st.phase else { return vec![] };
+                let mut k = (**k).clone();
+                k.choose = true;
+                if let Some(Ok(list)) = &mut k.gpus {
+                    list[1].preset = Some(32);
+                }
+                vec![Msg::EditKoboldWizard(k)]
+            }
+            "54c-server-wizard-pe-own-gpu" => {
+                // prompt enhance on a card of its own, the other making images
+                let Phase::Servers(ServerDialog { kobold: Some(k), .. }) = &st.phase else { return vec![] };
+                let mut k = (**k).clone();
+                k.choose = false;
+                if let Some(Ok(list)) = &mut k.gpus {
+                    list.iter_mut().for_each(|w| w.preset = None);
+                }
+                k.layout = increart_core::tiers::Layout::PeOwnCard;
+                vec![Msg::EditKoboldWizard(k)]
+            }
+            "54d-server-wizard-pe-on-one" => {
+                // images on both again, prompt enhance unticked on GPU 2 (by hand)
+                let Phase::Servers(ServerDialog { kobold: Some(k), .. }) = &st.phase else { return vec![] };
+                let mut k = (**k).clone();
+                k.layout = increart_core::tiers::Layout::ImagePerCard;
+                let mut first = k.clone();
+                first.pe_gpus = vec![1];
+                vec![Msg::EditKoboldWizard(k), Msg::EditKoboldWizard(first)]
+            }
+            "54b-server-wizard-sd-server" => {
                 let mut c = st.config.sdserver.clone();
                 c.binary = self.stand_in().to_string_lossy().into();
-                vec![Msg::PeEditorClose, Msg::SetSdServer(c), Msg::ServerWizard(true)]
+                vec![Msg::SetSdServer(c), Msg::WizardKobold(false)]
             }
             "03-idea-inbox-grid" => {
                 // the presets' first chat server, for the prompt-enhance scenes
@@ -841,6 +911,15 @@ impl Tour {
                 v.push(Msg::Generate(f));
                 v
             }
+            "07b-generate-blanks" => {
+                // a single run's prompt with blanks: the blanks table under it
+                let mut f = st.generate.clone();
+                f.sweep.on = false;
+                f.prompt = "a {creature} sticker of <image1>, {colour} outline".into();
+                f.sweep.slots.insert("creature".into(), "dragon".into());
+                f.sweep.slots.remove("colour");
+                vec![Msg::Generate(f)]
+            }
             // too zoomed for the tab names: icons and counts
             "88-tabs-zoomed" => vec![Msg::ContinueWithoutServers, Msg::UiZoom { percent: 170, save: false }],
             "89-review-preview" | "90-preview-keys" => {
@@ -874,6 +953,32 @@ impl Tour {
             "10-output-library" => vec![Msg::Tab(Tab::OutputLibrary)],
             "12-review-grid" => vec![Msg::RunsQueued(vec![]), Msg::Tab(Tab::Review), Msg::ReviewView(ReviewView::Grid)],
             "13-review-compare" => vec![Msg::ReviewView(ReviewView::Single), Msg::ReviewCursor(0), Msg::Compare],
+            "13c-review-compare-with" => {
+                let b = tour_with_refs(st);
+                vec![Msg::Tab(Tab::Review), Msg::ReviewView(ReviewView::Single), Msg::CompareWith(b)]
+            }
+            "13d-review-compare-input" => {
+                let b = tour_with_refs(st);
+                let mut v = vec![Msg::Tab(Tab::Review), Msg::ReviewView(ReviewView::Single), Msg::CompareWith(b)];
+                if let Some(img) = tour_input(st) {
+                    v.push(Msg::RefPickerToggle(img));
+                }
+                v
+            }
+            "14b-output-library-compare" => {
+                let mut v = vec![Msg::Tab(Tab::OutputLibrary), Msg::OutputTab(OutputTab::Grid)];
+                let shown = st.output_source_images();
+                if let Some(o) = shown.get(1).or(shown.first()) {
+                    v.push(Msg::CompareWith(Some(o.image.clone())));
+                    if let Some(img) = tour_input(st) {
+                        v.push(Msg::RefPickerToggle(img));
+                    }
+                }
+                v
+            }
+            "13b-review-follow" => {
+                vec![Msg::ReviewView(ReviewView::Single), Msg::ReviewCursor(0), Msg::ReviewFollow(true)]
+            }
             "17-prompt-history" => {
                 // A few timed edits, so the history has entries (Tick sets the clock).
                 let mut v =
@@ -924,6 +1029,9 @@ impl Tour {
                 Msg::ProjectsTab(ProjectsTab::Generate),
                 Msg::OpenResolutions,
             ],
+            "21b-model-presets" => {
+                vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate), Msg::OpenRecipes]
+            }
             "22-output-library-lineage" => {
                 let mut v = vec![
                     Msg::Tab(Tab::OutputLibrary),
@@ -1151,6 +1259,38 @@ impl Tour {
                 }
                 v
             }
+            "15b-crop-mark" => {
+                // an output in glass-fish's Generate, cropped with a circle and a scribble
+                let mut v = vec![Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
+                if let (Some(p), Some(root)) =
+                    (st.index.projects.iter().find(|p| p.name() == "glass-fish"), st.library.as_ref())
+                    && let Some(o) = p.outputs.first()
+                {
+                    use increart_core::model::{ImageEdits, Mark, Shape};
+                    let (w, h) = image::image_dimensions(o.image.path(root)).unwrap_or((1024, 1024));
+                    let (w, h) = (w as f32, h as f32);
+                    let red = increart_gui_core::MarkTools::default().color;
+                    let width = w.max(h) * increart_gui_core::MarkTools::default().width / 1000.0;
+                    let scribble = (0..24)
+                        .map(|i| {
+                            let t = i as f32 / 23.0;
+                            [w * (0.15 + 0.3 * t), h * (0.75 + 0.04 * (t * 12.0).sin())]
+                        })
+                        .collect();
+                    v.push(Msg::SelectProject(p.project.id.clone()));
+                    v.push(Msg::ClearGenerate);
+                    v.push(Msg::UseImage(o.image.clone(), increart_gui_core::UseTarget::CurrentProject));
+                    v.push(Msg::OpenMarkup(o.image.clone(), Some(0)));
+                    v.push(Msg::MarkupEdit(ImageEdits {
+                        crop: Some([(w * 0.05) as u32, (h * 0.1) as u32, (w * 0.85) as u32, (h * 0.8) as u32]),
+                        marks: vec![
+                            Mark { shape: Shape::Ellipse([w * 0.35, h * 0.3], [w * 0.65, h * 0.6]), color: red, width },
+                            Mark { shape: Shape::Pencil(scribble), color: [255, 210, 0, 191], width },
+                        ],
+                    }));
+                }
+                v
+            }
             "14-output-library-rejected" => {
                 vec![Msg::Tab(Tab::OutputLibrary), Msg::OutputPreset(increart_gui_core::OutputPreset::Rejected)]
             }
@@ -1256,12 +1396,19 @@ impl Tour {
                 Msg::CloseHistory,
                 Msg::CloseIdea,
                 Msg::CloseResolutions,
+                Msg::CloseRecipes,
+                Msg::RefPicker(false),
+                Msg::OutputCompare(None),
                 Msg::CloseExport,
                 Msg::CloseScale,
                 Msg::Preview(None),
                 Msg::CancelNewProject,
             ]);
             out.extend(self.msgs(name, st));
+            if name.starts_with("54") || name == "02c-koboldcpp-entry" {
+                // the virtual display's pointer sits mid-dialog: no tooltip over it
+                self.inject = vec![egui::Event::PointerGone];
+            }
             return;
         }
         if name == "99-quit-with-unsaved-draft" {
@@ -1288,7 +1435,8 @@ impl Tour {
             || tex.busy()
             || matches!(st.phase, Phase::Library(LibraryDialog { busy: true, .. }))
             || (!opening_ok && matches!(st.phase, Phase::Servers(ServerDialog { opening: true, .. })))
-            || matches!(st.phase, Phase::Servers(ServerDialog { wizard: true, devices: None, .. }));
+            || matches!(&st.phase, Phase::Servers(ServerDialog { wizard: true, devices: None, kobold: None, .. }))
+            || matches!(&st.phase, Phase::Servers(ServerDialog { wizard: true, kobold: Some(k), .. }) if k.gpus.is_none());
         // Frames aren't capped on a virtual display: also wait real time.
         let young = ctx.input(|i| i.time) - self.started < 0.6;
         self.settled = if waiting || young { 0 } else { self.settled + 1 };
@@ -1824,4 +1972,21 @@ impl Tour {
             _ => {}
         }
     }
+}
+
+/// An input library image with an idea title, for the compare scenes.
+fn tour_input(st: &AppState) -> Option<increart_core::ImageRef> {
+    let mut ideas: Vec<_> = st
+        .index
+        .ideas
+        .iter()
+        .filter(|e| matches!(e.loc, increart_core::IdeaLoc::Library(_)) && !e.idea.images.is_empty())
+        .collect();
+    ideas.sort_by_key(|e| e.idea.title.is_empty());
+    ideas.first().map(|e| increart_core::ImageRef::input(e.idea.images[0].clone()))
+}
+
+/// An image waiting for review that was made from references, if any.
+fn tour_with_refs(st: &AppState) -> Option<increart_core::ImageRef> {
+    st.review_queue().iter().map(|o| o.image.clone()).find(|i| !st.image_inputs(i).is_empty())
 }

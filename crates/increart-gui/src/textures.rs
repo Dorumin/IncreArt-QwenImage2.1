@@ -93,7 +93,7 @@ impl Textures {
         *self
             .dims
             .entry(image.clone())
-            .or_insert_with(|| image::image_dimensions(root.join(image.rel_path())).ok().map(|(w, h)| [w, h]))
+            .or_insert_with(|| image::image_dimensions(image.path(root)).ok().map(|(w, h)| [w, h]))
     }
 
     /// "W × H · aspect · N MP", or "" if the image can't be read.
@@ -108,7 +108,7 @@ impl Textures {
 
 fn load(root: &std::path::Path, key: &Key) -> Result<ColorImage, String> {
     let img = if key.full {
-        let img = image::open(root.join(key.image.rel_path())).map_err(|e| e.to_string())?;
+        let img = image::open(key.image.path(root)).map_err(|e| e.to_string())?;
         if img.width().max(img.height()) > FULL { img.thumbnail(FULL, FULL) } else { img }
     } else {
         let path = thumbs::ensure(root, &key.image).map_err(|e| e.to_string())?;

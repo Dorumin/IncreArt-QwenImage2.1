@@ -1,16 +1,17 @@
 //! Generate's From library… picker: a window over nearly all of the app
 //! that browses the input library and the output library like their own
 //! screens (a source tree, a text filter, ratings, a thumbnail grid) to
-//! choose references.
+//! choose references, tiles, or the one image Compare with… compares
+//! against.
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, FontId, Key, RichText, ScrollArea, Sense, Stroke, Vec2};
 use increart_core::{IdeaLoc, ImageRef};
-use increart_gui_core::{AppState, MAX_REFS, Msg, OutputSource, Ratings, RefSource, Smart};
+use increart_gui_core::{AppState, MAX_REFS, Msg, OutputSource, PickTarget, Ratings, RefSource, Smart};
 
 use crate::textures::Textures;
-use crate::widgets::{ACCENT, BAD, ic, image_fit_bg, ph, short, verdict_color};
+use crate::widgets::{ACCENT, BAD, dialog_footer, ic, image_fit_bg, ph, short, verdict_color};
 
 const SIDE: f32 = 250.0;
 const FOOT: f32 = 40.0;
@@ -22,18 +23,24 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
     let pending_id = egui::Id::unique("ref_picker_pending_click");
     let mut cell = ctx.data(|d| d.get_temp::<f32>(cell_id)).unwrap_or(150.0);
     let candidates = st.ref_candidates();
-    let refs = st.generate.refs();
+    // already there: Generate's references (not again), or the tiling's
+    // images (again if wanted)
+    let tile = matches!(p.target, PickTarget::Tile(_));
+    let compare = p.target == PickTarget::Compare;
+    let refs: Vec<ImageRef> = match p.target {
+        PickTarget::Tile(_) => st.tile.iter().flat_map(|t| t.layout.images()).cloned().collect(),
+        PickTarget::Generate => st.generate.refs(),
+        PickTarget::Compare => vec![],
+    };
     let m = egui::Modal::new(egui::Id::unique("ref_picker")).show(ctx, |ui| {
         ui.set_width(size.x);
         ui.set_height(size.y);
-        ui.horizontal(|ui| {
-            ui.heading(ic(ph::IMAGES, "Add references from the library"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(ph::X).on_hover_text("Close   Esc").clicked() {
-                    out.push(Msg::RefPicker(false));
-                }
-            });
-        });
+        let heading = match p.target {
+            PickTarget::Tile(_) => "Add images to the tiling",
+            PickTarget::Generate => "Add references from the library",
+            PickTarget::Compare => "Compare with…",
+        };
+        ui.heading(ic(ph::IMAGES, heading));
         ui.separator();
         let body = size.y - (ui.cursor().min.y - ui.min_rect().top()) - FOOT - 8.0;
         // the sources on the left, the grid on the right, at full height
@@ -49,14 +56,17 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                 ScrollArea::vertical()
                     .id_salt("ref_picker_sources")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| sources(ui, st, &p.source, p.ratings, out));
+                    .show(ui, |ui| sources(ui, st, &p.source, p.ratings, &p.target, out));
             });
             ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(down), |ui| {
                 ui.horizontal(|ui| {
                     let mut text = p.text.clone();
                     let hint = match p.source {
-                        RefSource::Inputs(_) => "title, text or tag",
+                        RefSource::Inputs(_) | RefSource::Inbox | RefSource::Edited => "title, text or tag",
                         RefSource::Outputs(_) => "prompt text",
+                        RefSource::TileInputs | RefSource::ImageInputs(_) | RefSource::ProjectInputs(_) => {
+                            "title, text or prompt"
+                        }
                     };
                     let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(220.0));
                     if r.changed() {
@@ -85,8 +95,12 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                 ui.add_space(4.0);
                 if candidates.is_empty() {
                     ui.weak(match p.source {
-                        RefSource::Inputs(_) => "No input images here.",
+                        RefSource::Inputs(_) | RefSource::Inbox => "No input images here.",
+                        RefSource::Edited => "No edited copies yet: Crop / mark… on an image makes one.",
                         RefSource::Outputs(_) => "No images here with these ratings.",
+                        RefSource::TileInputs => "These images were made from text only.",
+                        RefSource::ImageInputs(_) => "This image was made from text only.",
+                        RefSource::ProjectInputs(_) => "This project's runs were made from text only.",
                     });
                 }
                 ScrollArea::vertical().id_salt("ref_picker_grid").auto_shrink([false, false]).show(ui, |ui| {
@@ -104,7 +118,29 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                             if let Some(v) = c.verdict {
                                 paint.circle_filled(rect.right_top() + Vec2::new(-9.0, 9.0), 6.0, verdict_color(v));
                             }
-                            if added {
+                            // what it was to the image: start, or ref N
+                            if let RefSource::ImageInputs(of) = &p.source
+                                && let Some(role) = st.input_role(of, &c.image)
+                            {
+                                let text = role.map_or("start".to_string(), |n| format!("ref {n}"));
+                                let at = rect.left_bottom() + Vec2::new(6.0, -6.0);
+                                let g = paint.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
+                                let bg = egui::Rect::from_min_size(at - Vec2::new(0.0, g.size().y), g.size())
+                                    .expand2(Vec2::new(4.0, 1.0));
+                                paint.rect_filled(bg, 3.0, ACCENT);
+                                paint.galley(bg.min + Vec2::new(4.0, 1.0), g, Color32::WHITE);
+                            }
+                            if added && tile {
+                                let at = rect.right_bottom() - Vec2::splat(12.0);
+                                paint.circle_filled(at, 9.0, Color32::from_black_alpha(180));
+                                paint.text(
+                                    at,
+                                    egui::Align2::CENTER_CENTER,
+                                    ph::CHECK,
+                                    FontId::proportional(12.0),
+                                    Color32::from_gray(220),
+                                );
+                            } else if added {
                                 paint.rect_filled(rect, 2.0, Color32::from_black_alpha(150));
                                 paint.text(
                                     rect.center(),
@@ -121,7 +157,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                                 paint.text(
                                     at,
                                     egui::Align2::CENTER_CENTER,
-                                    (refs.len() + i + 1).to_string(),
+                                    (if tile { i + 1 } else { refs.len() + i + 1 }).to_string(),
                                     FontId::proportional(13.0),
                                     Color32::WHITE,
                                 );
@@ -132,7 +168,11 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                                 _ => Stroke::NONE,
                             };
                             paint.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
-                            let what = if added {
+                            let what = if compare {
+                                "click: compare against it (A)"
+                            } else if added && tile && chosen.is_none() {
+                                "already in the tiling · click: choose again"
+                            } else if added && !tile {
                                 "already a reference"
                             } else if chosen.is_some() {
                                 "click: unchoose"
@@ -146,7 +186,7 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
                             if r.double_clicked() {
                                 ctx.data_mut(|d| d.remove::<(ImageRef, f64)>(pending_id));
                                 out.push(Msg::Preview(Some(c.image.clone())));
-                            } else if r.clicked() && !added {
+                            } else if r.clicked() && (tile || !added) {
                                 let now = ctx.input(|i| i.time);
                                 ctx.data_mut(|d| d.insert_temp(pending_id, (c.image.clone(), now)));
                             }
@@ -156,7 +196,21 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
             });
         }
         ui.separator();
-        footer(ui, st, p.chosen.len(), refs.len(), out);
+        if compare {
+            dialog_footer(
+                ui,
+                |ui| {
+                    ui.weak("Click an image: it becomes A, beside the image you are on (B).");
+                },
+                |ui| {
+                    if ui.button("Cancel   Esc").clicked() {
+                        out.push(Msg::RefPicker(false));
+                    }
+                },
+            );
+        } else {
+            footer(ui, st, p.chosen.len(), refs.len(), tile, out);
+        }
     });
     ctx.data_mut(|d| d.insert_temp(cell_id, cell));
     if let Some((image, at)) = ctx.data(|d| d.get_temp::<(ImageRef, f64)>(pending_id)) {
@@ -181,14 +235,18 @@ pub fn window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: &mut 
     }
 }
 
-fn footer(ui: &mut egui::Ui, st: &AppState, chosen: usize, refs: usize, out: &mut Vec<Msg>) {
+fn footer(ui: &mut egui::Ui, st: &AppState, chosen: usize, refs: usize, tile: bool, out: &mut Vec<Msg>) {
     let mut clear = vec![];
-    egui::Sides::new().show(
+    dialog_footer(
         ui,
         |ui| {
             let after = refs + chosen;
-            let text = format!("{chosen} chosen · {after} / {MAX_REFS} references after adding");
-            if after > MAX_REFS {
+            let text = if tile {
+                format!("{chosen} chosen · added in the order chosen")
+            } else {
+                format!("{chosen} chosen · {after} / {MAX_REFS} references after adding")
+            };
+            if !tile && after > MAX_REFS {
                 ui.colored_label(BAD, format!("{text}: more than Qwen-Image 2.1 takes"));
             } else {
                 ui.weak(text);
@@ -200,13 +258,13 @@ fn footer(ui: &mut egui::Ui, st: &AppState, chosen: usize, refs: usize, out: &mu
             }
         },
         |ui| {
-            if ui.button("Cancel").clicked() {
-                out.push(Msg::RefPicker(false));
-            }
-            let add =
-                egui::Button::new(RichText::new(ic(ph::PLUS, &format!("Add {chosen} reference(s)   Enter"))).strong());
+            let what = if tile { "image(s) to the tiling" } else { "reference(s)" };
+            let add = egui::Button::new(RichText::new(ic(ph::PLUS, &format!("Add {chosen} {what}   Enter"))).strong());
             if ui.add_enabled(chosen > 0, add).clicked() {
                 out.push(Msg::RefPickerAdd);
+            }
+            if ui.button("Cancel   Esc").clicked() {
+                out.push(Msg::RefPicker(false));
             }
         },
     );
@@ -215,7 +273,14 @@ fn footer(ui: &mut egui::Ui, st: &AppState, chosen: usize, refs: usize, out: &mu
 
 /// The source tree: the input library and its folders; the output library
 /// with its collections and smart folders.
-fn sources(ui: &mut egui::Ui, st: &AppState, at: &RefSource, ratings: Ratings, out: &mut Vec<Msg>) {
+fn sources(
+    ui: &mut egui::Ui,
+    st: &AppState,
+    at: &RefSource,
+    ratings: Ratings,
+    target: &PickTarget,
+    out: &mut Vec<Msg>,
+) {
     let pick = |ui: &mut egui::Ui, out: &mut Vec<Msg>, s: RefSource, label: String| {
         if ui.selectable_label(*at == s, label).clicked() {
             out.push(Msg::RefPickerSource(s));
@@ -235,6 +300,31 @@ fn sources(ui: &mut egui::Ui, st: &AppState, at: &RefSource, ratings: Ratings, o
     };
     let outputs_in = |s: &OutputSource| st.source_images_in(s, ratings).len();
 
+    if *target == PickTarget::Compare
+        && let Some(b) = st.compare_b()
+    {
+        let n = st.image_inputs(&b).len();
+        ui.label(RichText::new("This image").strong());
+        pick(ui, out, RefSource::ImageInputs(b.clone()), ic(ph::ARROW_SQUARE_IN, &format!("Its references ({n})")));
+        let project = st.output_link(&b).and_then(|o| st.index.run(&o.name.run)).map(|(p, _)| p);
+        if let Some(p) = project {
+            let n = st.project_inputs(&p.project.id).len();
+            let label = ic(ph::ROCKET_LAUNCH, &format!("{}'s references ({n})", p.name()));
+            pick(ui, out, RefSource::ProjectInputs(p.project.id.clone()), label);
+        }
+        ui.add_space(8.0);
+    }
+    if matches!(target, PickTarget::Tile(_)) {
+        let n: usize = st.tile.iter().flat_map(|t| t.layout.images()).map(|i| st.image_inputs(i).len()).sum();
+        ui.label(RichText::new("This tiling").strong());
+        pick(ui, out, RefSource::TileInputs, ic(ph::ARROW_SQUARE_IN, &format!("Inputs of these images ({n})")));
+        ui.add_space(8.0);
+    }
+    let inbox: usize =
+        st.index.ideas.iter().filter(|e| matches!(e.loc, IdeaLoc::Unreviewed)).map(|e| e.idea.images.len()).sum();
+    ui.label(RichText::new("Idea inbox").strong());
+    pick(ui, out, RefSource::Inbox, ic(ph::TRAY, &format!("Inbox ({inbox})")));
+    ui.add_space(8.0);
     ui.label(RichText::new("Input library").strong());
     pick(ui, out, RefSource::Inputs(None), ic(ph::BOOKS, &format!("All ideas ({})", inputs_in(None))));
     folder_tree(ui, &st.index.library_folders, Path::new(""), "ref_inputs", &mut |ui, f| {
@@ -242,6 +332,8 @@ fn sources(ui: &mut egui::Ui, st: &AppState, at: &RefSource, ratings: Ratings, o
         let name = f.file_name().unwrap_or_default().to_string_lossy();
         pick(ui, out, RefSource::Inputs(Some(f.to_path_buf())), ic(ph::FOLDER, &format!("{name} ({n})")));
     });
+    let edited = st.index.ideas.iter().filter(|e| e.loc == IdeaLoc::Edited).count();
+    pick(ui, out, RefSource::Edited, ic(ph::PENCIL_SIMPLE, &format!("Edited copies, hidden ({edited})")));
 
     ui.add_space(8.0);
     ui.label(RichText::new("Output library").strong());

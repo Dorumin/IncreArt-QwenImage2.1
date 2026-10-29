@@ -41,7 +41,7 @@ fn b64(bytes: &[u8]) -> String {
 /// library (after checking their pixel hashes) and sent as base64 PNG with
 /// their native channels.
 pub fn img_gen_body(lib: &Library, run: &Run, seed: u64, opts: &GenOptions) -> Result<Value> {
-    let refs = run.refs.iter().map(|r| lib.read_verified(r).map(|b| b64(&b))).collect::<Result<Vec<_>>>()?;
+    let refs = run.refs.iter().map(|r| lib.read_verified(r)).collect::<Result<Vec<_>>>()?;
     let mut sample = json!({
         "sample_method": run.sample.method,
         "sample_steps": run.sample.steps,
@@ -56,20 +56,8 @@ pub fn img_gen_body(lib: &Library, run: &Run, seed: u64, opts: &GenOptions) -> R
     if !run.sample.custom_sigmas.is_empty() {
         sample["custom_sigmas"] = json!(run.sample.custom_sigmas);
     }
-    let mut body = json!({
-        "prompt": prompt_sent(&run.prompt, run.alpha),
-        "negative_prompt": run.negative_prompt,
-        "width": run.width,
-        "height": run.height,
-        "seed": seed,
-        "batch_count": 1,
-        "sample_params": sample,
-        "ref_images": refs,
-        "output_format": "png",
-        "embed_image_metadata": true,
-        "preview": opts.preview,
-        "preview_interval": opts.preview_interval,
-    });
+    let prompt = prompt_sent(&run.prompt, run.alpha);
+    let mut body = img_gen_body_from(&prompt, &run.negative_prompt, run.width, run.height, seed, sample, &refs, opts);
     if let Mode::Edit { init, strength } = &run.mode {
         body["strength"] = json!(strength);
         if let Some(init) = init {
@@ -77,6 +65,35 @@ pub fn img_gen_body(lib: &Library, run: &Run, seed: u64, opts: &GenOptions) -> R
         }
     }
     Ok(body)
+}
+
+/// The `img_gen` body from its parts: `sample` is `sample_params`, `refs`
+/// the reference images' bytes (the benchmark builds requests with it).
+#[allow(clippy::too_many_arguments)]
+pub fn img_gen_body_from(
+    prompt: &str,
+    negative_prompt: &str,
+    width: u32,
+    height: u32,
+    seed: u64,
+    sample: Value,
+    refs: &[Vec<u8>],
+    opts: &GenOptions,
+) -> Value {
+    json!({
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "batch_count": 1,
+        "sample_params": sample,
+        "ref_images": refs.iter().map(|r| b64(r)).collect::<Vec<_>>(),
+        "output_format": "png",
+        "embed_image_metadata": true,
+        "preview": opts.preview,
+        "preview_interval": opts.preview_interval,
+    })
 }
 
 /// A small throwaway job after launch or load, so lazy weight loading

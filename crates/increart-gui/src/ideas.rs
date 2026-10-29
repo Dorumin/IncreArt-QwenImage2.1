@@ -12,7 +12,7 @@ use increart_gui_core::{
 
 use crate::textures::Textures;
 use crate::tree;
-use crate::widgets::{ACCENT, NEUTRAL, card, ic, ph, short, single_click, thumb};
+use crate::widgets::{ACCENT, NEUTRAL, card, dialog_footer, ic, ph, short, single_click, thumb};
 
 /// Idea cards (Idea inbox and Input library): all one size (the Input
 /// library's zooms), the first image square across the full width, the
@@ -56,6 +56,41 @@ fn idea_card(
         }
     }
     r
+}
+
+/// An idea's menu: **Rewrite with PE…** in the Edit window, so Use there
+/// changes its text.
+fn rewrite_item(ui: &mut egui::Ui, st: &AppState, id: &increart_core::Id, out: &mut Vec<Msg>) {
+    let r = ui.add_enabled(st.pe.server.is_some(), egui::Button::new(ic(ph::MAGIC_WAND, "Rewrite with PE…")));
+    if r.on_hover_text("open it to edit, and ask the prompt-enhance server for better text")
+        .on_disabled_hover_text("needs a prompt-enhance server")
+        .clicked()
+    {
+        out.push(Msg::OpenIdea(id.clone()));
+        out.push(Msg::PeRewrite(increart_gui_core::PeTarget::Idea(id.clone())));
+        ui.close();
+    }
+}
+
+/// An idea's menu: **Copy text**, then for its first image **Copy image** and
+/// **Describe image with PE…**.
+fn copy_items(ui: &mut egui::Ui, root: &Path, e: &IdeaEntry, out: &mut Vec<Msg>) {
+    if ui.button(ic(ph::COPY, "Copy text")).clicked() {
+        ui.ctx().copy_text(e.idea.text.clone());
+        ui.close();
+    }
+    if let Some(img) = e.idea.images.first() {
+        let img = ImageRef::input(img.clone());
+        crate::widgets::copy_image_item(ui, root, &img, out);
+        crate::widgets::describe_item(ui, &img, "Describe image with PE…", out);
+    }
+}
+
+fn folder_item(ui: &mut egui::Ui, e: &IdeaEntry, out: &mut Vec<Msg>) {
+    if ui.button(ic(ph::FOLDER_OPEN, "Open folder in file manager")).clicked() {
+        out.push(Msg::ShowInFileManager(e.dir.clone()));
+        ui.close();
+    }
 }
 
 fn idea_card_body(
@@ -156,7 +191,7 @@ pub fn inbox(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
     let n = st.unreviewed_ideas().len();
     Panel::top("inbox_tabs").show(ui, |ui| {
         // groups wrap whole when the bar is short of room
-        use crate::widgets::{group, right_group};
+        use crate::widgets::group;
         ui.horizontal_wrapped(|ui| {
             group(ui, "tabs", |ui| {
                 for (t, label) in [
@@ -182,7 +217,10 @@ pub fn inbox(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
                 }
             });
             if st.inbox_tab == InboxTab::Grid {
-                right_group(ui, "right", |ui| crate::widgets::details_toggle(ui, st, InfoPanel::Inbox, out));
+                group(ui, "zoom", |ui| {
+                    ui.separator();
+                    crate::review::grid_zoom(ui, st, ZoomGrid::Inbox, out);
+                });
             }
         });
     });
@@ -334,21 +372,28 @@ pub fn edit_window(ctx: &egui::Context, st: &AppState, tex: &mut Textures, out: 
                 out.push(Msg::EditIdea(e.clone()));
             }
             ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong()).clicked() {
-                    out.push(Msg::SaveIdea);
-                }
-                if ui.button("Cancel").clicked() {
-                    out.push(Msg::CloseIdea);
-                }
-                if ui.button(ic(ph::FOLDER_OPEN, "Open folder")).clicked()
-                    && let Some(entry) = st.idea(&ed.id)
-                {
-                    out.push(Msg::ShowInFileManager(entry.dir.clone()));
-                }
-                let target = increart_gui_core::PeTarget::Idea(ed.id.clone());
-                crate::rewrite::button(ui, st, target, "Rewrite with PE", out);
-            });
+            let mut tools = vec![];
+            dialog_footer(
+                ui,
+                |ui| {
+                    if ui.button(ic(ph::FOLDER_OPEN, "Open folder")).clicked()
+                        && let Some(entry) = st.idea(&ed.id)
+                    {
+                        tools.push(Msg::ShowInFileManager(entry.dir.clone()));
+                    }
+                    let target = increart_gui_core::PeTarget::Idea(ed.id.clone());
+                    crate::rewrite::button(ui, st, target, "Rewrite with PE", &mut tools);
+                },
+                |ui| {
+                    if ui.button(RichText::new(ic(ph::FLOPPY_DISK, "Save")).strong()).clicked() {
+                        out.push(Msg::SaveIdea);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        out.push(Msg::CloseIdea);
+                    }
+                },
+            );
+            out.extend(tools);
         },
     );
     if !open {
@@ -440,6 +485,13 @@ fn inbox_grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Ve
             if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowUp) {
                 out.push(Msg::InboxCursor(st.inbox_cursor.saturating_sub(1)));
             }
+            // the first / last (the cursor is kept to the queue)
+            if i.key_pressed(Key::Home) {
+                out.push(Msg::InboxCursor(0));
+            }
+            if i.key_pressed(Key::End) {
+                out.push(Msg::InboxCursor(usize::MAX));
+            }
             if let Some(id) = &current
                 && (i.key_pressed(Key::P) || i.key_pressed(Key::Space))
             {
@@ -453,9 +505,8 @@ fn inbox_grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Ve
         });
     }
     Panel::left("inbox_side").default_size(230.0).show(ui, |ui| inbox_side(ui, st, out));
-    if !st.info_hidden.contains(&InfoPanel::Inbox)
-        && let Some(root) = st.library.as_deref()
-    {
+    // always shown: triage reads the idea there
+    if let Some(root) = st.library.as_deref() {
         Panel::right("inbox_info").default_size(300.0).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, true]).id_salt("inbox_info_scroll").show(ui, |ui| {
                 match ideas.get(st.inbox_cursor) {
@@ -471,6 +522,17 @@ fn inbox_grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Ve
     }
     egui::CentralPanel::default().show(ui, |ui| {
         let Some(root) = st.library.as_deref() else { return };
+        ui.horizontal_wrapped(|ui| {
+            let dir = root.join("input").join("inbox_drop");
+            ui.weak(ic(ph::TRAY_ARROW_DOWN, "Files saved to"));
+            ui.label(RichText::new(dir.display().to_string()).monospace().weak())
+                .on_hover_text("images and .txt files saved here become ideas by themselves");
+            ui.weak("(e.g. Save as… from a browser) show up here as new ideas.");
+            if ui.small_button(ic(ph::FOLDER_OPEN, "Open")).clicked() {
+                out.push(Msg::ShowInFileManager("input/inbox_drop".into()));
+            }
+        });
+        ui.add_space(4.0);
         let all = st.unreviewed_ideas().len();
         if all == 0 {
             ui.weak("Nothing to review. Add ideas with New idea, or drop files here.");
@@ -488,44 +550,47 @@ fn inbox_grid(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Ve
             });
             ui.add_space(6.0);
         }
+        crate::review::grid_ctrl_scroll(ui, st, ZoomGrid::Inbox, out);
+        let w = st.grid_cell_size(ZoomGrid::Inbox) as f32;
         ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (i, e) in ideas.iter().enumerate() {
-                    let r = idea_card(ui, st, root, tex, e, CARD_W, i == st.inbox_cursor, out);
+                    let r = idea_card(ui, st, root, tex, e, w, i == st.inbox_cursor, out);
+                    if i == st.inbox_cursor {
+                        crate::widgets::reveal_cursor(ui, "inbox", e.idea.id.clone(), &r);
+                    }
                     if r.clicked() {
                         out.push(Msg::InboxCursor(i));
                     }
                     r.context_menu(|ui| {
-                        if let Some(img) = e.idea.images.first() {
-                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(img.clone()), out);
-                        }
                         let id = &e.idea.id;
-                        if ui.button(ic(ph::PENCIL_SIMPLE, "Edit…")).clicked() {
+                        let item = |ui: &mut egui::Ui, label: String, key: &str| {
+                            ui.add(egui::Button::new(label).shortcut_text(key)).clicked()
+                        };
+                        if item(ui, ic(ph::ROCKET_LAUNCH, "Promote into project"), "P") {
+                            out.push(Msg::Promote(vec![id.clone()]));
+                            ui.close();
+                        }
+                        if item(ui, ic(ph::PENCIL_SIMPLE, "Edit…"), "Enter") {
                             out.push(Msg::OpenIdea(id.clone()));
                             ui.close();
                         }
-                        if ui.button(ic(ph::FOLDER_OPEN, "Open folder in file manager")).clicked() {
-                            out.push(Msg::ShowInFileManager(e.dir.clone()));
-                            ui.close();
-                        }
-                        for (label, v) in [
-                            (ic(ph::STAR, "Keep in input library ★"), Verdict::Good),
-                            (ic(ph::CHECK, "Keep in input library"), Verdict::Neutral),
-                            (ic(ph::TRASH, "Discard"), Verdict::Bad),
+                        rewrite_item(ui, st, id, out);
+                        ui.separator();
+                        for (label, key, v) in [
+                            (ic(ph::STAR, "Keep in input library ★"), "1", Verdict::Good),
+                            (ic(ph::CHECK, "Keep in input library"), "2", Verdict::Neutral),
+                            (ic(ph::TRASH, "Discard"), "3", Verdict::Bad),
                         ] {
-                            if ui.button(label).clicked() {
+                            if item(ui, label, key) {
                                 out.push(Msg::ReviewIdea(id.clone(), v));
                                 ui.close();
                             }
                         }
-                        if ui.button(ic(ph::ROCKET_LAUNCH, "Promote into project")).clicked() {
-                            out.push(Msg::Promote(vec![id.clone()]));
-                            ui.close();
-                        }
-                        if ui.button(ic(ph::COPY, "Copy text")).clicked() {
-                            ui.ctx().copy_text(e.idea.text.clone());
-                            ui.close();
-                        }
+                        ui.separator();
+                        copy_items(ui, root, e, out);
+                        ui.separator();
+                        folder_item(ui, e, out);
                     });
                 }
             });
@@ -548,6 +613,7 @@ fn inbox_side(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
                     ("P / Space", "promote"),
                     ("Enter / T", "edit"),
                     ("← →", "previous / next"),
+                    ("Home / End", "first / last"),
                     ("Ctrl+N", "new idea"),
                 ] {
                     ui.horizontal(|ui| {
@@ -659,9 +725,6 @@ fn discarded(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
                 for e in ideas {
                     let r = idea_card(ui, st, root, tex, e, CARD_W, false, out);
                     r.context_menu(|ui| {
-                        if let Some(img) = e.idea.images.first() {
-                            crate::widgets::image_menu_items(ui, root, &ImageRef::input(img.clone()), out);
-                        }
                         let id = &e.idea.id;
                         if ui.button(ic(ph::TRAY, "Restore to the Idea inbox")).clicked() {
                             out.push(Msg::Restore(id.clone(), IdeaLoc::Unreviewed));
@@ -671,6 +734,9 @@ fn discarded(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
                             out.push(Msg::Restore(id.clone(), IdeaLoc::top_library()));
                             ui.close();
                         }
+                        ui.separator();
+                        copy_items(ui, root, e, out);
+                        ui.separator();
                         if ui.button(ic(ph::TRASH, "Delete permanently")).clicked() {
                             out.push(Msg::DeleteDiscarded(id.clone()));
                             ui.close();
@@ -684,11 +750,38 @@ fn discarded(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec
 
 pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: &mut Vec<Msg>) {
     let Some(root) = st.library.clone() else { return };
+    if st.lib_tab == LibTab::Grid {
+        library_keys(ui, st, out);
+    }
     Panel::left("lib_tree").default_size(240.0).show(ui, |ui| {
+        Panel::bottom("lib_keys").show(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new(ic(ph::KEYBOARD, "Keys")).strong())
+                .id_salt("lib_keys")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for (k, what) in [
+                        ("← →", "previous / next"),
+                        ("Home / End", "first / last"),
+                        ("Ctrl+click", "select more"),
+                        ("Ctrl+A", "select all"),
+                        ("P / Space", "promote selected"),
+                        ("Enter / T", "edit"),
+                        ("Double-click", "full size"),
+                        ("Ctrl+N", "new idea"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.monospace(k);
+                            ui.weak(what);
+                        });
+                    }
+                });
+        });
         let mut f = st.lib_filter.clone();
         ui.add(egui::TextEdit::singleline(&mut f.text).hint_text("text or tag").desired_width(f32::INFINITY));
         ui.checkbox(&mut f.starred_only, ic(ph::STAR, "starred only"));
         ui.checkbox(&mut f.with_images_only, ic(ph::IMAGE, "with images only"));
+        ui.checkbox(&mut f.show_hidden, ic(ph::PENCIL_SIMPLE, "show edited copies"))
+            .on_hover_text("the cropped and marked copies (Crop / mark…), hidden otherwise; with no folder selected");
         ui.horizontal(|ui| {
             ui.label("promoted:");
             for (v, l) in [(None, "any"), (Some(true), "yes"), (Some(false), "no")] {
@@ -825,6 +918,9 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
                 for (i, e) in ideas.into_iter().enumerate() {
                     let id = e.idea.id.clone();
                     let r = idea_card(ui, st, &root, tex, e, w, st.lib_selected.contains(&id), out);
+                    if lib_current(st).as_ref() == Some(&id) {
+                        crate::widgets::reveal_cursor(ui, "library", id.clone(), &r);
+                    }
                     if i == 0 {
                         // where it is, for the screenshot tour's click check
                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tour_first_idea"), r.rect));
@@ -839,15 +935,17 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
                         out.push(Msg::LibInfo(Some(id.clone())));
                     }
                     r.context_menu(|ui| {
-                        if let Some(img) = e.idea.images.first() {
-                            crate::widgets::image_menu_items(ui, &root, &ImageRef::input(img.clone()), out);
+                        if ui.button(ic(ph::ROCKET_LAUNCH, "Promote into project")).clicked() {
+                            out.push(Msg::Promote(vec![id.clone()]));
+                            ui.close();
                         }
                         if ui.button(ic(ph::PENCIL_SIMPLE, "Edit…")).clicked() {
                             out.push(Msg::OpenIdea(id.clone()));
                             ui.close();
                         }
-                        if ui.button(ic(ph::FOLDER_OPEN, "Open folder in file manager")).clicked() {
-                            out.push(Msg::ShowInFileManager(e.dir.clone()));
+                        rewrite_item(ui, st, &id, out);
+                        if !e.idea.images.is_empty() && ui.button(ic(ph::IMAGES, "Add images as refs")).clicked() {
+                            out.push(Msg::AddRefs(e.idea.images.iter().cloned().map(ImageRef::input).collect()));
                             ui.close();
                         }
                         let star = if e.idea.starred { ic(ph::STAR, "Unstar") } else { ic(ph::STAR, "Star") };
@@ -855,14 +953,7 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
                             out.push(Msg::SetStar(id.clone(), !e.idea.starred));
                             ui.close();
                         }
-                        if ui.button(ic(ph::ROCKET_LAUNCH, "Promote into project")).clicked() {
-                            out.push(Msg::Promote(vec![id.clone()]));
-                            ui.close();
-                        }
-                        if !e.idea.images.is_empty() && ui.button(ic(ph::IMAGES, "Add images as refs")).clicked() {
-                            out.push(Msg::AddRefs(e.idea.images.iter().cloned().map(ImageRef::input).collect()));
-                            ui.close();
-                        }
+                        ui.separator();
                         if ui.button(ic(ph::TRAY, "Back to the Idea inbox")).clicked() {
                             out.push(Msg::Restore(id.clone(), IdeaLoc::Unreviewed));
                             ui.close();
@@ -871,10 +962,10 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
                             out.push(Msg::Restore(id.clone(), IdeaLoc::Discarded));
                             ui.close();
                         }
-                        if ui.button(ic(ph::COPY, "Copy text")).clicked() {
-                            ui.ctx().copy_text(e.idea.text.clone());
-                            ui.close();
-                        }
+                        ui.separator();
+                        copy_items(ui, &root, e, out);
+                        ui.separator();
+                        folder_item(ui, e, out);
                     });
                 }
             });
@@ -882,11 +973,67 @@ pub fn input_library(ui: &mut egui::Ui, st: &AppState, tex: &mut Textures, out: 
     });
 }
 
+/// The Input library Grid's idea the keys move from: the one in the side
+/// panel, else the first selected.
+fn lib_current(st: &AppState) -> Option<increart_core::Id> {
+    let ideas = st.library_ideas();
+    let shown = |id: &increart_core::Id| ideas.iter().any(|e| &e.idea.id == id);
+    st.lib_info
+        .clone()
+        .filter(shown)
+        .or_else(|| ideas.iter().map(|e| e.idea.id.clone()).find(|id| st.lib_selected.contains(id)))
+}
+
+/// The Input library Grid's keys: move (selecting the idea and showing it
+/// in the side panel), select all, promote, edit.
+fn library_keys(ui: &egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    if ui.ctx().egui_wants_keyboard_input() || st.preview.is_some() {
+        return;
+    }
+    let ideas: Vec<_> = st.library_ideas().into_iter().map(|e| e.idea.id.clone()).collect();
+    let Some(last) = ideas.len().checked_sub(1) else { return };
+    let current = lib_current(st);
+    let at = current.as_ref().and_then(|c| ideas.iter().position(|id| id == c));
+    ui.input(|i| {
+        let to = if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowDown) {
+            Some(at.map_or(0, |a| (a + 1).min(last)))
+        } else if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowUp) {
+            Some(at.map_or(0, |a| a.saturating_sub(1)))
+        } else if i.key_pressed(Key::Home) {
+            Some(0)
+        } else if i.key_pressed(Key::End) {
+            Some(last)
+        } else {
+            None
+        };
+        if let Some(to) = to {
+            out.push(Msg::LibSelect { id: ideas[to].clone(), additive: false });
+            out.push(Msg::LibInfo(Some(ideas[to].clone())));
+        }
+        if i.modifiers.command && i.key_pressed(Key::A) {
+            for id in ideas.iter().filter(|id| !st.lib_selected.contains(*id)) {
+                out.push(Msg::LibSelect { id: id.clone(), additive: true });
+            }
+        }
+        if !i.modifiers.command && (i.key_pressed(Key::P) || i.key_pressed(Key::Space)) {
+            let sel: Vec<_> = ideas.iter().filter(|id| st.lib_selected.contains(*id)).cloned().collect();
+            if !sel.is_empty() {
+                out.push(Msg::Promote(sel));
+            }
+        }
+        if let Some(id) = &current
+            && (i.key_pressed(Key::Enter) || i.key_pressed(Key::T))
+        {
+            out.push(Msg::OpenIdea(id.clone()));
+        }
+    });
+}
+
 /// An Input library idea in the side panel: its images, text, what it's
 /// been used for, and what to do with it.
 fn idea_panel(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Textures, e: &IdeaEntry, out: &mut Vec<Msg>) {
     let id = e.idea.id.clone();
-    panel_header(ui, out, Msg::ShowInfo(InfoPanel::Library, false));
+    panel_header(ui, out, Some(Msg::ShowInfo(InfoPanel::Library, false)));
     idea_details(ui, st, root, tex, e, out);
     ui.separator();
     ui.horizontal_wrapped(|ui| {
@@ -924,7 +1071,7 @@ fn inbox_idea_panel(
     out: &mut Vec<Msg>,
 ) {
     let id = e.idea.id.clone();
-    panel_header(ui, out, Msg::ShowInfo(InfoPanel::Inbox, false));
+    panel_header(ui, out, None);
     idea_details(ui, st, root, tex, e, out);
     ui.separator();
     ui.horizontal_wrapped(|ui| {
@@ -954,10 +1101,12 @@ fn inbox_idea_panel(
     });
 }
 
-fn panel_header(ui: &mut egui::Ui, out: &mut Vec<Msg>, close: Msg) {
+fn panel_header(ui: &mut egui::Ui, out: &mut Vec<Msg>, close: Option<Msg>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Idea").strong());
-        if ui.small_button(ph::X).on_hover_text("close").clicked() {
+        if let Some(close) = close
+            && ui.small_button(ph::X).on_hover_text("close").clicked()
+        {
             out.push(close);
         }
     });
@@ -1010,6 +1159,7 @@ fn idea_details(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Texture
             let place = match &e.loc {
                 IdeaLoc::Unreviewed => "Idea inbox".to_string(),
                 IdeaLoc::Discarded => "Discarded".to_string(),
+                IdeaLoc::Edited => "Edited copies (hidden)".to_string(),
                 IdeaLoc::Library(f) if f.as_os_str().is_empty() => "Input library".to_string(),
                 IdeaLoc::Library(f) => format!("Input library › {}", f.display()),
             };
@@ -1043,6 +1193,24 @@ fn idea_details(ui: &mut egui::Ui, st: &AppState, root: &Path, tex: &mut Texture
     section(ui, "idea_sec_source", ic(ph::ARROW_SQUARE_IN, "Source"), true, |ui| {
         source_section(ui, st, root, tex, &e.idea.source, out)
     });
+    let copies: Vec<_> = e.idea.images.iter().flat_map(|i| st.edited_copies(&ImageRef::input(i.clone()))).collect();
+    if !copies.is_empty() {
+        let title = ic(ph::PENCIL_SIMPLE, &format!("Edited copies ({})", copies.len()));
+        section(ui, "idea_sec_edited", title, true, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for c in copies.iter().flat_map(|c| &c.idea.images) {
+                    let image = ImageRef::input(c.clone());
+                    let t = tex.thumb(root, &image);
+                    let tip = "double-click: full size · right-click: Crop / mark… again, use it";
+                    let r = thumb(ui, t.as_ref(), 72.0, false, None).on_hover_text(tip);
+                    if r.double_clicked() {
+                        out.push(Msg::Preview(Some(image.clone())));
+                    }
+                    r.context_menu(|ui| crate::widgets::image_menu_items(ui, root, &image, out));
+                }
+            });
+        });
+    }
     if !e.idea.images.is_empty() {
         let missing: Vec<_> = e.idea.images.iter().filter(|i| !st.input_meta.contains_key(*i)).cloned().collect();
         if !missing.is_empty() {
@@ -1160,6 +1328,31 @@ fn source_section(
     out: &mut Vec<Msg>,
 ) {
     use increart_core::model::IdeaSource;
+    if let IdeaSource::Edited { image, edits } = source {
+        ui.label("cropped and marked from");
+        ui.horizontal(|ui| {
+            let t = tex.thumb(root, image);
+            let r = thumb(ui, t.as_ref(), 56.0, false, None).on_hover_text("double-click: full size");
+            if r.double_clicked() {
+                out.push(Msg::Preview(Some(image.clone())));
+            }
+            r.context_menu(|ui| crate::widgets::image_menu_items(ui, root, image, out));
+            ui.vertical(|ui| {
+                let title = match image.store {
+                    increart_core::Store::Input => st.input_title(image).filter(|t| !t.is_empty()).map(str::to_string),
+                    increart_core::Store::Output => st
+                        .output_link(image)
+                        .and_then(|l| st.project_of_link(l))
+                        .map(|p| format!("an output of {}", p.name())),
+                };
+                ui.label(title.unwrap_or_else(|| "(untitled)".into()));
+                let crop = edits.crop.map(|[_, _, w, h]| format!("cropped to {w} × {h}"));
+                let marks = (!edits.marks.is_empty()).then(|| format!("{} mark(s)", edits.marks.len()));
+                ui.weak(crop.into_iter().chain(marks).collect::<Vec<_>>().join(" · "));
+            });
+        });
+        return;
+    }
     ui.label(IdeaOrigin::of(source).label());
     let outputs = match source {
         IdeaSource::DroppedFile { original_path } => {

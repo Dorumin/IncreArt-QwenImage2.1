@@ -3,10 +3,13 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::time::Duration;
 
 use common::fake::Fake;
+#[cfg(unix)]
 use increart_core::config::{SdServerConfig, ServerConfig};
+#[cfg(unix)]
 use increart_core::launcher::{self, LaunchError};
 use increart_core::sdserver::{ApiError, Client, JobStatus, ModelKey};
 use serde_json::json;
@@ -66,11 +69,13 @@ fn unreachable_server_is_a_transport_error() {
     assert!(matches!(e, ApiError::Transport(_)) && e.is_server_problem(), "{e:?}");
 }
 
+#[cfg(unix)]
 fn logs_for_slow() -> std::path::PathBuf {
     std::env::temp_dir().join("increart-test-logs")
 }
 
 /// A stand-in for sd-server: answers `capabilities` on `--listen-port`.
+#[cfg(unix)]
 const STAND_IN: &str = r#"#!/usr/bin/env python3
 import http.server, json, sys
 a = sys.argv
@@ -85,11 +90,13 @@ print("listening", flush=True)
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 "#;
 
+#[cfg(unix)]
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 #[test]
+#[cfg(unix)] // the stand-in sd-server is a shell script
 fn start_connect_and_stop() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("sd-server");
