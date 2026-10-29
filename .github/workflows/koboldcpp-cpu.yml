@@ -1,0 +1,97 @@
+# The app against a real KoboldCpp on each OS's CPU
+# (crates/increart-gui-core/tests/koboldcpp_cpu.rs): two tiny images, a
+# generation stopped partway, two prompt enhance answers, the servers
+# stopped. The smallest Qwen-Image 2.1 set (5.8 GiB) is one cache entry
+# shared by the three OSes. Nightly, by hand, and before each release.
+name: KoboldCpp on CPU
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_call:
+    inputs:
+      ref:
+        description: What to check out (the release's tag)
+        type: string
+        default: ''
+
+env:
+  KCPP: v1.123.1
+  # pinned revisions, so the cache key names exact bytes
+  MODEL_URLS: >-
+    https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF/resolve/2c31ccd392b367a6637841a143813320a02dff55/qwen-image-2.1-Q2_K.gguf
+    https://huggingface.co/unsloth/Qwen3-VL-8B-Instruct-GGUF/resolve/b93a7ee713758252c555be4210c00540df954dc2/Qwen3-VL-8B-Instruct-UD-IQ1_S.gguf
+    https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf
+    https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/0217efd1d9c9452e84f6448903d6e21bfa171ffd/vae/qwen_image_2.1_vae_bf16.safetensors
+
+jobs:
+  koboldcpp:
+    name: koboldcpp (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: koboldcpp-linux-x64-nocuda
+            vision: '1'
+          - os: windows-latest
+            asset: koboldcpp-nocuda.exe
+            vision: '1'
+          # 7 GB of RAM: image generation without the vision projector
+          - os: macos-latest
+            asset: koboldcpp-mac-arm64
+            vision: '0'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
+      # the test jobs' cache (ci.yml), never saved from here
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+      - name: Models (cached)
+        id: models
+        uses: actions/cache@v6
+        with:
+          path: models
+          key: it-models-v1-2c31ccd-b93a7ee-f982a07-0217efd
+          enableCrossOsArchive: true
+      - name: Download models
+        if: steps.models.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          for u in $MODEL_URLS; do
+            s=$SECONDS; curl -fsSL --retry 5 -o "models/$(basename "$u")" "$u"; echo "$(basename "$u"): $((SECONDS - s)) s"
+          done
+      - name: KoboldCpp
+        run: |
+          mkdir -p kcpp
+          curl -fsSL --retry 5 -o "kcpp/${{ matrix.asset }}" \
+            "https://github.com/LostRuins/koboldcpp/releases/download/$KCPP/${{ matrix.asset }}"
+          chmod +x "kcpp/${{ matrix.asset }}"
+      - name: Build the test
+        run: cargo test --locked -p increart-gui-core --test koboldcpp_cpu --no-run
+      - name: Test
+        env:
+          INCREART_IT_KOBOLDCPP: ${{ github.workspace }}/kcpp/${{ matrix.asset }}
+          INCREART_IT_MODELS: ${{ github.workspace }}/models
+          INCREART_IT_VISION: ${{ matrix.vision }}
+          INCREART_IT_OUT: ${{ github.workspace }}/out
+        run: cargo test --locked -p increart-gui-core --test koboldcpp_cpu -- --ignored --nocapture
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: koboldcpp-logs-${{ runner.os }}
+          path: out
+          if-no-files-found: ignore

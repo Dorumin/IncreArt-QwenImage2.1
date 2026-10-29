@@ -2815,6 +2815,19 @@ calls while the window is minimized or hidden, with a clock of the app's own
 - Scheduler: drain → load → resume, round order, back-off.
 - Optional integration tests gated on `INCREART_SDSERVER_URL` and
   `INCREART_PE_URL`.
+- A real KoboldCpp on each OS's CPU (`crates/increart-gui-core/tests/
+  koboldcpp_cpu.rs`, `.github/workflows/koboldcpp-cpu.yml`: nightly, by hand,
+  and before each release publishes): the app starts it, two 256 × 256
+  one-step images come back through an admin reload, a generation is
+  stopped partway (gone from the app within 5 s), the server stops (port
+  free again), then a second KoboldCpp started on demand answers two
+  prompt enhance asks (a rewrite and an image description). The models are
+  the smallest set (Q2_K diffusion, IQ1_S encoder, 5.8 GiB), one Actions
+  cache entry for all three OSes; the images and answers aren't looked at,
+  only that they arrive, decode and leave the library intact. CI's runners
+  have no GPU, so the GPU paths are tested by hand.
+- `INCREART_LINK_MODE` (see Links): CI runs the tests on Windows with hard
+  links and with copies too.
 - Library format: `scripts/make-sample-library.py` writes a deterministic
   on-disk sample library (stores, links, IDs, pixel hashes, RSN/JSON chunks)
   and `scripts/verify-sample-library.py` checks one independently; together
