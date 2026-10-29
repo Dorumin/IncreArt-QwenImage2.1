@@ -35,10 +35,10 @@ jobs:
           - os: ubuntu-latest
             asset: koboldcpp-linux-x64-nocuda
             vision: '1'
+            images: '1'
           - os: windows-latest
             asset: koboldcpp-nocuda.exe
             vision: '1'
-            images: '1'
             images: '1'
           # KoboldCpp's image generation runs on Metal even with --usecpu,
           # and crashes on the runners' virtual GPU: the image server is
