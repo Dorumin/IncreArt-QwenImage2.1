@@ -57,7 +57,10 @@ ID = re.compile(r"\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}-\d{4,}")
 store = {}
 EXTS = (".png", ".webp")
 def stem(p): return os.path.splitext(os.path.basename(p))[0]
-def images(pattern): return [p for x in EXTS for p in glob.glob(pattern + x, recursive=True)]
+# paths with "/" on every OS (glob gives "\\" on Windows)
+def posix(p): return p.replace(os.sep, "/")
+def images(pattern): return [posix(p) for x in EXTS for p in glob.glob(pattern + x, recursive=True)]
+def read(f): return open(f, encoding="utf-8").read()
 unhashed = 0
 for p in images("*_images/*"):
     d = open(p, "rb").read(); store[p] = d
@@ -74,25 +77,27 @@ for p in images("*_images/*"):
     elif text(d, "increart:recipe") is None: problems.append(f"output without recipe: {p}")
 links = [p for p in images("**/*") if os.path.islink(p)]
 for p in links:
-    t = os.path.relpath(os.path.realpath(p))
+    # relative to the real cwd: a temp dir's path may itself go through a
+    # link or (Windows) a short name
+    t = posix(os.path.relpath(os.path.realpath(p), os.path.realpath(".")))
     if os.path.isabs(os.readlink(p)): problems.append(f"absolute link: {p}")
     if t not in store: problems.append(f"link not into a store: {p} -> {t}")
     elif os.path.splitext(p)[1] != os.path.splitext(t)[1]: problems.append(f"link's extension isn't its image's: {p} -> {t}")
 plain = [p for p in images("**/*") if not os.path.islink(p) and not p.startswith(("input_images/", "output_images/", "input/inbox_drop/"))]
 if plain: problems.append(f"image files outside stores that aren't links: {plain}")
-blob = "".join(open(f).read() for f in glob.glob("**/*.rsn", recursive=True)) + "".join(text(d, "increart:recipe") or "" for d in store.values())
+blob = "".join(read(f) for f in glob.glob("**/*.rsn", recursive=True)) + "".join(text(d, "increart:recipe") or "" for d in store.values())
 refs = re.findall(r'id: "([0-9.\-]+)",\s*store: (Input|Output)', blob)
 for h, s in refs:
     if not any(f"{s.lower()}_images/{h}{x}" in store for x in EXTS): problems.append(f"dangling ref {s} {h}")
 for f in glob.glob("input/*/**/idea.rsn", recursive=True):
-    block = re.search(r'^    images: (\[\]|\[\n.*?^    \]),$', open(f).read(), re.M | re.S).group(1)
+    block = re.search(r'^    images: (\[\]|\[\n.*?^    \]),$', read(f), re.M | re.S).group(1)
     for h in re.findall(r'"([^"]+)"', block):
         if not any(f"input_images/{h}{x}" in store for x in EXTS): problems.append(f"idea image missing: {f} {h}")
 ids = {"idea": [os.path.basename(os.path.dirname(f)) for f in glob.glob("input/**/idea.rsn", recursive=True)],
-       "project": re.findall(r'^    id: "(.*)",$', "".join(open(f).read() for f in glob.glob("projects/**/project.rsn", recursive=True)), re.M),
+       "project": re.findall(r'^    id: "(.*)",$', "".join(read(f) for f in glob.glob("projects/**/project.rsn", recursive=True)), re.M),
        "run": [os.path.basename(os.path.dirname(f)) for f in glob.glob("projects/**/run.rsn", recursive=True)]}
 for kind, xs in ids.items():
     if len(set(xs)) != len(xs) or not all(ID.fullmatch(x) for x in xs): problems.append(f"{kind} ids bad or duplicated: {xs}")
 for f in glob.glob("input/**/idea.rsn", recursive=True):
-    if re.search(r'^    id: "(.*)",$', open(f).read(), re.M).group(1) != os.path.basename(os.path.dirname(f)): problems.append(f"idea dir != id: {f}")
+    if re.search(r'^    id: "(.*)",$', read(f), re.M).group(1) != os.path.basename(os.path.dirname(f)): problems.append(f"idea dir != id: {f}")
 print(f"{sum(map(len, ids.values()))} idea/project/run ids; {len(store)} store images, {len(links)} links, {len(refs)} refs{f", {unhashed} WebP pixel hashes left unchecked" if unhashed else ""}; problems: {problems or 'none'}")

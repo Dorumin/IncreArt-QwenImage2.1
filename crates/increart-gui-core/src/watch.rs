@@ -119,13 +119,20 @@ fn run(root: &Path, rx: &Receiver<PathBuf>, stop: &Receiver<()>, tx: &Sender<Msg
     let mut changed: Option<Instant> = None;
     let mut drop_pending = !drop_sizes(root).is_empty();
     let mut drop_seen: Option<(Instant, BTreeMap<PathBuf, u64>)> = None;
+    // events may name the root's real path rather than the one opened (macOS
+    // reports /private/var for /var; a library opened through a symlink)
+    let real = root.canonicalize().ok();
     loop {
         if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
             return; // the watch was dropped
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(p) => {
-                let rel = p.strip_prefix(root).unwrap_or(&p);
+                let rel = p
+                    .strip_prefix(root)
+                    .ok()
+                    .or_else(|| real.as_deref().and_then(|r| p.strip_prefix(r).ok()))
+                    .unwrap_or(&p);
                 if rel.starts_with(IMPORTED) {
                     continue; // where imported originals go: not news
                 }

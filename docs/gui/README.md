@@ -11,6 +11,9 @@ scripts/headless.sh env INCREART_CONFIG=$PWD/tmp/gui-tour/config.rsn \
     target/release/increart
 ```
 
+**[Gallery](GALLERY.md)**: every screen below, one after another at full
+size (regenerate it with `scripts/make-gui-gallery.py`).
+
 | | |
 | --- | --- |
 | [01-library-dialog](01-library-dialog.png) | Start-up: recent libraries (last used in the accent colour), Create a new library… / Open an existing library… |

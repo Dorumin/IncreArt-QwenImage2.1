@@ -556,7 +556,7 @@ fn inbox_drop_becomes_ideas() {
     assert!(drop.join("imported/otter.txt").exists() && drop.join("imported/IMG_1.png").exists());
     let src =
         lib.source_info(&ix.ideas.iter().find(|e| !e.idea.images.is_empty()).unwrap().idea.images[0]).unwrap().unwrap();
-    assert!(src.original_path.unwrap().ends_with("input/inbox_drop/IMG_1.png"));
+    assert!(Path::new(&src.original_path.unwrap()).ends_with("input/inbox_drop/IMG_1.png"));
 }
 
 #[test]
