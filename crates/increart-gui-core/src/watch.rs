@@ -168,13 +168,12 @@ fn run(root: &Path, rx: &Receiver<PathBuf>, stop: &Receiver<()>, tx: &Sender<Msg
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// Opened through a symlink (and on macOS, under /var, which events name
     /// /private/var): a file dropped into the drop folder is still noticed.
-    #[cfg(unix)]
     #[test]
     fn a_library_opened_through_a_symlink() {
         let tmp = tempfile::tempdir().unwrap();
