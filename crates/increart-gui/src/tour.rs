@@ -1334,11 +1334,9 @@ impl Tour {
             "R2-review-compare" => vec![Msg::ReviewView(ReviewView::Single), Msg::ReviewCursor(0), Msg::Compare],
             "R3-generate" => {
                 let mut v = vec![Msg::Compare, Msg::Tab(Tab::Projects), Msg::ProjectsTab(ProjectsTab::Generate)];
-                if let Some(p) = st.index.projects.iter().find(|p| p.name() == "olympus-mons") {
+                // its draft: a style sweep with prompt enhance's suggestions
+                if let Some(p) = st.index.projects.iter().find(|p| p.name() == "great-wave-cat") {
                     v.push(Msg::SelectProject(p.project.id.clone()));
-                    if let Some(r) = p.runs.first() {
-                        v.push(Msg::RunInGenerate(r.id.clone()));
-                    }
                 }
                 v
             }

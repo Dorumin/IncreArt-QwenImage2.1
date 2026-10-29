@@ -45,7 +45,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
       - uses: Swatinem/rust-cache@v2
+      - name: Tag matches the version
+        run: |
+          version=$(sed -nE 's/^version = "(.*)"/\1/p' crates/increart-gui/Cargo.toml | head -1)
+          [[ $TAG == "v$version" ]] || { echo "tag $TAG, but increart-gui is version $version" >&2; exit 1; }
       - run: cargo build --release --locked -p increart-gui
+      - name: Version line
+        # Windows: a GUI-subsystem app prints nothing to the console
+        if: runner.os != 'Windows'
+        run: |
+          v=$(target/release/increart --version)
+          echo "$v"
+          [[ $v != *-dirty* ]] || { echo "built from a dirty tree" >&2; exit 1; }
       - name: Example library
         env:
           GH_TOKEN: ${{ github.token }}

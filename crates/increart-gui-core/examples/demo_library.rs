@@ -2,9 +2,9 @@
 //! `scripts/demo-library.json`: imports the public-domain source images
 //! (`scripts/demo-sources.py`) as ideas, creates the projects, then works
 //! each project through the app's own Generate form and prompt enhance (the
-//! reducer and runtime, no window): a PE rewrite of the prompt, PE's
-//! suggestions for its blanks, or a style sweep with PE's values and
-//! enhanced style prompts. Then it queues the runs on a server preset and
+//! reducer and runtime, no window): optionally a PE rewrite of the prompt,
+//! then PE's suggestions for its blanks (the first picked; every project
+//! has some), and for a style sweep its enhanced style prompts. Then it queues the runs on a server preset and
 //! waits for them. `review` applies the spec's verdicts afterwards.
 //!
 //!     cargo run --release -p increart-gui-core --example demo_library -- \
@@ -15,7 +15,8 @@
 //! The config gives the server preset (its chat server does prompt
 //! enhance), the model presets and PE's settings; it is never written.
 //! Verdicts are per project, `g` / `n` / `b` (`-`: left unreviewed), over
-//! its outputs in run then seed order.
+//! its outputs in run then seed order (`review` again puts each back as
+//! the spec says).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -261,49 +262,57 @@ fn build(config: &Path, preset: &str, spec: &Value, sources: &Path, library: &Pa
         }
         app.send(Msg::Generate(f));
 
-        match s(p, "pe") {
-            "rewrite" => {
+        // a rewrite first, asked again (at most 4 times) when it loses one of
+        // the prompt's blanks or <imageN> tags; else the prompt as written
+        if s(p, "pe") == "rewrite" {
+            let original = app.state.generate.prompt.clone();
+            for attempt in 1..=4 {
                 app.send(Msg::PeRewrite(PeTarget::Prompt));
                 let answered = app.pump(Duration::from_secs(600), |s| {
                     s.pe.text.as_ref().is_some_and(|t| t.waiting.is_none() && (!t.text.is_empty() || t.error.is_some()))
                 });
                 let t = app.state.pe.text.clone().expect("rewrite window");
                 assert!(answered && t.error.is_none(), "rewrite failed: {:?}", t.error);
-                app.log(&format!("rewritten: {}", t.text));
-                app.send(Msg::PeTextClose(PeUse::Use));
-            }
-            "blanks" | "styles" => {
-                // every blank's suggestions, then the first offered picked
-                let texts: Vec<String> = if styles.is_empty() {
-                    vec![app.state.generate.prompt.clone()]
-                } else {
-                    let list = &app.state.prompt_presets;
-                    increart_core::prompts::sweep_presets(list, &app.state.generate.sweep)
-                        .iter()
-                        .map(|(_, pr)| pr.prompt.clone())
-                        .collect()
-                };
-                let slots = increart_core::prompts::slot_names(texts.iter().map(String::as_str));
-                let keys: Vec<BlankKey> = slots.iter().map(|n| BlankKey { style: None, slot: n.clone() }).collect();
-                app.send(Msg::PeSuggest(keys.clone()));
-                assert!(app.pump(Duration::from_secs(900), App::pe_idle), "suggestions never came");
-                let mut f = app.state.generate.clone();
-                for k in &keys {
-                    let shown = app.state.blank_shown(k).cloned().unwrap_or_default();
-                    let v = shown.first().unwrap_or_else(|| panic!("no suggestions for {{{}}}", k.slot));
-                    app.log(&format!("{{{}}}: {shown:?} → {v}", k.slot));
-                    f.sweep.slots.insert(k.slot.clone(), v.clone());
+                let lost = increart_core::pe::lost_tags(&original, &t.text);
+                app.log(&format!("rewritten ({attempt}): {}", t.text));
+                if lost.is_empty() {
+                    app.send(Msg::PeTextClose(PeUse::Use));
+                    break;
                 }
-                app.send(Msg::Generate(f));
-                if !styles.is_empty() {
-                    app.send(Msg::PeStyleEnhance(vec![]));
-                    assert!(app.pump(Duration::from_secs(900), App::pe_idle), "style prompts never came");
-                    for sp in &app.state.generate.sweep.style_prompts {
-                        app.log(&format!("{} (enhanced {}): {}", sp.preset.name, sp.enhanced, sp.prompt));
-                    }
-                }
+                app.log(&format!("the rewrite lost {lost:?}; not used"));
+                app.send(Msg::PeTextClose(PeUse::Discard));
             }
-            _ => {}
+        }
+        // every blank's suggestions (the chips, kept in the project's draft),
+        // then the first offered picked
+        let mut texts = vec![app.state.generate.prompt.clone()];
+        if !styles.is_empty() {
+            let list = &app.state.prompt_presets;
+            texts.extend(
+                increart_core::prompts::sweep_presets(list, &app.state.generate.sweep)
+                    .iter()
+                    .map(|(_, pr)| pr.prompt.clone()),
+            );
+        }
+        let slots = increart_core::prompts::slot_names(texts.iter().map(String::as_str));
+        assert!(!slots.is_empty(), "{name}: no {{blanks}} in {texts:?}");
+        let keys: Vec<BlankKey> = slots.iter().map(|n| BlankKey { style: None, slot: n.clone() }).collect();
+        app.send(Msg::PeSuggest(keys.clone()));
+        assert!(app.pump(Duration::from_secs(900), App::pe_idle), "suggestions never came");
+        let mut f = app.state.generate.clone();
+        for k in &keys {
+            let shown = app.state.blank_shown(k).cloned().unwrap_or_default();
+            let v = shown.first().unwrap_or_else(|| panic!("no suggestions for {{{}}}", k.slot));
+            app.log(&format!("{{{}}}: {shown:?} → {v}", k.slot));
+            f.sweep.slots.insert(k.slot.clone(), v.clone());
+        }
+        app.send(Msg::Generate(f));
+        if !styles.is_empty() {
+            app.send(Msg::PeStyleEnhance(vec![]));
+            assert!(app.pump(Duration::from_secs(900), App::pe_idle), "style prompts never came");
+            for sp in &app.state.generate.sweep.style_prompts {
+                app.log(&format!("{} (enhanced {}): {}", sp.preset.name, sp.enhanced, sp.prompt));
+            }
         }
         let before = app.state.index.projects.iter().map(|p| p.runs.len()).sum::<usize>();
         app.send(Msg::QueueGenerate);
@@ -322,6 +331,9 @@ fn build(config: &Path, preset: &str, spec: &Value, sources: &Path, library: &Pa
         s.index.projects.iter().map(|p| p.outputs.len()).sum::<usize>() >= expected
             && s.index.projects.iter().all(|p| p.runs.iter().all(|r| p.pending_seeds(r).next().is_none()))
     });
+    // the last project's draft saved too (leaving its Generate form)
+    app.send(Msg::SelectProjectFolder(None));
+    assert!(app.pump(Duration::from_secs(10), |s| s.saving == 0), "the last draft wasn't saved");
     let errors = app.errors();
     assert!(done, "not finished: {errors:?}");
     app.log(&format!("{expected} images; messages: {errors:?}"));
@@ -343,12 +355,14 @@ fn review(spec: &Value, library: &Path) {
         });
         for (o, v) in outputs.zip(verdicts.chars()) {
             let verdict = match v {
-                'g' => Verdict::Good,
-                'n' => Verdict::Neutral,
-                'b' => Verdict::Bad,
-                _ => continue,
+                'g' => Some(Verdict::Good),
+                'n' => Some(Verdict::Neutral),
+                'b' => Some(Verdict::Bad),
+                _ => None,
             };
-            lib.review_output(&o.path, Some(verdict)).expect("review");
+            if o.verdict != verdict {
+                lib.review_output(&o.path, verdict).expect("review");
+            }
         }
     }
 }

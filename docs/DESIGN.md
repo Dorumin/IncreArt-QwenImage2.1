@@ -2745,7 +2745,10 @@ Durations read as "0.84 s", "34.2 s", "4 min 12 s", "2 h 05 min".
 **Settings** (⚙ at the far right of the top bar; a modal, changes apply as made) has two tabs:
 **Library** (the open library's store format and its conversion, see Image
 stores) and **Notifications**, with three
-independent alerts. The two conditions below each sound when its condition starts holding, then
+independent alerts. Its footer shows the version line (`increart 0.1.0
+(b6bd961, 2026-10-29)`: the crate version, then the commit built from and
+its date, from `build.rs`; also `increart --version`) with a copy button,
+for bug reports. The two conditions below each sound when its condition starts holding, then
 again every *repeat* minutes while it still holds; once the condition ends it
 is reset, and the next time it holds it counts again from the start.
 

@@ -634,16 +634,6 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
                     ui.spinner();
                     let what = if s.is_started() { "starting" } else { "connecting" };
                     ui.label(format!("{what} — {secs:.0} s"));
-                    // a fixed width: a growing line (KoboldCpp's ". . .") would
-                    // widen the dialog with each character
-                    let size = egui::vec2(320.0, ui.spacing().interact_size.y);
-                    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_min_size(size);
-                        if let Some(line) = st.start_log.get(i).filter(|l| !l.is_empty()) {
-                            ui.add(egui::Label::new(RichText::new(line).weak().monospace()).truncate())
-                                .on_hover_text(format!("from the server's log\n{line}"));
-                        }
-                    });
                 }
                 ServerProgress::Up => {
                     ui.colored_label(GOOD, ic(ph::CHECK_CIRCLE, "up"));
@@ -656,6 +646,19 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
                 crate::projects::log_button(ui, log_file(s), out);
             }
         });
+        // the log's last line on its own line, cut to the dialog's width: on the
+        // row above it would widen the dialog off centre; kept while opening so
+        // the dialog doesn't jump when the first line arrives
+        if matches!(p, ServerProgress::Opening) {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.set_min_height(ui.spacing().interact_size.y);
+                if let Some(line) = st.start_log.get(i).filter(|l| !l.is_empty()) {
+                    ui.add(egui::Label::new(RichText::new(line).weak().monospace()).truncate())
+                        .on_hover_text(format!("from the server's log\n{line}"));
+                }
+            });
+        }
     }
     // the chat server: on its own, never holding the sd-servers up
     if let Some(c) = d.draft.chat() {

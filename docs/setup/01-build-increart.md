@@ -118,7 +118,9 @@ libraries (dav1d); that is **not covered** here.
 ```
 
 Prints `usage: increart [--library <folder>|last] [--servers <preset>|last | --no-servers]`
-and exits 0. (`--help` is parsed before any window opens, so it works without
+and exits 0. `--version` prints `increart 0.1.0 (<commit>, <date>)`; the
+commit has `-dirty` when the tree had uncommitted changes, and is left out
+when built outside a git checkout. (`--help` is parsed before any window opens, so it works without
 a display.)
 
 **If it fails:**
@@ -150,6 +152,7 @@ Command line (from `main.rs`):
 | `--servers <preset>` | open that server preset (name, any case); the main window opens while servers start |
 | `--servers last` | the preset opened last |
 | `--no-servers` | continue without servers |
+| `-V`, `--version` | print the version and the commit built from, e.g. `increart 0.1.0 (b6bd961, 2026-10-29)`, and exit (Settings shows the same line) |
 
 A screen is still shown when its argument doesn't work (no `library.rsn`,
 unknown preset, sd-server or models folder missing), with the reason. An

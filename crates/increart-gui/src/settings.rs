@@ -6,7 +6,7 @@ use increart_core::notify::{self, AlertRule, Notifications, Sound};
 use increart_gui_core::state::SettingsTab;
 use increart_gui_core::{AppState, Msg};
 
-use crate::widgets::{BAD, GOOD, dialog_buttons, ic, ph};
+use crate::widgets::{BAD, GOOD, dialog_footer, ic, ph};
 
 pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
     if !st.settings_open {
@@ -32,7 +32,19 @@ pub fn window(ctx: &egui::Context, st: &AppState, out: &mut Vec<Msg>) {
             SettingsTab::Library => library(ui, st, out),
         }
         ui.add_space(8.0);
-        dialog_buttons(ui, |ui| ui.button("Close   Esc").clicked())
+        // the version, for bug reports
+        dialog_footer(
+            ui,
+            |ui| {
+                let v = crate::version();
+                ui.label(RichText::new(&v).weak());
+                if ui.small_button(ph::COPY).on_hover_text("Copy the version").clicked() {
+                    ui.ctx().copy_text(v);
+                }
+            },
+            |ui| ui.button("Close   Esc").clicked(),
+        )
+        .1
     });
     if n != st.config.notifications {
         out.push(Msg::SetNotifications(n));

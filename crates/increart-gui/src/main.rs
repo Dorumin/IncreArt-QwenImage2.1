@@ -35,8 +35,19 @@ use eframe::egui;
 use increart_core::config::Config;
 use increart_gui_core::StartupServers;
 
+/// `increart 0.1.0 (abc1234, 2026-10-29)`: the version, and the commit built
+/// from with its date (see build.rs).
+pub fn version() -> String {
+    let v = env!("CARGO_PKG_VERSION");
+    match env!("INCREART_COMMIT") {
+        "" => format!("increart {v}"),
+        c => format!("increart {v} ({c})"),
+    }
+}
+
 const USAGE: &str = "\
 usage: increart [--library <folder>|last] [--servers <preset>|last | --no-servers]
+       increart --version
 
   --library <folder>   open this library (skips the library screen)
   --library last       the most recently opened library
@@ -44,6 +55,7 @@ usage: increart [--library <folder>|last] [--servers <preset>|last | --no-server
                        the main window opens while the servers start)
   --servers last       the preset opened last
   --no-servers         continue without servers
+  -V, --version        print the version and the commit built from
 
 A screen is still shown when its argument doesn't work (not a library, no
 such preset, sd-server missing), saying why.";
@@ -63,6 +75,10 @@ fn parse_args() -> Result<Startup, String> {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("{}", version());
                 std::process::exit(0);
             }
             "--library" => s.library = Some(value("--library")?),

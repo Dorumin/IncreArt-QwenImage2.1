@@ -12,8 +12,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: IncreArt version or commit
-      placeholder: e.g. 0.1.0, or the commit you built
+      label: IncreArt version
+      description: "Settings (⚙) shows it at the bottom, with a copy button; or run `increart --version`."
+      placeholder: e.g. increart 0.1.0 (b6bd961, 2026-10-29)
     validations:
       required: true
   - type: input

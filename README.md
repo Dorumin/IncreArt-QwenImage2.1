@@ -37,8 +37,8 @@ Every image keeps the recipe that made it.
 
 | | |
 |---|---|
-| ![A/B compare of two generated images side by side](docs/readme/review-compare.png) | ![The Generate form with two poster references](docs/readme/generate.png) |
-| **A/B compare** in Review | **Generate**, with references |
+| ![A/B compare of two generated images side by side](docs/readme/review-compare.png) | ![The Generate form: a style sweep with prompt enhance's suggestions for its blanks](docs/readme/generate.png) |
+| **A/B compare** in Review | **Generate**: a style sweep, with suggested values |
 | ![Output library with an image's lineage](docs/readme/output-lineage.png) | ![Input library of kept ideas](docs/readme/input-library.png) |
 | **Output library** and lineage | **Input library** of kept ideas |
 
@@ -88,10 +88,12 @@ on those platforms yet. Reports are welcome.
 
 Each release zip has an `Example library` folder beside the app: a small
 library to explore before you generate anything, with ideas, six projects
-and 30 reviewed and unreviewed outputs. It's in the start-up list the first
-time you run IncreArt. It's an ordinary library, so changes you make to it
-are saved, and you can remove it from the list with ×. It takes about 45 MB;
-the Windows zip's copy is about 90 MB, because Windows can't unzip the
+(three of them style sweeps) and 34 reviewed and unreviewed outputs. Each
+project's prompt has blanks, with prompt enhance's suggestions for them and
+one picked. It's in the start-up list the first time you run IncreArt. It's
+an ordinary library, so changes you make to it are saved, and you can remove
+it from the list with ×. It takes about 50 MB; the Windows zip's copy is
+about 95 MB, because Windows can't unzip the
 links it uses elsewhere, so it holds copies instead.
 
 Its source images come from the Library of Congress, The Metropolitan Museum
