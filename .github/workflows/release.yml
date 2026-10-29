@@ -26,7 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # the oldest supported runner: the binary needs the build's glibc
+          # or newer, so it runs on Ubuntu 22.04+, Debian 12+ and the like
+          - os: ubuntu-22.04
             platform: linux-x86_64
           - os: windows-latest
             platform: windows-x86_64

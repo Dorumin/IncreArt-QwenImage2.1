@@ -28,7 +28,9 @@ Windows), `README.md`, `LICENSE` and `Example library/`. On first run (no
 "example".
 
 **Verify:** the window opens. The run-time libraries in 1.1's "run" line
-must be installed on Linux.
+must be installed on Linux. The Linux build is made on Ubuntu 22.04, so it
+needs glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+); on an older system,
+build from source.
 
 **If it fails:** the builds aren't signed. On macOS, if the app is blocked,
 run `xattr -dr com.apple.quarantine .` in the unzipped folder. On Windows,
