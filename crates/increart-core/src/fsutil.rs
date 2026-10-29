@@ -138,11 +138,17 @@ pub fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-/// Recursively copies a directory tree (files and symlinks as they are).
+/// Recursively copies a directory tree (files and symlinks as they are),
+/// but not a library's `library.lock`: the copy is a library of its own, and
+/// Windows can't read a lock another handle holds.
 pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).at(to)?;
     for p in walk(from)? {
-        let dst = to.join(p.strip_prefix(from).unwrap());
+        let rel = p.strip_prefix(from).unwrap();
+        if rel == Path::new(crate::library::LOCK_FILE) {
+            continue;
+        }
+        let dst = to.join(rel);
         let meta = fs::symlink_metadata(&p).at(&p)?;
         if meta.is_dir() {
             fs::create_dir_all(&dst).at(&dst)?;

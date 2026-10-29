@@ -96,7 +96,8 @@ class Map:
 def write(path, data):
     path = os.path.join(OUT, path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb" if isinstance(data, bytes) else "w") as f:
+    # text as UTF-8 with "\n" line ends on every OS, as the app writes it
+    with (open(path, "wb") if isinstance(data, bytes) else open(path, "w", encoding="utf-8", newline="")) as f:
         f.write(data)
 
 

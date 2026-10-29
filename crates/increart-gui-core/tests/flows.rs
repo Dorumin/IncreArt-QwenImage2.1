@@ -485,7 +485,6 @@ impl Library_ {
         let tmp = tempfile::tempdir().unwrap();
         let copy = tmp.path().join("copy");
         increart_core::fsutil::copy_tree(&self.root, &copy).unwrap();
-        std::fs::remove_file(copy.join("library.lock")).unwrap();
         let mut lib = increart_core::Library::open(&copy).unwrap();
         // A past minute, so the IDs made here can't collide with ones the
         // app's own handle hands out later (it never sees this handle's).
@@ -890,7 +889,9 @@ fn kobold_wizard_plans_by_vram_downloads_then_opens() {
     update(&mut s, Msg::EditKoboldWizard(k.clone()));
     assert!(update(&mut s, Msg::FinishKoboldWizard).is_empty());
     assert!(dialog(&s).kobold.as_ref().unwrap().error.as_ref().unwrap().contains("full path"));
-    k.models_dir = "/m".into();
+    // a full path on this OS ("/m" isn't one on Windows)
+    let m = if cfg!(windows) { r"C:\m" } else { "/m" };
+    k.models_dir = m.into();
     k.gpus.as_mut().unwrap().as_mut().unwrap()[2].gpu.vram_gib = 6.0;
     update(&mut s, Msg::EditKoboldWizard(k.clone()));
     assert!(update(&mut s, Msg::FinishKoboldWizard).is_empty());
@@ -926,7 +927,7 @@ fn kobold_wizard_plans_by_vram_downloads_then_opens() {
     update(&mut s, Msg::EditKoboldWizard(k));
     let fx = update(&mut s, Msg::FinishKoboldWizard);
     let [Effect::DownloadModels { dir, files, .. }] = &fx[..] else { panic!("{fx:?}") };
-    assert_eq!((dir.as_str(), files.len()), ("/m", 4));
+    assert_eq!((dir.as_str(), files.len()), (m, 4));
     assert!(files[0].file.ends_with("qwen_image_2.1-Q4_K.gguf"));
     update(&mut s, Msg::WizardDownload(WizardDownload { file: 1, done: 5, total: Some(10) }));
     assert_eq!(dialog(&s).kobold.as_ref().unwrap().downloading.as_ref().unwrap().1.file, 1);
@@ -943,7 +944,7 @@ fn kobold_wizard_plans_by_vram_downloads_then_opens() {
     let fx = update(&mut s, Msg::WizardDownloaded(Ok(())));
     assert!(matches!(fx[0], Effect::SaveConfig(..)));
     assert!(matches!(fx.last(), Some(Effect::OpenServers { servers, .. }) if servers.len() == 2));
-    assert_eq!(s.config.sdserver.model_dirs, ["/m"]);
+    assert_eq!(s.config.sdserver.model_dirs, [m]);
     assert_eq!(s.config.koboldcpp, "koboldcpp", "the wizard's binary kept");
     let recipe = s.config.recipes.iter().find(|r| r.name.contains("GGUF Q4_K")).expect("the recipe");
     assert_eq!(recipe.files["vae"], "koboldcpp/qwen_image_2.1_vae_bf16.safetensors");
