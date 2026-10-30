@@ -1010,6 +1010,8 @@ impl eframe::App for App {
             Phase::Servers(d) => {
                 let st = &self.st;
                 egui::CentralPanel::default().show(ui, |ui| crate::startup::servers(ui, st, &d, &mut out));
+                // the preset editor's gear opens it here too
+                crate::projects::recipes_window(&ctx, st, &mut out);
             }
             Phase::Main => self.main_window(ui, &mut out),
         }

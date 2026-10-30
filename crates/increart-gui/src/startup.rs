@@ -921,6 +921,20 @@ fn kobold_binary_field(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: 
     });
 }
 
+/// No image model is set here: each run asks for its model preset's files.
+fn image_model_line(ui: &mut egui::Ui, out: &mut Vec<Msg>) {
+    ui.horizontal(|ui| {
+        ui.weak(ic(ph::CUBE, "Image model: each run's, from its model preset (files in the Models folder)"))
+            .on_hover_text(
+                "The servers load the files of the model preset a run is made with (Generate's Model preset list); \
+             KoboldCpp reloads with them, sd-server takes them per request.",
+            );
+        if ui.small_button(ph::GEAR).on_hover_text("Edit the model presets…").clicked() {
+            out.push(Msg::OpenRecipes);
+        }
+    });
+}
+
 /// A started server's whole command line, environment first, as its log's
 /// first line will show it (the admin password hidden).
 fn command_line(ui: &mut egui::Ui, st: &AppState, i: usize, s: &ServerConfig) {
@@ -938,12 +952,6 @@ fn command_line(ui: &mut egui::Ui, st: &AppState, i: usize, s: &ServerConfig) {
                     ui.weak("as the server's log starts with it");
                 });
                 ui.add(egui::Label::new(RichText::new(line).monospace()).wrap().selectable(true));
-                if matches!(s, ServerConfig::Kobold(_)) {
-                    ui.weak(
-                        "It starts with no image model: each run loads its recipe's (--sdmodel, --sdvae, --sdclip…) \
-                         through KoboldCpp's admin reload, which the log shows too.",
-                    );
-                }
             }
             Err(e) => {
                 ui.colored_label(ui.visuals().warn_fg_color, e);
@@ -1499,6 +1507,9 @@ fn editor(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, editing: Editing, 
         if &edited != s {
             out.push(Msg::EditServer(i, edited));
         }
+    }
+    if d.draft.servers.iter().any(|s| !matches!(s, ServerConfig::Chat(_))) {
+        image_model_line(ui, out);
     }
     ui.horizontal(|ui| {
         if ui

@@ -25,6 +25,7 @@ const SCENES: &[&str] = &[
     "02-server-dialog",
     "02b-pe-settings",
     "02c-koboldcpp-entry",
+    "02d-model-presets-from-servers",
     "54-server-wizard",
     "54a-server-wizard-choose",
     "54c-server-wizard-pe-own-gpu",
@@ -804,6 +805,8 @@ impl Tour {
                 // a KoboldCpp entry in the first preset, as the chat server too
                 vec![Msg::PeEditorClose, Msg::CancelEdit, Msg::EditPreset(0), Msg::AddKoboldServer]
             }
+            // the preset editor's Image model gear
+            "02d-model-presets-from-servers" => vec![Msg::OpenRecipes],
             "54-server-wizard" => {
                 // KoboldCpp: two 24 GB cards and an integrated GPU (not ticked)
                 use increart_core::tiers::Gpu;
@@ -815,6 +818,7 @@ impl Tour {
                     gpu(2, "AMD Radeon RX 7900 XTX (RADV NAVI31)", 23.98, false),
                 ];
                 vec![
+                    Msg::CloseRecipes,
                     Msg::PeEditorClose,
                     Msg::CancelEdit,
                     Msg::ServerWizard(true),

@@ -1828,7 +1828,8 @@ and its tooltip says how many more are generating.
   preset isn't runnable, the first one that is is chosen; until a server
   has answered, every preset is offered. A model sweep's checkboxes
   follow the same list (a ticked preset stays to be unticked).
-- The **⚙** beside the Model preset list opens **Model presets**, a modal editor of
+- The **⚙** beside the Model preset list (and beside the server preset
+  editor's Image model line) opens **Model presets**, a modal editor of
   config `recipes`: the list (a ✓ when an open server runs it, naming which
   on hover; new, duplicate, move, delete) and the selected one's name,
   recipe, steps, CFG, flow shift (off: the recipe's), custom sigmas
@@ -2269,6 +2270,10 @@ in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
   for in what the server wrote, not in these lines.
 - The preset editor shows each started server's **Command line**, as its
   log's first line will (the admin password as `***`), with Copy.
+- Under a preset's image servers a greyed **Image model** line says no
+  image model is set there: each run's comes from its model preset (files
+  in the Models folder); its ⚙ opens Model presets. A KoboldCpp entry's
+  Chat model is the one model a server preset names.
 - On the Servers screen a failed server's row says **failed**, and why on
   its own lines under it, wrapped to the dialog's width; of a long log tail
   the first line and the last two (all of it on hover).
