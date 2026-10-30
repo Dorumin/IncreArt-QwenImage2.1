@@ -740,7 +740,11 @@ fn server_dialog_save_and_open_then_partial_failure() {
 fn server_wizard_ticks_the_gpus_and_opens_them() {
     let mut s = dialog_state(vec![], None);
     let fx = update(&mut s, Msg::ServerWizard(true));
-    assert_eq!(fx, [Effect::DetectGpus(GpuRuntime::Vulkan)], "KoboldCpp first");
+    assert_eq!(
+        fx,
+        [Effect::DetectGpus(GpuRuntime::Vulkan), Effect::KoboldVersion("koboldcpp".into())],
+        "KoboldCpp first, its binary checked"
+    );
     assert!(dialog(&s).wizard && dialog(&s).kobold.is_some());
     let fx = update(&mut s, Msg::WizardKobold(false));
     assert!(matches!(fx[..], [Effect::ListDevices(_)]), "lists the devices at once");
@@ -955,6 +959,35 @@ fn kobold_wizard_plans_by_vram_downloads_then_opens() {
     let k = dialog(&s).kobold.clone().unwrap();
     assert!(k.downloading.is_none() && k.error.unwrap().contains("cancelled"));
     assert!(s.config.recipes.iter().all(|r| !r.name.contains("GGUF Q4_K")));
+
+    // KoboldCpp not found: Save anyway downloads and saves, doesn't open
+    update(&mut s, Msg::KoboldVersion("koboldcpp".into(), Err("koboldcpp not found".into())));
+    assert!(update(&mut s, Msg::CheckWizardBinary).is_empty(), "asked already");
+    let mut anyway = s.clone();
+    update(&mut anyway, Msg::SaveKoboldWizard);
+    let fx = update(&mut anyway, Msg::WizardDownloaded(Ok(())));
+    assert!(matches!(fx[..], [Effect::SaveConfig(..)]), "{fx:?}");
+    assert!(!dialog(&anyway).wizard && dialog(&anyway).kobold.is_none() && !dialog(&anyway).opening);
+    let saved = anyway.config.server_presets.last().unwrap().clone();
+    assert_eq!(saved.name, "KoboldCpp Vulkan1 + KoboldCpp Vulkan2");
+    // found later, in Server settings: its entries follow
+    update(&mut anyway, Msg::SetKoboldBinary("/opt/k/koboldcpp".into()));
+    let binaries: Vec<String> = anyway
+        .config
+        .server_presets
+        .last()
+        .unwrap()
+        .servers
+        .iter()
+        .filter_map(|s| match s {
+            ServerConfig::Kobold(k) => match &k.run {
+                increart_core::kobold::KoboldRun::Start { binary, .. } => Some(binary.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(binaries, ["/opt/k/koboldcpp", "/opt/k/koboldcpp"]);
 
     update(&mut s, Msg::FinishKoboldWizard);
     let fx = update(&mut s, Msg::WizardDownloaded(Ok(())));

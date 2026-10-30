@@ -803,7 +803,29 @@ impl Tour {
             }
             "02c-koboldcpp-entry" => {
                 // a KoboldCpp entry in the first preset, as the chat server too
-                vec![Msg::PeEditorClose, Msg::CancelEdit, Msg::EditPreset(0), Msg::AddKoboldServer]
+                use increart_core::kobold::{KoboldChat, KoboldRun, KoboldServer};
+                let first = st.config.server_presets.first().map(|p| p.servers.len()).unwrap_or(0);
+                let run = KoboldRun::Start {
+                    binary: increart_gui_core::kobold_binary(st),
+                    config: String::new(),
+                    host: "127.0.0.1".into(),
+                    port: 5001,
+                    device: Default::default(),
+                    args: vec![],
+                };
+                let chat = KoboldChat {
+                    model: "/models/koboldcpp/Qwen3-VL-8B-Instruct-Q8_0.gguf".into(),
+                    mmproj: "/models/koboldcpp/mmproj-Qwen3-VL-8B-Instruct-F16.gguf".into(),
+                    context: 8192,
+                };
+                let k = KoboldServer { name: format!("kcpp{first}"), run, chat: Some(chat), swap: false };
+                vec![
+                    Msg::PeEditorClose,
+                    Msg::CancelEdit,
+                    Msg::EditPreset(0),
+                    Msg::AddKoboldServer,
+                    Msg::EditServer(first, increart_core::config::ServerConfig::Kobold(k)),
+                ]
             }
             // the preset editor's Image model gear
             "02d-model-presets-from-servers" => vec![Msg::OpenRecipes],

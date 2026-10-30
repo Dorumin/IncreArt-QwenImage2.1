@@ -340,6 +340,33 @@ impl Config {
         self.server_presets.iter().find(|p| p.name == name)
     }
 
+    /// The shared KoboldCpp binary set: the entries that started with the
+    /// one before (a preset saved before KoboldCpp was found) follow it.
+    pub fn set_koboldcpp(&mut self, binary: String) {
+        use crate::kobold::KoboldRun;
+        use crate::pe::PeRun;
+        let old = self.koboldcpp.trim().to_string();
+        if !old.is_empty() {
+            for s in self.server_presets.iter_mut().flat_map(|p| &mut p.servers) {
+                let b = match s {
+                    ServerConfig::Kobold(k) => match &mut k.run {
+                        KoboldRun::Start { binary, .. } => binary,
+                        _ => continue,
+                    },
+                    ServerConfig::Chat(c) => match &mut c.run {
+                        PeRun::KoboldCpp { binary, .. } => binary,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if b.trim() == old {
+                    *b = binary.clone();
+                }
+            }
+        }
+        self.koboldcpp = binary;
+    }
+
     /// The presets' chat servers, one per process (the first preset's name
     /// for it).
     /// The KoboldCpp binary in use: the shared one, else a prompt-enhance

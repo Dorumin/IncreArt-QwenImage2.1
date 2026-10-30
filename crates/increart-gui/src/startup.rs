@@ -377,13 +377,15 @@ fn log_file(s: &ServerConfig) -> String {
 }
 
 /// A path's text box, with a Browse… button picking it.
-fn path_edit(ui: &mut egui::Ui, s: &mut String, hint: &str, pick: PickKind, out: &mut Vec<Msg>) {
+fn path_edit(ui: &mut egui::Ui, s: &mut String, hint: &str, pick: PickKind, out: &mut Vec<Msg>) -> bool {
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(s).desired_width(ui.available_width() - 36.0).hint_text(hint));
+        let r = ui.add(egui::TextEdit::singleline(s).desired_width(ui.available_width() - 36.0).hint_text(hint));
         if ui.button(ph::FOLDER_OPEN).on_hover_text("Browse…").clicked() {
             out.push(Msg::Pick(pick));
         }
-    });
+        r.lost_focus()
+    })
+    .inner
 }
 
 /// A KoboldCpp entry's settings (entry `i`), under its row; started with
@@ -496,12 +498,21 @@ fn kobold_fields(
                 });
             }
             if let (Some(c), KoboldRun::Start { .. }) = (&mut k.chat, &k.run) {
-                path_edit(ui, &mut c.model, "chat model .gguf", PickKind::Kobold(i, PeFile::Model), out);
-                let hint = "vision mmproj .gguf (empty: text only)";
-                path_edit(ui, &mut c.mmproj, hint, PickKind::Kobold(i, PeFile::Mmproj), out);
+                // labelled, the column's width alike
+                let label = |ui: &mut egui::Ui, text: &str| ui.add_sized([56.0, 18.0], egui::Label::new(text));
                 ui.horizontal(|ui| {
+                    label(ui, "Model").on_hover_text("the chat model, a .gguf");
+                    path_edit(ui, &mut c.model, "chat model .gguf", PickKind::Kobold(i, PeFile::Model), out);
+                });
+                ui.horizontal(|ui| {
+                    label(ui, "mmproj").on_hover_text("the vision projector, a .gguf: lets it see the images");
+                    let hint = "vision mmproj .gguf (empty: text only)";
+                    path_edit(ui, &mut c.mmproj, hint, PickKind::Kobold(i, PeFile::Mmproj), out);
+                });
+                ui.horizontal(|ui| {
+                    label(ui, "Context");
                     ui.add(egui::DragValue::new(&mut c.context).range(0..=131072).speed(256));
-                    ui.weak("context tokens (0: KoboldCpp's default)");
+                    ui.weak("tokens (0: KoboldCpp's default)");
                 });
             }
         });
@@ -713,6 +724,16 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
                     r.on_hover_text(e);
                 }
             });
+            // its binary missing: where to set it
+            if s.is_started() && (e.contains(" not found: ") || e.contains(" isn't there")) {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.weak("Set its binary in");
+                    if ui.add_enabled(!d.opening, egui::Button::new(ic(ph::GEAR, "Server settings…"))).clicked() {
+                        out.push(Msg::ServerSettings(true));
+                    }
+                });
+            }
         }
         if matches!(p, ServerProgress::Opening) {
             ui.horizontal(|ui| {
@@ -1081,7 +1102,9 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
         });
         ui.add_space(8.0);
         if let Some(k) = &d.kobold {
-            kobold_wizard(ui, k, out);
+            let binary = increart_gui_core::update::wizard_binary(k);
+            let version = d.kobold_version.as_ref().filter(|(b, _)| *b == binary).map(|(_, r)| r);
+            kobold_wizard(ui, k, version, out);
             return;
         }
         ui.label("IncreArt runs sd-server on your GPUs, one server per GPU.");
@@ -1200,7 +1223,8 @@ fn server_wizard(ctx: &egui::Context, st: &AppState, d: &ServerDialog, out: &mut
 /// The wizard's KoboldCpp page: the binary, the models folder, the GPUs
 /// (each one's memory picks its preset), how two or more share the work;
 /// then the models downloaded and the servers opened.
-fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, out: &mut Vec<Msg>) {
+/// `version`: the binary's `--version` (None while asking).
+fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, version: Option<&Result<String, String>>, out: &mut Vec<Msg>) {
     let mut new = k.clone();
     let busy = k.downloading.is_some();
     let plan = k.plan();
@@ -1210,8 +1234,34 @@ fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, out: &mut Vec<Msg>) {
         ui.label(RichText::new("1. KoboldCpp").strong());
         ui.horizontal(|ui| {
             ui.add_sized([56.0, 18.0], egui::Label::new("Binary"));
-            path_edit(ui, &mut new.binary, "koboldcpp", PickKind::WizardBinary, out);
+            if path_edit(ui, &mut new.binary, "koboldcpp", PickKind::WizardBinary, out) {
+                out.push(Msg::CheckWizardBinary);
+            }
         });
+        ui.horizontal(|ui| {
+            ui.add_space(64.0);
+            match version {
+                Some(Ok(v)) => {
+                    ui.colored_label(GOOD, ic(ph::CHECK, &format!("KoboldCpp {v}")));
+                }
+                Some(Err(e)) => {
+                    ui.add(egui::Label::new(RichText::new(e).color(BAD)).wrap());
+                }
+                None => {
+                    ui.spinner();
+                    ui.weak("--version…");
+                }
+            }
+        });
+        if matches!(version, Some(Err(_))) {
+            ui.horizontal(|ui| {
+                ui.add_space(64.0);
+                ui.weak(
+                    "Download KoboldCpp from github.com/LostRuins/koboldcpp/releases and pick it with Browse…, \
+                     or Save anyway and set it later in Server settings.",
+                );
+            });
+        }
         ui.horizontal(|ui| {
             ui.add_sized([56.0, 18.0], egui::Label::new("Models"));
             path_edit(ui, &mut new.models_dir, "/path/to/models", PickKind::WizardModels, out);
@@ -1371,10 +1421,23 @@ fn kobold_wizard(ui: &mut egui::Ui, k: &KoboldWizard, out: &mut Vec<Msg>) {
             }
             return;
         }
+        let found = matches!(version, Some(Ok(_)));
         let finish =
             egui::Button::new(RichText::new(ic(ph::DOWNLOAD_SIMPLE, "Download, save as preset and open")).strong());
-        if ui.add_enabled(plan.is_ok(), finish).clicked() {
+        let why = match version {
+            None => "Checking KoboldCpp (--version)…",
+            _ => "KoboldCpp isn't found: pick it under 1. KoboldCpp, or Save anyway",
+        };
+        if ui.add_enabled(plan.is_ok() && found, finish).on_disabled_hover_text(why).clicked() {
             out.push(Msg::FinishKoboldWizard);
+        }
+        if matches!(version, Some(Err(_)))
+            && ui
+                .add_enabled(plan.is_ok(), egui::Button::new("Save anyway"))
+                .on_hover_text("Download the models and save the preset without opening it; set KoboldCpp later in Server settings")
+                .clicked()
+        {
+            out.push(Msg::SaveKoboldWizard);
         }
         if ui.button("Cancel   Esc").clicked() {
             out.push(Msg::ServerWizard(false));

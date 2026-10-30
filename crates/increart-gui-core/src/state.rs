@@ -1295,6 +1295,9 @@ pub struct KoboldWizard {
     pub runtime: increart_core::pe::GpuRuntime,
     /// Downloading the models for this plan.
     pub downloading: Option<(increart_core::tiers::Plan, WizardDownload)>,
+    /// Opened once downloaded and saved; not with **Save anyway** (no
+    /// KoboldCpp found yet).
+    pub open: bool,
     pub error: Option<String>,
 }
 

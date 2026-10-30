@@ -91,6 +91,11 @@ pub enum Msg {
     EditKoboldWizard(crate::state::KoboldWizard),
     /// The KoboldCpp page: download its models, then save and open.
     FinishKoboldWizard,
+    /// **Save anyway**: KoboldCpp not found (yet); downloaded and saved as
+    /// a preset, not opened.
+    SaveKoboldWizard,
+    /// `--version` of the wizard's KoboldCpp binary, unless asked already.
+    CheckWizardBinary,
     WizardDownload(crate::state::WizardDownload),
     /// Every model there (or not).
     WizardDownloaded(Result<(), String>),
@@ -1472,6 +1477,26 @@ pub fn kobold_binary(state: &AppState) -> String {
     state.config.known_koboldcpp().unwrap_or_else(|| "koboldcpp".into())
 }
 
+/// The wizard's draft named (its devices, numbered past those taken),
+/// to be saved as a new preset; the wizard closed.
+fn name_wizard_draft(state: &mut AppState) {
+    let Phase::Servers(d) = &mut state.phase else { return };
+    let base = wizard_name(&d.draft);
+    let taken = |n: &str| state.config.server_presets.iter().any(|p| p.name == n);
+    d.draft.name =
+        (1..).map(|i| if i == 1 { base.clone() } else { format!("{base} ({i})") }).find(|n| !taken(n)).unwrap();
+    d.editing = Some(Editing::New);
+    d.wizard = false;
+}
+
+/// The KoboldCpp binary the wizard names: typed, else `koboldcpp`.
+pub fn wizard_binary(k: &KoboldWizard) -> String {
+    match k.binary.trim() {
+        "" => "koboldcpp".into(),
+        b => b.to_string(),
+    }
+}
+
 /// The wizard's preset name: its devices ("ROCm0 + ROCm1"), or "Running
 /// server(s)" for connections only.
 fn wizard_name(draft: &ServerPreset) -> String {
@@ -1941,9 +1966,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 pe_by_hand: false,
                 runtime: state.gpu_runtime,
                 downloading: None,
+                open: true,
                 error: None,
             }));
-            vec![Effect::DetectGpus(state.gpu_runtime)]
+            let mut fx = vec![Effect::DetectGpus(state.gpu_runtime)];
+            fx.extend(update(state, Msg::CheckWizardBinary));
+            fx
         }
         Msg::WizardRuntime(runtime) => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
@@ -1982,12 +2010,23 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
-        Msg::FinishKoboldWizard => {
+        Msg::CheckWizardBinary => {
+            let Phase::Servers(d) = &state.phase else { return vec![] };
+            let Some(k) = &d.kobold else { return vec![] };
+            let binary = wizard_binary(k);
+            match &d.kobold_version {
+                Some((b, _)) if *b == binary => vec![],
+                _ => vec![Effect::KoboldVersion(binary)],
+            }
+        }
+        Msg::FinishKoboldWizard | Msg::SaveKoboldWizard => {
+            let open = matches!(msg, Msg::FinishKoboldWizard);
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
             let Some(k) = &mut d.kobold else { return vec![] };
             if k.downloading.is_some() {
                 return vec![];
             }
+            k.open = open;
             if !std::path::Path::new(k.models_dir.trim()).is_absolute() {
                 k.error = Some("The models folder must be a full path.".into());
                 return vec![];
@@ -2028,6 +2067,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             // the recipe's files are under the models folder
             let c = &mut state.config;
             c.koboldcpp = k.binary.trim().to_string();
+            let open = k.open;
             if !c.sdserver.model_dirs.contains(&dir) {
                 c.sdserver.model_dirs.push(dir);
             }
@@ -2035,7 +2075,14 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 Some(r) => *r = plan.recipe,
                 None => c.recipes.push(plan.recipe),
             }
-            update(state, Msg::FinishServerWizard)
+            if open {
+                return update(state, Msg::FinishServerWizard);
+            }
+            // saved, not opened: the servers screen shows it in the list
+            name_wizard_draft(state);
+            let Phase::Servers(d) = &mut state.phase else { return vec![] };
+            d.kobold = None;
+            update(state, Msg::SavePreset)
         }
         Msg::DraftDevice(device, on) => {
             let Phase::Servers(d) = &mut state.phase else { return vec![] };
@@ -2052,12 +2099,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if !d.wizard || d.draft.servers.is_empty() {
                 return vec![];
             }
-            let base = wizard_name(&d.draft);
-            let taken = |n: &str| state.config.server_presets.iter().any(|p| p.name == n);
-            d.draft.name =
-                (1..).map(|i| if i == 1 { base.clone() } else { format!("{base} ({i})") }).find(|n| !taken(n)).unwrap();
-            d.editing = Some(Editing::New);
-            d.wizard = false;
+            name_wizard_draft(state);
             update(state, Msg::SaveAndOpen)
         }
         Msg::OpenDraft => {
@@ -5531,7 +5573,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 } else {
                     k.models_dir = path;
                 }
-                update(state, Msg::EditKoboldWizard(k))
+                let mut fx = update(state, Msg::EditKoboldWizard(k));
+                fx.extend(update(state, Msg::CheckWizardBinary));
+                fx
             }
             PickKind::ModelDir => {
                 let mut c = state.config.sdserver.clone();
@@ -5567,7 +5611,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if b == state.config.koboldcpp {
                 return vec![];
             }
-            state.config.koboldcpp = b;
+            state.config.set_koboldcpp(b);
             save_config(state)
         }
         Msg::CheckKoboldVersion => kobold_version_once(state),

@@ -215,7 +215,9 @@ pub fn command(binary: &str) -> Result<Command, String> {
 pub fn version(binary: &str) -> Result<String, String> {
     let mut cmd = command(binary)?;
     cmd.arg("--version").stdin(Stdio::null()).stderr(Stdio::null());
-    let out = crate::process::background(&mut cmd, false).output().map_err(|e| format!("{}: {e}", binary.trim()))?;
+    let out = crate::process::background(&mut cmd, false)
+        .output()
+        .map_err(|e| crate::process::spawn_error(binary.trim(), &e))?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
         Some(v) if out.status.success() => Ok(v.to_string()),

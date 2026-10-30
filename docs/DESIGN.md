@@ -272,7 +272,15 @@ asks among them):
   says, linked instead; a progress bar and **Cancel download**), adds
   the folder to the model folders, adds a recipe preset ("Qwen-Image 2.1
   GGUF Q8_0 (CFG 2, refs)", 20 steps, CFG 2), and saves and opens the
-  server preset ("KoboldCpp Vulkan1", with " (2)" when taken). The other
+  server preset ("KoboldCpp Vulkan1", with " (2)" when taken). The
+  binary is checked first (`--version`, when the wizard opens, the field is
+  left or a file picked), its version or why it can't run under it
+  ("koboldcpp not found: it isn't a file in the working folder, and isn't
+  on PATH"); until it runs, that button is greyed out (why on hover) and,
+  once it's known not to, **Save anyway** downloads and saves the preset
+  without opening it, with a note to download KoboldCpp and pick it or set
+  it later in Server settings. Setting the shared binary there moves the
+  presets' entries that had the one before along with it. The other
   choice, **sd-server, with your own models**, is the sd-server
   binary and models folder, then the devices from `--list-devices` with
   every GPU ticked (not the CPU) on ports 1234, 1235, …, or a server
@@ -309,7 +317,7 @@ asks among them):
   choice / CPU / GPUs: a runtime, Vulkan / CUDA / ROCm, and the numbers its
   tool lists), more args, or address / password / device,
   and **Chat** to make it one of prompt enhance's chat servers too, with the chat
-  model for a started one (ticked: the wizard's Qwen3-VL and projector if
+  model for a started one, labelled **Model**, **mmproj** and **Context** (ticked: the wizard's Qwen3-VL and projector if
   they're in a model folder's `koboldcpp/`, context 8192; see KoboldCpp as
   an image server). Every path (binary, settings, chat model, mmproj, and
   the wizard's binary and models folder) has a Browse… picker starting in
@@ -2286,7 +2294,9 @@ in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
   Chat model is the one model a server preset names.
 - On the Servers screen a failed server's row says **failed**, and why on
   its own lines under it, wrapped to the dialog's width; of a long log tail
-  the first line and the last two (all of it on hover).
+  the first line and the last two (all of it on hover). A started server
+  whose binary isn't there ("… not found", "… isn't there") also gets
+  "Set its binary in **Server settings…**", a button that opens them.
 - **Logs…** (the startup Servers screen's footer, the top bar's Servers
   window) opens the log viewer, a modal; a started server's row there has a
   log button that opens it on that server's log.
