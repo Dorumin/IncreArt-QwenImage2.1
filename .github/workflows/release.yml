@@ -68,22 +68,8 @@ jobs:
           echo "$v"
           [[ $v != *-dirty* ]] || { echo "built from a dirty tree" >&2; exit 1; }
       - name: Example library
-        run: |
-          # each symlink as the small file holding its target that git makes
-          # where it can't make symlinks: every unzip tool keeps it, and the
-          # app makes it a link on first open (from git's own record, so the
-          # same however this checkout made them)
-          mkdir -p dl
-          cp -R example-library "dl/Example library"
-          git ls-files -s -z example-library | while IFS= read -r -d '' e; do
-            [[ $e == 120000\ * ]] || continue
-            path=${e#*$'\t'}
-            at="dl/Example library/${path#example-library/}"
-            rm -f "$at"
-            git cat-file blob "HEAD:$path" > "$at"
-          done
-          test -f "dl/Example library/library.rsn"
-          if find "dl/Example library" -type l | grep .; then echo "symlinks left" >&2; exit 1; fi
+        # each link as its stand-in (see the script)
+        run: mkdir -p dl && scripts/stage-example-library.sh "dl/Example library"
       - name: Package
         id: package
         run: |

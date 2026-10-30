@@ -45,14 +45,12 @@ jobs:
       - run: cargo test --workspace --no-fail-fast
       - if: ${{ !matrix.link_mode }}
         run: cargo build --release -p increart-gui
-      - name: The example library from this checkout
-        # symlinks, or on Windows maybe git's stand-ins for them: either way
-        # a copy opens with every link and image intact
+      - name: The example library, as releases ship it
+        # its links as stand-ins: opened, every link and image is intact
         if: ${{ !matrix.link_mode }}
         shell: bash
         run: |
-          echo "symlinks in the checkout: $(find example-library -type l | wc -l)"
-          cp -R example-library "$RUNNER_TEMP/Example library"
+          scripts/stage-example-library.sh "$RUNNER_TEMP/Example library"
           target/release/increart --check-library "$RUNNER_TEMP/Example library"
           cat "$RUNNER_TEMP/Example library/library.rsn"
       - if: ${{ !matrix.link_mode }}
