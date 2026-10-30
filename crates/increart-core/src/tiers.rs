@@ -797,7 +797,8 @@ pub fn download(
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(20)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(120)))
+        // use an idle timeout, not total for big downloads
+        .timeout_per_read(Some(std::time::Duration::from_secs(30)))
         .build()
         .into();
     let mut resp = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
