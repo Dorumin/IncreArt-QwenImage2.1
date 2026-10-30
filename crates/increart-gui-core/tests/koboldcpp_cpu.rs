@@ -94,7 +94,7 @@ impl App {
     fn pe_answer(&mut self, target: PeTarget) -> String {
         let t = Instant::now();
         self.send(Msg::PeRewrite(target));
-        let answered = self.pump(Duration::from_secs(300), |s| {
+        let answered = self.pump(Duration::from_secs(600), |s| {
             s.pe.text.as_ref().is_some_and(|t| t.waiting.is_none() && (!t.text.is_empty() || t.error.is_some()))
         });
         let text = self.state.pe.text.clone();
@@ -143,8 +143,10 @@ fn config(kcpp: &str, models: &Path, vision: bool) -> Config {
         flow_shift: None,
         custom_sigmas: vec![],
     }];
-    // KoboldCpp's own choice is half the CPUs, one on a macOS runner
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+    // half the CPUs (the runners' vCPUs are hyperthreads: with all of them,
+    // KoboldCpp on Windows stalled for minutes), but not KoboldCpp's own
+    // choice of one on a macOS runner
+    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() as u32 / 2).max(2));
     config.sdserver.model_dirs = vec![models.to_string_lossy().into_owned()];
     config.server_presets = vec![ServerPreset {
         name: "CPU".into(),
