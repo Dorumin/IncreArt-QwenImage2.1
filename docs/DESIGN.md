@@ -117,7 +117,9 @@ The app always starts by asking which library to open; it never reopens one
 by itself, unless the command line says so (see Startup: command line). The dialog lists the recent libraries (`recent_libraries` in
 `config.rsn`, most recent first, at most 10; the last used one tagged "last used",
 the tag in a muted accent colour): a click opens one, × removes it from the list
-(the folder is left alone). With none yet it says what a library is.
+(the folder is left alone). With none yet it says what a library is. The
+list takes at least the height of three rows, so a short one doesn't leave a
+wide, flat dialog.
 Opening a library moves it to the top of the list. Release zips ship an
 example library in an `Example library` folder beside the executable; it
 is put in the list, tagged "example" (on first run, in place of "last

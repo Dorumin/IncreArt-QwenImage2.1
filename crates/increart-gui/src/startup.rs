@@ -62,49 +62,55 @@ pub fn library(
             });
         }
         ui.add_space(6.0);
-        if recent.is_empty() {
-            ui.label("No libraries yet. A library is the folder that holds your ideas, projects and images.");
-        } else {
-            ui.label(RichText::new("Recent").strong());
-            let example = increart_core::config::bundled_example_library();
-            ui.add_enabled_ui(!d.busy, |ui| {
-                for (i, path) in recent.iter().enumerate() {
-                    let (open, forget) = egui::Sides::new().shrink_left().truncate().spacing(16.0).show(
-                        ui,
-                        |ui| {
-                            let label = RichText::new(ic(ph::BOOKS, path));
-                            ui.selectable_label(false, label).on_hover_text(format!("Open {path}")).clicked()
-                        },
-                        |ui| {
-                            // right to left: ×, then the tag (the list is most recent first: the
-                            // last used one tagged, in a muted accent), so a long path can't hide it
-                            let open_now = back.is_some_and(|b| b == std::path::Path::new(path));
-                            let forget = !open_now
-                                && ui
-                                    .small_button(ph::X)
-                                    .on_hover_text("Remove from the list (the folder stays)")
-                                    .clicked();
-                            if open_now {
-                                ui.label(RichText::new("open now").color(ACCENT_MUTED));
-                            } else if example.as_deref() == Some(std::path::Path::new(path)) {
-                                // shipped beside the app (maybe never opened yet)
-                                ui.label(RichText::new("example").color(ACCENT_MUTED));
-                            } else if i == 0 {
-                                ui.label(RichText::new("last used").color(ACCENT_MUTED));
-                            }
-                            forget
-                        },
-                    );
-                    if open {
-                        out.push(Msg::OpenRecentLibrary(i));
+        // at least the label and three rows tall, so a short list (or none)
+        // doesn't leave a wide, flat dialog
+        let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+        ui.vertical(|ui| {
+            ui.set_min_height(4.0 * row);
+            if recent.is_empty() {
+                ui.label("No libraries yet. A library is the folder that holds your ideas, projects and images.");
+            } else {
+                ui.label(RichText::new("Recent").strong());
+                let example = increart_core::config::bundled_example_library();
+                ui.add_enabled_ui(!d.busy, |ui| {
+                    for (i, path) in recent.iter().enumerate() {
+                        let (open, forget) = egui::Sides::new().shrink_left().truncate().spacing(16.0).show(
+                            ui,
+                            |ui| {
+                                let label = RichText::new(ic(ph::BOOKS, path));
+                                ui.selectable_label(false, label).on_hover_text(format!("Open {path}")).clicked()
+                            },
+                            |ui| {
+                                // right to left: ×, then the tag (the list is most recent first: the
+                                // last used one tagged, in a muted accent), so a long path can't hide it
+                                let open_now = back.is_some_and(|b| b == std::path::Path::new(path));
+                                let forget = !open_now
+                                    && ui
+                                        .small_button(ph::X)
+                                        .on_hover_text("Remove from the list (the folder stays)")
+                                        .clicked();
+                                if open_now {
+                                    ui.label(RichText::new("open now").color(ACCENT_MUTED));
+                                } else if example.as_deref() == Some(std::path::Path::new(path)) {
+                                    // shipped beside the app (maybe never opened yet)
+                                    ui.label(RichText::new("example").color(ACCENT_MUTED));
+                                } else if i == 0 {
+                                    ui.label(RichText::new("last used").color(ACCENT_MUTED));
+                                }
+                                forget
+                            },
+                        );
+                        if open {
+                            out.push(Msg::OpenRecentLibrary(i));
+                        }
+                        if forget {
+                            out.push(Msg::ForgetLibrary(i));
+                        }
                     }
-                    if forget {
-                        out.push(Msg::ForgetLibrary(i));
-                    }
-                }
-            });
-            ui.separator();
-        }
+                });
+            }
+        });
+        ui.separator();
         ui.add_space(6.0);
         // the main action on the right: the last used library (Enter), or
         // with none yet, creating one; the others grouped on the left
