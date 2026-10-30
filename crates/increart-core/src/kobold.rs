@@ -148,12 +148,17 @@ impl KoboldServer {
     }
 }
 
+/// Where [`admin_dir`] keeps `server`'s admin folder (not made here).
+pub fn admin_path(state_dir: &Path, server: &str) -> PathBuf {
+    let safe: String = server.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    state_dir.join("koboldcpp").join(safe)
+}
+
 /// A started KoboldCpp's admin folder, `<state>/koboldcpp/<name>`, and its
 /// admin password (made once and kept there, so a server left running
 /// from an earlier session still takes the app's reloads).
 pub fn admin_dir(state_dir: &Path, server: &str) -> std::io::Result<(PathBuf, String)> {
-    let safe: String = server.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
-    let dir = state_dir.join("koboldcpp").join(safe);
+    let dir = admin_path(state_dir, server);
     fs::create_dir_all(&dir)?;
     owner_only(&dir, 0o700)?;
     let file = dir.join("password");

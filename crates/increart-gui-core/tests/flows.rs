@@ -24,6 +24,8 @@ impl Harness {
         let mut config = Config::default();
         config.normalize();
         let rt = Runtime::new(|| {});
+        // started servers (stand-ins) log here, not in the real log folder
+        rt.set_log_dir(tmp.path().join("logs"));
         rt.set_trash_dir(tmp.path().join("trash"));
         let mut h = Harness { state: AppState::new(config, None), rt, _tmp: tmp, root };
         h.send(Msg::SetLibraryPath(h.root.to_string_lossy().into()));

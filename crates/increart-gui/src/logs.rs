@@ -27,6 +27,10 @@ pub struct Cache {
     lines: Vec<String>,
     /// Read from partway in: the log is longer than [`TAIL`].
     cut: bool,
+    /// The last launch line ([`increart_core::process::log_header`]), and
+    /// how far the file was searched for it.
+    launch: Option<String>,
+    searched: u64,
 }
 
 impl Cache {
@@ -49,6 +53,7 @@ impl Cache {
         if self.file.as_deref() != file {
             (self.file, self.read, self.checked) = (file.map(str::to_string), None, None);
             self.lines.clear();
+            (self.launch, self.searched) = (None, 0);
         }
         let Some(name) = file else { return };
         if self.checked.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
@@ -65,6 +70,10 @@ impl Cache {
         if self.read != Some(now) {
             self.read = Some(now);
             (self.lines, self.cut) = read_tail(&path, now.0);
+            if now.0 < self.searched {
+                (self.launch, self.searched) = (None, 0); // begun again
+            }
+            self.searched = find_launch(&path, self.searched, &mut self.launch);
         }
     }
 }
@@ -91,6 +100,33 @@ fn read_tail(path: &Path, len: u64) -> (Vec<String>, bool) {
         lines.pop();
     }
     (lines, from > 0)
+}
+
+/// Reads `path` on from `from` for launch lines, the last into `launch`;
+/// returns where its last whole line ends.
+fn find_launch(path: &Path, from: u64, launch: &mut Option<String>) -> u64 {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return from };
+    if f.seek(SeekFrom::Start(from)).is_err() {
+        return from;
+    }
+    let (mut at, mut line) = (from, vec![]);
+    let mut r = std::io::BufReader::new(f);
+    while let Ok(n) = r.read_until(b'\n', &mut line) {
+        if n == 0 || line.last() != Some(&b'\n') {
+            break;
+        }
+        at += n as u64;
+        if line.starts_with(b"--- IncreArt, ") {
+            let l = String::from_utf8_lossy(&line).trim_end().to_string();
+            // a KoboldCpp's reloads are noted too; the launch is the line wanted
+            if !l.contains(": reloading with ") {
+                *launch = Some(l);
+            }
+        }
+        line.clear();
+    }
+    at
 }
 
 /// Without terminal escape sequences (`ESC [ … letter`).
@@ -207,6 +243,14 @@ pub fn window(ctx: &egui::Context, _st: &AppState, view: &LogsView, cache: &mut 
                     }
                 });
                 let mono = |l: &str| RichText::new(l).monospace();
+                // the launch line, when the part shown starts after it
+                let top = ui.cursor().top();
+                if let Some(l) = cache.launch.as_ref().filter(|l| cache.cut && !cache.lines.contains(l)) {
+                    ui.add(egui::Label::new(mono(l).weak()).wrap().selectable(true))
+                        .on_hover_text("how it was started (from before the part shown)");
+                    ui.separator();
+                }
+                let body = body - (ui.cursor().top() - top);
                 if view.wrap {
                     // wrapped: across is never scrolled
                     let area = ScrollArea::vertical()
@@ -270,6 +314,7 @@ pub fn window(ctx: &egui::Context, _st: &AppState, view: &LogsView, cache: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn a_log_reads_as_a_terminal_shows_it() {
@@ -280,5 +325,27 @@ mod tests {
         let read = read_tail(&p, len);
         std::fs::remove_file(&p).unwrap();
         assert_eq!(read, (vec!["loading".into(), "100%".into(), "done".into()], false));
+    }
+
+    #[test]
+    fn the_last_launch_line_is_found_as_the_log_grows() {
+        let p = std::env::temp_dir().join(format!("increart-launch-test-{}.log", std::process::id()));
+        std::fs::write(&p, "\n--- IncreArt, 2026-10-30 10:00:00: kcpp --port 1\nout\n--- IncreArt: no such file\n")
+            .unwrap();
+        let mut launch = None;
+        let at = find_launch(&p, 0, &mut launch);
+        assert_eq!(launch.as_deref(), Some("--- IncreArt, 2026-10-30 10:00:00: kcpp --port 1"));
+        let more = "--- IncreArt, 2026-10-30 10:01:00: reloading with a.kcpps, the settings for: kcpp\n--- IncreArt, 2026-10-30 11:00:00: kcpp --port 2";
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(more.as_bytes()).unwrap();
+        let at = find_launch(&p, at, &mut launch);
+        assert_eq!(
+            launch.as_deref(),
+            Some("--- IncreArt, 2026-10-30 10:00:00: kcpp --port 1"),
+            "reloads aren't launches; a part line waits"
+        );
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"\n").unwrap();
+        find_launch(&p, at, &mut launch);
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(launch.as_deref(), Some("--- IncreArt, 2026-10-30 11:00:00: kcpp --port 2"));
     }
 }

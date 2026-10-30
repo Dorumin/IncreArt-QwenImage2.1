@@ -26,6 +26,8 @@ struct Shared {
     /// Where libraries opened from now on put deleted things (tests); None:
     /// the system trash.
     disposal: Option<increart_core::library::Disposal>,
+    /// Where started servers log from now on (tests); None: [`log_dir`].
+    log_dir: Option<PathBuf>,
     /// The sd-servers open, each with what it was opened as.
     servers: Vec<Option<(ServerConfig, ServerProcess)>>,
     /// The shared settings `servers` were opened with.
@@ -93,11 +95,21 @@ pub fn log_dir() -> PathBuf {
         .join("logs")
 }
 
+/// Where servers started now log: [`Runtime::set_log_dir`]'s, or [`log_dir`].
+fn logs(shared: &Mutex<Shared>) -> PathBuf {
+    shared.lock().unwrap().log_dir.clone().unwrap_or_else(log_dir)
+}
+
 impl Runtime {
     /// Libraries opened after this put what they delete in `dir` rather than
     /// the system trash (tests: macOS's trash goes through Finder).
     pub fn set_trash_dir(&self, dir: PathBuf) {
         self.shared.lock().unwrap().disposal = Some(increart_core::library::Disposal::Directory(dir));
+    }
+
+    /// Servers started after this log into `dir` rather than [`log_dir`].
+    pub fn set_log_dir(&self, dir: PathBuf) {
+        self.shared.lock().unwrap().log_dir = Some(dir);
     }
 
     /// `wake` is called whenever a message is ready (e.g. request a repaint).
@@ -512,7 +524,7 @@ fn pe_report(pe: &PeCtx) {
 /// its slot (`id`) is gone.
 fn pe_worker(pe: &PeCtx, id: u64, server: increart_core::pe::PeServer, cancel: &std::sync::atomic::AtomicBool) {
     use increart_core::pe;
-    let opened = pe::open(&server, &log_dir(), PE_START_WAIT, cancel);
+    let opened = pe::open(&server, &logs(&pe.shared), PE_START_WAIT, cancel);
     let (client, unused, problem) = {
         let mut s = pe.shared.lock().unwrap();
         let others_ready = s.pe.iter().any(|p| p.id != id && p.process.is_some());
@@ -735,6 +747,7 @@ fn open_servers(
             .enumerate()
             .map(|(i, server)| {
                 let (tx, wake, shared, cfg) = (tx.clone(), wake.clone(), shared.clone(), cfg.clone());
+                let logs = logs(&shared);
                 let (cancel, opening) = (cancel.clone(), opening.clone());
                 let kept = kept[i];
                 std::thread::spawn(move || {
@@ -745,9 +758,9 @@ fn open_servers(
                     }
                     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     if server.is_started() {
-                        watch_start_log(&server, attempt, i, &tx, &wake, &done);
+                        watch_start_log(&server, &logs, attempt, i, &tx, &wake, &done);
                     }
-                    let opened = launcher::open_cancellable(&server, &cfg, &log_dir(), START_WAIT, &cancel);
+                    let opened = launcher::open_cancellable(&server, &cfg, &logs, START_WAIT, &cancel);
                     done.store(true, std::sync::atomic::Ordering::Relaxed);
                     opening.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     let msg = match opened {
@@ -781,13 +794,14 @@ fn open_servers(
 /// tensors 294/396 …), as [`Msg::ServerLog`].
 fn watch_start_log(
     server: &ServerConfig,
+    logs: &Path,
     attempt: u32,
     i: usize,
     tx: &Sender<Msg>,
     wake: &Wake,
     done: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let log = launcher::log_path(&log_dir(), server);
+    let log = launcher::log_path(logs, server);
     let start = std::fs::metadata(&log).map_or(0, |m| m.len());
     let (tx, wake, done) = (tx.clone(), wake.clone(), done.clone());
     std::thread::spawn(move || {

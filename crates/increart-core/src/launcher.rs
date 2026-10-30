@@ -111,6 +111,41 @@ pub fn command_env(server: &ServerConfig) -> Vec<(String, String)> {
     visible_device(device).map(|(var, _, n)| vec![(var.into(), n.into())]).unwrap_or_default()
 }
 
+/// The command line the app starts `server` with, as its log's header shows
+/// it ([`crate::process::command_text`]); `None` for one it connects to.
+/// `state_dir` holds a started KoboldCpp's admin folder.
+pub fn command_line(
+    server: &ServerConfig,
+    shared: &SdServerConfig,
+    state_dir: &Path,
+) -> Option<Result<String, String>> {
+    use crate::kobold::KoboldRun;
+    use crate::pe::PeRun;
+    let (cmd, args, env) = match server {
+        ServerConfig::Start { .. } => {
+            (Ok(Command::new(shared.binary.trim())), command_args(server, shared), command_env(server))
+        }
+        ServerConfig::Connect { .. } => return None,
+        ServerConfig::Chat(s) => match &s.run {
+            PeRun::KoboldCpp { binary, .. } => {
+                (crate::kobold::command(binary), crate::pe::command_args(&s.run), crate::pe::run_env(&s.run))
+            }
+            PeRun::Connect { .. } => return None,
+        },
+        ServerConfig::Kobold(k) => match &k.run {
+            KoboldRun::Start { binary, device, .. } => {
+                let dir = crate::kobold::admin_path(state_dir, &k.name);
+                (crate::kobold::command(binary), k.start_args(&dir, "***"), crate::pe::device_env(device))
+            }
+            KoboldRun::Connect { .. } => return None,
+        },
+    };
+    Some(cmd.map(|mut c| {
+        c.args(args).envs(env);
+        crate::process::command_text(&c)
+    }))
+}
+
 /// Opens one server of the chosen preset. `Connect` checks that it answers.
 /// `Start` launches sd-server, logging to `log_dir/sd-server-<name>.log`,
 /// and waits up to `wait` for it to answer; if an sd-server already answers
@@ -389,6 +424,61 @@ mod tests {
         assert!(command_env(&vulkan).is_empty());
         let remote = ServerConfig::Connect { name: "box".into(), url: "http://h:1".into(), device: String::new() };
         assert!(command_args(&remote, &shared).is_empty());
+    }
+
+    #[test]
+    fn command_lines_as_logs_show_them() {
+        let shared =
+            SdServerConfig { binary: "/opt/sd server".into(), model_dirs: vec!["/m".into()], ..Default::default() };
+        let server = ServerConfig::Start {
+            name: "gpu1".into(),
+            host: "127.0.0.1".into(),
+            port: 1235,
+            device: "ROCm1".into(),
+            args: vec![],
+        };
+        let state = Path::new("/state");
+        assert!(
+            command_line(&server, &shared, state)
+                .unwrap()
+                .unwrap()
+                .starts_with("HIP_VISIBLE_DEVICES=1 \"/opt/sd server\" --listen-ip 127.0.0.1 --listen-port 1235 ")
+        );
+        let k = crate::kobold::KoboldServer {
+            name: "k 1".into(),
+            run: crate::kobold::KoboldRun::Start {
+                binary: "python3 koboldcpp.py".into(),
+                config: String::new(),
+                host: "127.0.0.1".into(),
+                port: 5002,
+                device: Default::default(),
+                args: vec![],
+            },
+            chat: None,
+            swap: false,
+        };
+        let line = command_line(&ServerConfig::Kobold(k.clone()), &shared, state).unwrap().unwrap();
+        let dir = state.join("koboldcpp").join("k_1");
+        assert!(line.starts_with("python3 koboldcpp.py --host 127.0.0.1 --port 5002 "), "{line}");
+        assert!(
+            line.ends_with(&format!(" --nomodel --admin --admindir {} --adminpassword ***", dir.display())),
+            "{line}"
+        );
+        assert!(!dir.exists(), "only shown, nothing made");
+        let empty = crate::kobold::KoboldServer {
+            run: crate::kobold::KoboldRun::Start {
+                binary: " ".into(),
+                config: String::new(),
+                host: "h".into(),
+                port: 1,
+                device: Default::default(),
+                args: vec![],
+            },
+            ..k
+        };
+        assert!(command_line(&ServerConfig::Kobold(empty), &shared, state).unwrap().is_err());
+        let remote = ServerConfig::Connect { name: "box".into(), url: "http://h:1".into(), device: String::new() };
+        assert!(command_line(&remote, &shared, state).is_none());
     }
 
     #[test]

@@ -748,7 +748,9 @@ fn export(admin: &Admin, flags: &[(String, String)]) -> Result<String, String> {
     std::fs::create_dir_all(&admin.dir).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&path);
     let mut cmd = crate::kobold::command(&admin.binary)?;
-    crate::process::background(&mut cmd, false).args(&args).arg("--exportconfig").arg(&path);
+    cmd.args(&args);
+    let text = crate::process::command_text(&cmd);
+    crate::process::background(&mut cmd, false).arg("--exportconfig").arg(&path);
     let out = cmd.output().map_err(|e| format!("can't run {}: {e}", admin.binary))?;
     if !path.is_file() {
         let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -757,6 +759,12 @@ fn export(admin: &Admin, flags: &[(String, String)]) -> Result<String, String> {
             "KoboldCpp didn't write its settings: {}",
             tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
         ));
+    }
+    // the log shows what each reload loads, as it shows the launch
+    if let Some(log) = &admin.log {
+        use std::io::Write;
+        let note = crate::process::log_note(&format!("reloading with {name}, the settings for: {text}"));
+        let _ = std::fs::OpenOptions::new().append(true).open(log).and_then(|mut f| f.write_all(note.as_bytes()));
     }
     Ok(name)
 }
@@ -784,7 +792,8 @@ fn load_error(log: &Path, from: u64) -> Option<String> {
     f.take(1 << 20).read_to_string(&mut text).ok()?;
     // most telling first ("Unable to determine GPU Memory" is only a warning)
     let hints = ["cannot", "out of memory", "failed", "error"];
-    let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with("Namespace(")).collect();
+    let lines: Vec<&str> =
+        text.lines().filter(|l| !l.starts_with("Namespace(") && !l.starts_with("--- IncreArt")).collect();
     hints.iter().find_map(|h| lines.iter().find(|l| l.to_lowercase().contains(h))).map(|l| l.trim().to_string())
 }
 

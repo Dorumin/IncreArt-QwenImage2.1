@@ -921,6 +921,37 @@ fn kobold_binary_field(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: 
     });
 }
 
+/// A started server's whole command line, environment first, as its log's
+/// first line will show it (the admin password hidden).
+fn command_line(ui: &mut egui::Ui, st: &AppState, i: usize, s: &ServerConfig) {
+    let log_dir = increart_gui_core::runtime::log_dir();
+    let state_dir = log_dir.parent().unwrap_or(&log_dir);
+    let Some(line) = increart_core::launcher::command_line(s, &st.config.sdserver, state_dir) else { return };
+    egui::CollapsingHeader::new(ic(ph::TERMINAL, "Command line")).id_salt(("command line", i)).show(
+        ui,
+        |ui| match line {
+            Ok(line) => {
+                ui.horizontal(|ui| {
+                    if ui.small_button(ic(ph::COPY, "Copy")).clicked() {
+                        ui.ctx().copy_text(line.clone());
+                    }
+                    ui.weak("as the server's log starts with it");
+                });
+                ui.add(egui::Label::new(RichText::new(line).monospace()).wrap().selectable(true));
+                if matches!(s, ServerConfig::Kobold(_)) {
+                    ui.weak(
+                        "It starts with no image model: each run loads its recipe's (--sdmodel, --sdvae, --sdclip…) \
+                         through KoboldCpp's admin reload, which the log shows too.",
+                    );
+                }
+            }
+            Err(e) => {
+                ui.colored_label(ui.visuals().warn_fg_color, e);
+            }
+        },
+    );
+}
+
 fn sdserver_binary_field(ui: &mut egui::Ui, c: &mut increart_core::config::SdServerConfig, out: &mut Vec<Msg>) {
     ui.horizontal(|ui| {
         ui.add_sized([56.0, 18.0], egui::Label::new("Binary"));
@@ -1458,6 +1489,7 @@ fn editor(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, editing: Editing, 
                 if let ServerConfig::Kobold(k) = &mut edited {
                     kobold_fields(ui, st, i, k, has_chat_entry, out);
                 }
+                command_line(ui, st, i, &edited);
                 remove
             })
             .inner;

@@ -44,8 +44,19 @@ pub fn spawn_error(program: &str, e: &io::Error) -> String {
 }
 
 /// The line a started server's log gets before its output: when, and the
-/// command line (the environment the app set first; passwords hidden).
+/// command line ([`command_text`]).
 pub fn log_header(cmd: &Command) -> String {
+    log_note(&command_text(cmd))
+}
+
+/// A line of the app's own in a server's log: when, and `text`.
+pub fn log_note(text: &str) -> String {
+    format!("\n--- IncreArt, {}: {text}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+}
+
+/// `cmd` as one line: the environment the app sets first, then the program
+/// and its arguments (passwords hidden).
+pub fn command_text(cmd: &Command) -> String {
     let quote = |s: &str| if s.is_empty() || s.contains(char::is_whitespace) { format!("\"{s}\"") } else { s.into() };
     let mut words: Vec<String> = cmd
         .get_envs()
@@ -58,7 +69,7 @@ pub fn log_header(cmd: &Command) -> String {
         words.push(if secret { "***".into() } else { quote(&a) });
         secret = a.ends_with("password");
     }
-    format!("\n--- IncreArt, {}: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), words.join(" "))
+    words.join(" ")
 }
 
 /// Spawns `cmd` so that it stops when the app does, however the app ends.

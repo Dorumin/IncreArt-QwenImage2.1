@@ -2262,6 +2262,13 @@ in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
   log says why even when the server wrote nothing: a binary that isn't
   there is named as such ("koboldcpp not found: it isn't a file in the
   working folder, and isn't on PATH"; with a folder, "… isn't there").
+- A KoboldCpp image server starts with no image model; each load of a
+  run's model adds `--- IncreArt, <date time>: reloading with <file>.kcpps,
+  the settings for: <command line>` (the launch's plus `--sdmodel`,
+  `--sdvae`, `--sdclip…` for the recipe's files). Load errors are looked
+  for in what the server wrote, not in these lines.
+- The preset editor shows each started server's **Command line**, as its
+  log's first line will (the admin password as `***`), with Copy.
 - On the Servers screen a failed server's row says **failed**, and why on
   its own lines under it, wrapped to the dialog's width; of a long log tail
   the first line and the last two (all of it on hover).
@@ -2272,7 +2279,8 @@ in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
   log's last 1 MB as a terminal shows it (lines rewritten with `\r`, such
   as progress bars, as their last state; colour codes out), refreshed as it
   grows; **follow** keeps to the end (untick to scroll back), **wrap**,
-  and a search that shows only the lines containing it.
+  and a search that shows only the lines containing it. When the last 1 MB
+  starts after the latest launch line, that line is pinned above it.
 - Footer left: **Open in editor** (`editor` in `config.rsn`, the file
   appended; else the desktop's default app for it, then gnome-text-editor,
   gedit, kate, mousepad, xed), **Show in folder**, **Copy** (the lines
