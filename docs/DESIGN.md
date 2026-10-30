@@ -131,7 +131,7 @@ progress bar shows under the buttons (reading every project, run and idea:
 under a second, about 1 s on a cold disk).
 The bottom row: on the right the main button, naming the last used one,
 **Open increart_library ⏎** (the full path in its tooltip; Enter does the
-same), or with no library yet **Create a new library…**; on the left the
+same; a name past 24 characters is cut with "…"), or with no library yet **Create a new library…**; on the left the
 others, **New library…**, **Open existing…** and **Unpack archive…**:
 
 - **New library…** (**Create a new library…**): where should it live? `~/IncreArt`
@@ -201,7 +201,8 @@ asks among them):
   :1234 · Start ROCm1 on :1235 · Chat: Qwen3-VL 8B (GPU)" or "Connect to
   http://10.0.0.2:1234".
   **A click opens a preset**. The bottom row's main button names the last
-  used one, **Open ROCm0 only ⏎**, and Enter does the same; not when the
+  used one, **Open ROCm0 only ⏎** (a name past 24 characters cut with "…",
+  whole on hover), and Enter does the same; not when the
   dialog was reopened from the main window while servers run (**Close**
   keeps them). Each row has
   ✎ **Edit** and 🗑 **Delete** (which asks first).
@@ -2779,9 +2780,11 @@ the keys and mouse buttons go through that view's own history instead.
     the corner and bold, the other ways to finish to its left, then
     **Cancel** / **Close** furthest left (as GNOME and macOS do). Tools
     that don't finish the dialog (Add, Reset, Copy, Open folder, tick all,
-    a wizard's Back…) and status text go on the left of the same row, and
-    are what gives way when the row is narrow. One helper lays every row
-    out (`widgets::dialog_footer`).
+    a wizard's Back…) and status text go on the left of the same row.
+    When both don't fit, the tools go on a row of their own under the ways
+    to finish, rather than being clipped (decided from the widths drawn
+    the frame before). One helper lays every row out
+    (`widgets::dialog_footer`).
   - Names say what happens: Save, Apply, Create, Export…, never "OK" or
     "Done". A confirmation's button is its verb (**Delete**, **Stop now**,
     **Switch library**, **Queue**, **Leave**…), not "Yes". **Cancel**

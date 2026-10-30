@@ -11,7 +11,10 @@ use increart_gui_core::{
     ServerProgress, Without, WizardGpu,
 };
 
-use crate::widgets::{ACCENT, ACCENT_MUTED, BAD, GOOD, NEUTRAL, dialog_buttons, dialog_footer, ic, ph};
+use crate::widgets::{ACCENT, ACCENT_MUTED, BAD, GOOD, NEUTRAL, dialog_buttons, dialog_footer, ic, ph, short_name};
+
+/// How much of a library's or preset's name the main button shows.
+const MAIN_NAME: usize = 24;
 
 /// A start-up screen: a framed box in the middle of the window. Its height
 /// is only known after drawing it, so it's kept per `key` and the frame is
@@ -152,7 +155,10 @@ pub fn library(
                             let name = std::path::Path::new(path)
                                 .file_name()
                                 .map_or(path.clone(), |n| n.to_string_lossy().into());
-                            let open = RichText::new(ic(ph::BOOKS, &format!("Open {name}   ⏎"))).strong().color(ACCENT);
+                            let open =
+                                RichText::new(ic(ph::BOOKS, &format!("Open {}   ⏎", short_name(&name, MAIN_NAME))))
+                                    .strong()
+                                    .color(ACCENT);
                             let enter = d.wizard.is_none()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
                                 && !ui.ctx().egui_wants_keyboard_input();
@@ -504,7 +510,7 @@ fn kobold_fields(
 }
 
 pub fn servers(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg>) {
-    centered(ui, "servers", 560.0, |ui| {
+    centered(ui, "servers", 780.0, |ui| {
         ui.heading(ic(ph::HARD_DRIVES, "Servers"));
         ui.label(
             "The servers for this session: KoboldCpp or sd-server to generate images with, and a chat server \
@@ -615,9 +621,10 @@ fn ways_out(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, modal: bool, out
     if let Some((i, name)) = last
         && !(d.from_main && !st.servers.is_empty())
     {
-        let open = RichText::new(ic(ph::PLAY, &format!("Open {name}   ⏎"))).strong().color(ACCENT);
+        let open =
+            RichText::new(ic(ph::PLAY, &format!("Open {}   ⏎", short_name(name, MAIN_NAME)))).strong().color(ACCENT);
         let enter = !modal && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !ui.ctx().egui_wants_keyboard_input();
-        if ui.button(open).on_hover_text("The preset used last time").clicked() || enter {
+        if ui.button(open).on_hover_text(format!("{name}: the preset used last time")).clicked() || enter {
             out.push(Msg::OpenPreset(i));
         }
     }

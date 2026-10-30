@@ -389,16 +389,53 @@ pub fn when(t: increart_core::id::Timestamp) -> String {
     format!("{} · {ago}", t.format("%Y-%m-%d %H:%M UTC"))
 }
 
+/// `name` cut to `max` characters, "…" in place of the rest: a name in a
+/// button (the whole of it on hover).
+pub fn short_name(name: &str, max: usize) -> String {
+    match name.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", name[..at].trim_end()),
+        None => name.to_string(),
+    }
+}
+
 /// A dialog's button row (DESIGN.md, Dialog buttons): `tools` (buttons
 /// that don't finish it, and status) on the left, `actions` on the right,
 /// laid out right to left: add the main action first, it goes in the corner,
-/// and Cancel / Close last. The tools side shrinks when the row is narrow.
+/// and Cancel / Close last. When both don't fit across, the actions keep
+/// the row and the tools go on one of their own under it (nothing clipped).
 pub fn dialog_footer<L, R>(
     ui: &mut egui::Ui,
     tools: impl FnOnce(&mut egui::Ui) -> L,
     actions: impl FnOnce(&mut egui::Ui) -> R,
 ) -> (L, R) {
-    egui::Sides::new().shrink_left().truncate().show(ui, tools, actions)
+    use egui::{Align, Layout};
+    const GAP: f32 = 16.0;
+    // the two sides' widths as last drawn decide this frame's layout
+    let id = ui.next_auto_id().with("dialog_footer");
+    let (was_tools, was_actions) = ui.data(|d| d.get_temp::<(f32, f32)>(id)).unwrap_or_default();
+    let width = ui.available_width();
+    let fits = |t: f32, a: f32| t == 0.0 || t + GAP + a <= width;
+    let across = fits(was_tools, was_actions);
+    let ((l, wt), (r, wa)) = if across {
+        ui.horizontal(|ui| {
+            let left = ui.horizontal(|ui| (tools(ui), ui.min_rect().width())).inner;
+            let right = ui.with_layout(Layout::right_to_left(Align::Center), |ui| (actions(ui), ui.min_rect().width()));
+            (left, right.inner)
+        })
+        .inner
+    } else {
+        // in a row, as across: alone in the column it would fill its height
+        let right = ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| (actions(ui), ui.min_rect().width())).inner
+        });
+        let left = ui.horizontal(|ui| (tools(ui), ui.min_rect().width())).inner;
+        (left, right.inner)
+    };
+    ui.data_mut(|d| d.insert_temp(id, (wt, wa)));
+    if fits(wt, wa) != across {
+        ui.ctx().request_discard("dialog footer layout");
+    }
+    (l, r)
 }
 
 /// A dialog's button row with only actions ([`dialog_footer`]).
@@ -409,6 +446,14 @@ pub fn dialog_buttons<R>(ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_cut_for_a_button() {
+        assert_eq!(short_name("KoboldCpp Vulkan2 + KoboldCpp Vulkan1", 24), "KoboldCpp Vulkan2 + Kobo…");
+        assert_eq!(short_name("lib", 24), "lib");
+        assert_eq!(short_name("ab cd", 3), "ab…", "no space before the …");
+        assert_eq!(short_name("ééééé", 4), "éééé…");
+    }
 
     #[test]
     fn aspect_ratios() {
