@@ -10,6 +10,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# a newer push to the same branch (or PR) cancels the run it supersedes
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: test (${{ matrix.os }}${{ matrix.link_mode && format(', {0}', matrix.link_mode) || '' }})
