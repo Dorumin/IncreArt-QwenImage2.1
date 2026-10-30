@@ -1,0 +1,91 @@
+GenerateDraft {
+    label: "r02",
+    prompt: "The harbour in <image1> at night as a hand-coloured photochrom print, the statue from <image2> standing on the headland, {celebration} over the water, {boats} crossing the bay",
+    negative_prompt: "",
+    width: 800,
+    height: 544,
+    preset: "Qwen-Image 2.1 (CFG 2, refs)",
+    steps: 20,
+    cfg: 2,
+    seeds: 4,
+    first_seed: 5,
+    alpha: false,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0008",
+            store: Input
+        },
+        ImageRef {
+            id: "2026.10.29-19.53-0007",
+            store: Input
+        }
+    ],
+    images: [
+        Image {
+            image: ImageRef {
+                id: "2026.10.29-19.53-0008",
+                store: Input
+            },
+            reference: true,
+            start: false
+        },
+        Image {
+            image: ImageRef {
+                id: "2026.10.29-19.53-0007",
+                store: Input
+            },
+            reference: true,
+            start: false
+        }
+    ],
+    strength: 0.75,
+    source_idea: "2026.10.29-19.53-0009",
+    sweep: SweepSettings {
+        on: false,
+        source: Selected,
+        slots: {
+            "boats": "steamboats glowing red",
+            "celebration": "fireworks exploding over water"
+        },
+        suggestions: [
+            BlankValues {
+                slot: "celebration",
+                shown: [
+                    "fireworks exploding over water",
+                    "festive lights shimmering",
+                    "sparkling lanterns floating",
+                    "dancing silhouettes on shore",
+                    "families picnicking by water",
+                    "boats adorned with flags"
+                ],
+                offered: [
+                    "fireworks exploding over water",
+                    "festive lights shimmering",
+                    "sparkling lanterns floating",
+                    "dancing silhouettes on shore",
+                    "families picnicking by water",
+                    "boats adorned with flags"
+                ]
+            },
+            BlankValues {
+                slot: "boats",
+                shown: [
+                    "steamboats glowing red",
+                    "sailing ships lit up",
+                    "fishing boats drifting",
+                    "luxury yachts cruising",
+                    "ferries ferrying crowds",
+                    "paddle steamers chugging"
+                ],
+                offered: [
+                    "steamboats glowing red",
+                    "sailing ships lit up",
+                    "fishing boats drifting",
+                    "luxury yachts cruising",
+                    "ferries ferrying crowds",
+                    "paddle steamers chugging"
+                ]
+            }
+        ]
+    }
+}

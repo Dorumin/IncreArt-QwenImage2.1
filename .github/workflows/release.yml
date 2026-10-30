@@ -1,9 +1,9 @@
 # On a version tag (v*, or v*-rc<n> for a pre-release that tries the
 # pipeline out), builds IncreArt for Linux, Windows and macOS and
 # publishes one portable zip per platform to that tag's release. Each zip
-# holds the app, the README and licence, and the example library (from the
-# `example-library` release; see scripts/package-demo-library.sh), which the
-# app offers in its startup list on first run.
+# holds the app, the README and licence, and the example library
+# (example-library/; see scripts/update-example-library.sh), which the app
+# offers in its startup list on first run.
 name: Release
 
 on:
@@ -68,14 +68,22 @@ jobs:
           echo "$v"
           [[ $v != *-dirty* ]] || { echo "built from a dirty tree" >&2; exit 1; }
       - name: Example library
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # links as copies, for every OS (no unzip tool loses them)
-          gh release download example-library --pattern increart-example-library.zip --dir dl
-          if [[ $RUNNER_OS == Windows ]]; then 7z x -y -odl dl/increart-example-library.zip > /dev/null
-          else unzip -q dl/increart-example-library.zip -d dl; fi
+          # each symlink as the small file holding its target that git makes
+          # where it can't make symlinks: every unzip tool keeps it, and the
+          # app makes it a link on first open (from git's own record, so the
+          # same however this checkout made them)
+          mkdir -p dl
+          cp -R example-library "dl/Example library"
+          git ls-files -s -z example-library | while IFS= read -r -d '' e; do
+            [[ $e == 120000\ * ]] || continue
+            path=${e#*$'\t'}
+            at="dl/Example library/${path#example-library/}"
+            rm -f "$at"
+            git cat-file blob "HEAD:$path" > "$at"
+          done
           test -f "dl/Example library/library.rsn"
+          if find "dl/Example library" -type l | grep .; then echo "symlinks left" >&2; exit 1; fi
       - name: Package
         id: package
         run: |

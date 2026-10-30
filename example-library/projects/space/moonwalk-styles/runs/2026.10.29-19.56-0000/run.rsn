@@ -1,0 +1,85 @@
+Run {
+    id: "2026.10.29-19.56-0000",
+    label: "r01 · Sculpted from",
+    created: "2026-10-29T19:56:09Z",
+    prompt: "Transform <image1> into a statue of the astronaut sculpted from black granite, standing on a weathered stone plinth embedded in the lunar regolith, soft natural light from the sun glancing across the textured, pitted surface of the granite, casting long, dramatic shadows across the moon dust and footprints, the suit’s helmet and visor rendered as smooth, reflective stone, the American flag on the shoulder subtly carved with fine detail, the lunar module’s ladder and landing gear nearby sculpted as weathered metal fragments, the moon’s surface rendered in fine, realistic detail with visible craters and dust particles, the subject unmistakably recognizable as the astronaut, the material’s grain and texture evident under the low-angle sunlight, the composition centered on the statue with the horizon line low, evoking the desolate, silent beauty of the lunar landscape, realistic color palette of dark gray, silver, and muted earth tones, fine detail on the suit’s seams and equipment, the granite’s roughness contrasting with the smoothness of the helmet and flag, the lighting enhancing the three-dimensional form of the sculpture while preserving the original image’s composition, the plinth partially buried in lunar soil with faint impressions of the astronaut’s boot prints, the overall scene imbued with the quiet, awe-inspiring grandeur of a monument on the Moon.",
+    negative_prompt: "",
+    alpha: false,
+    width: 672,
+    height: 672,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0005",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0006",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:56:09Z",
+            seeds: Seeds {
+                first: 1,
+                count: 3
+            }
+        }
+    ],
+    sweep: Sweep {
+        name: "r01",
+        task: "Effortful Modify Style",
+        preset: "Sculpted from",
+        enhanced: true
+    },
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm0",
+            done: "2026-10-29T20:00:29Z",
+            elapsed_s: 29.828,
+            queued_s: 19.12,
+            step_s: 1.3363725
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm1",
+            done: "2026-10-29T20:01:05Z",
+            elapsed_s: 28.429,
+            queued_s: 28.129,
+            step_s: 1.2792051
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 3,
+            device: "ROCm0",
+            done: "2026-10-29T20:01:57Z",
+            elapsed_s: 29.295,
+            queued_s: 28.87,
+            step_s: 1.336159
+        }
+    ]
+}

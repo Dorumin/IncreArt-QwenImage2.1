@@ -1,0 +1,17 @@
+Idea {
+    id: "2026.10.29-19.53-0008",
+    title: "Photochrom: Statue of Liberty",
+    text: "",
+    variants: [],
+    tags: [
+        "photochrom",
+        "new york"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [
+        "2026.10.29-19.53-0007"
+    ],
+    projects: [],
+    starred: false
+}

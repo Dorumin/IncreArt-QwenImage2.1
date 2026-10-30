@@ -1,0 +1,92 @@
+[
+  {
+    "file": "great-wave.jpg",
+    "title": "Under the Wave off Kanagawa (Kanagawa oki nami ura), also known as The Great Wave, from the series Thirty-six Views of Mount Fuji (Fugaku sanjūrokkei)",
+    "creator": "Katsushika Hokusai",
+    "date": "ca. 1830–32",
+    "collection": "The Metropolitan Museum of Art",
+    "page": "https://www.metmuseum.org/art/collection/search/45434",
+    "rights": "Public domain (Met Open Access, CC0)",
+    "image": "https://images.metmuseum.org/CRDImages/as/original/DP130155.jpg"
+  },
+  {
+    "file": "wheat-field.jpg",
+    "title": "Wheat Field with Cypresses",
+    "creator": "Vincent van Gogh",
+    "date": "1889",
+    "collection": "The Metropolitan Museum of Art",
+    "page": "https://www.metmuseum.org/art/collection/search/436535",
+    "rights": "Public domain (Met Open Access, CC0)",
+    "image": "https://images.metmuseum.org/CRDImages/ep/original/DP-42549-001.jpg"
+  },
+  {
+    "file": "grande-jatte.jpg",
+    "title": "A Sunday on La Grande Jatte — 1884",
+    "creator": "Georges Seurat",
+    "date": "1884–86, border added 1888–89",
+    "collection": "Art Institute of Chicago",
+    "page": "https://www.artic.edu/artworks/27992",
+    "rights": "Public domain (Art Institute of Chicago, CC0)",
+    "image": "https://www.artic.edu/iiif/2/2d484387-2509-5e8e-2c43-22f9981972eb/full/1686,/0/default.jpg"
+  },
+  {
+    "file": "moonwalk.jpg",
+    "title": "Astronaut Edwin Aldrin walks on lunar surface near leg of Lunar Module",
+    "creator": "NASA",
+    "date": "1969-07-20",
+    "collection": "NASA Image and Video Library",
+    "page": "https://images.nasa.gov/details/as11-40-5903",
+    "rights": "NASA imagery, not subject to US copyright",
+    "image": "https://images-assets.nasa.gov/image/as11-40-5903/as11-40-5903~medium.jpg"
+  },
+  {
+    "file": "earthrise.jpg",
+    "title": "Apollo 8 Mission image, Earth over the horizon of the moon",
+    "creator": "NASA",
+    "date": "1968-12-24",
+    "collection": "NASA Image and Video Library",
+    "page": "https://images.nasa.gov/details/as08-14-2383",
+    "rights": "NASA imagery, not subject to US copyright",
+    "image": "https://images-assets.nasa.gov/image/as08-14-2383/as08-14-2383~medium.jpg"
+  },
+  {
+    "file": "zion-poster.jpg",
+    "title": "Zion National Park, Ranger Naturalist Service",
+    "creator": "",
+    "date": "[ca. between February and March 1939]",
+    "collection": "Library of Congress Prints and Photographs",
+    "page": "https://www.loc.gov/pictures/item/2007676134/",
+    "rights": "No known restrictions on publication (Library of Congress)",
+    "image": "https://tile.loc.gov/storage-services/service/pnp/ppmsca/13400/13400v.jpg"
+  },
+  {
+    "file": "grand-canyon-poster.jpg",
+    "title": "Grand Canyon National Park, a free government service",
+    "creator": "",
+    "date": "[ca. 1938]",
+    "collection": "Library of Congress Prints and Photographs",
+    "page": "https://www.loc.gov/pictures/item/2007676131/",
+    "rights": "No known restrictions on publication (Library of Congress)",
+    "image": "https://tile.loc.gov/storage-services/service/pnp/ppmsca/13300/13397v.jpg"
+  },
+  {
+    "file": "liberty-photochrom.jpg",
+    "title": "Statue of Liberty, New York Harbor",
+    "creator": "",
+    "date": "c1905.",
+    "collection": "Library of Congress Prints and Photographs",
+    "page": "https://www.loc.gov/pictures/item/2008679689/",
+    "rights": "No known restrictions on publication (Library of Congress)",
+    "image": "https://cdn.loc.gov/service/pnp/ppmsca/18200/18288v.jpg"
+  },
+  {
+    "file": "sydney-harbour.jpg",
+    "title": "Mosman Bay. Sydney Harbor",
+    "creator": "",
+    "date": "[ca. 1890-1910]",
+    "collection": "Library of Congress Prints and Photographs",
+    "page": "https://www.loc.gov/pictures/item/2017657736/",
+    "rights": "No known restrictions on publication (Library of Congress)",
+    "image": "https://cdn.loc.gov/service/pnp/ppmsca/41200/41296v.jpg"
+  }
+]

@@ -1,0 +1,19 @@
+Idea {
+    id: "2026.10.29-19.53-0000",
+    title: "The Great Wave, but with a cat",
+    text: "Hokusai's wave with a giant tabby surfing the crest. Keep the woodblock look.",
+    variants: [],
+    tags: [
+        "ukiyo-e",
+        "cats"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:19Z",
+    images: [
+        "2026.10.29-19.53-0000"
+    ],
+    projects: [
+        "2026.10.29-19.53-0000"
+    ],
+    starred: true
+}

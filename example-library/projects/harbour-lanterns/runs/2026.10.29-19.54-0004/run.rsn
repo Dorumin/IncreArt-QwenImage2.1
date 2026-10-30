@@ -1,0 +1,92 @@
+Run {
+    id: "2026.10.29-19.54-0004",
+    label: "r01",
+    created: "2026-10-29T19:54:54Z",
+    prompt: "The harbour in <image1> at night as a hand-coloured photochrom print, the statue from <image2> standing on the headland, fireworks exploding over water over the water, steamboats glowing red crossing the bay",
+    negative_prompt: "",
+    alpha: false,
+    width: 800,
+    height: 544,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0008",
+            store: Input
+        },
+        ImageRef {
+            id: "2026.10.29-19.53-0007",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0009",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:54:54Z",
+            seeds: Seeds {
+                first: 1,
+                count: 4
+            }
+        }
+    ],
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm1",
+            done: "2026-10-29T19:58:38Z",
+            elapsed_s: 35.194,
+            queued_s: 34.739,
+            step_s: 1.507051
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm0",
+            done: "2026-10-29T19:59:04Z",
+            elapsed_s: 36.528,
+            queued_s: 35.616,
+            step_s: 1.564002
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 3,
+            device: "ROCm1",
+            done: "2026-10-29T19:59:12Z",
+            elapsed_s: 34.309,
+            queued_s: 34.64,
+            step_s: 1.5070963
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 4,
+            device: "ROCm0",
+            done: "2026-10-29T19:59:39Z",
+            elapsed_s: 35.573,
+            queued_s: 36.306,
+            step_s: 1.5640539
+        }
+    ]
+}

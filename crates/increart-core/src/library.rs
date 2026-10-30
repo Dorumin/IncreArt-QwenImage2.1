@@ -212,8 +212,16 @@ impl Library {
         lock.set_len(0).at(&lock_path)?;
         writeln!(lock, "{}", std::process::id()).at(&lock_path)?;
         let mut meta = meta;
+        // the folders every library has (git keeps no empty ones)
+        for d in LAYOUT {
+            fs::create_dir_all(root.join(d)).at(root.join(d))?;
+        }
+        // a shipped library (the example, from git or a zip): its links
+        // copies or symlink stand-ins, made real links of the probed kind
         if meta.link_mode.is_none() {
-            meta.link_mode = Some(link::probe(&root)?);
+            let mode = link::probe(&root)?;
+            link::replace_stand_ins(&root, mode)?;
+            meta.link_mode = Some(mode);
             rsnfmt::write(&meta_path, &meta)?;
         }
 

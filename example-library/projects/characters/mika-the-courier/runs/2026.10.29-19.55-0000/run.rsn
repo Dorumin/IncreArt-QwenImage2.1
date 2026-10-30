@@ -1,0 +1,83 @@
+Run {
+    id: "2026.10.29-19.55-0000",
+    label: "r01",
+    created: "2026-10-29T19:55:07Z",
+    prompt: "anime illustration of Mika, an original character: cheerful bicycle courier with short teal hair and a bright yellow raincoat, riding a bicycle with a small red fox perched in the front basket, set in rain-slicked city alley during Golden hour sunset, vibrant colors, dynamic composition, soft natural lighting, detailed background, whimsical and lively style, clean linework, sharp focus on Mika and the fox, shallow depth of field, anime aesthetic, high detail",
+    negative_prompt: "",
+    alpha: false,
+    width: 800,
+    height: 544,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0010",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:55:07Z",
+            seeds: Seeds {
+                first: 1,
+                count: 4
+            }
+        }
+    ],
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm1",
+            done: "2026-10-29T19:59:31Z",
+            elapsed_s: 18.579,
+            queued_s: 33.733,
+            step_s: 0.882684
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 3,
+            device: "ROCm1",
+            done: "2026-10-29T19:59:49Z",
+            elapsed_s: 18.499,
+            queued_s: 18.138,
+            step_s: 0.8826853
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm0",
+            done: "2026-10-29T19:59:59Z",
+            elapsed_s: 19.376,
+            queued_s: 35.04,
+            step_s: 0.90916103
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 4,
+            device: "ROCm1",
+            done: "2026-10-29T20:00:08Z",
+            elapsed_s: 18.501,
+            queued_s: 18.154,
+            step_s: 0.8806836
+        }
+    ]
+}

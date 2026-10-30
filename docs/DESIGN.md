@@ -1506,9 +1506,15 @@ that stay inside the share by default, and these do.
 
 The app treats all three the same: it reads a link's image ID from the
 target path (symlink) or from `increart:id` (hard link, copy), so a library
-can mix them. The example library ships its links as copies, with no
-`link_mode` (every unzip tool keeps them; some skip symlinks): opened, it
-probes one, and its new links are symlinks where they can be.
+can mix them. The example library (`example-library/` in the repository)
+has no `link_mode`: opened, it probes one, makes its links that kind and
+saves it. Git keeps its links as symlinks, or where it can't make them
+(Windows without Developer Mode) as **stand-ins**, small files holding just
+the target path; release zips hold stand-ins, which every unzip tool keeps
+(some skip symlinks). A stand-in counts only if it is under 512 bytes, its
+path starts with `../`, and it reaches a store image from where it is.
+Copies are taken as they are. Opening a library also makes any of the
+standard folders that are missing (git keeps no empty ones).
 
 Review moves files or idea folders between folders (like Yue2); the folder is
 the source of truth for the verdict on both sides (for ideas: inbox, library

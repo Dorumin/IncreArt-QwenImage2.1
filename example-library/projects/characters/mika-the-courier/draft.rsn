@@ -1,0 +1,64 @@
+GenerateDraft {
+    label: "r02",
+    prompt: "anime illustration of Mika, an original character: cheerful bicycle courier with short teal hair and a bright yellow raincoat, riding a bicycle with a small red fox perched in the front basket, set in {place} during {time_of_day}, vibrant colors, dynamic composition, soft natural lighting, detailed background, whimsical and lively style, clean linework, sharp focus on Mika and the fox, shallow depth of field, anime aesthetic, high detail",
+    negative_prompt: "",
+    width: 800,
+    height: 544,
+    preset: "Qwen-Image 2.1 (CFG 2, refs)",
+    steps: 20,
+    cfg: 2,
+    seeds: 4,
+    first_seed: 5,
+    alpha: false,
+    refs: [],
+    strength: 0.75,
+    source_idea: "2026.10.29-19.53-0010",
+    sweep: SweepSettings {
+        on: false,
+        source: Selected,
+        slots: {
+            "place": "rain-slicked city alley",
+            "time_of_day": "Golden hour sunset"
+        },
+        suggestions: [
+            BlankValues {
+                slot: "place",
+                shown: [
+                    "rain-slicked city alley",
+                    "pastel-colored seaside town",
+                    "cherry blossom-lined park path",
+                    "steampunk market district",
+                    "floating island marketplace",
+                    "neon-drenched urban rooftop"
+                ],
+                offered: [
+                    "rain-slicked city alley",
+                    "pastel-colored seaside town",
+                    "cherry blossom-lined park path",
+                    "steampunk market district",
+                    "floating island marketplace",
+                    "neon-drenched urban rooftop"
+                ]
+            },
+            BlankValues {
+                slot: "time_of_day",
+                shown: [
+                    "Golden hour sunset",
+                    "Early morning sunrise",
+                    "Midday sun",
+                    "Twilight dusk",
+                    "Rainy afternoon",
+                    "Starry night"
+                ],
+                offered: [
+                    "Golden hour sunset",
+                    "Early morning sunrise",
+                    "Midday sun",
+                    "Twilight dusk",
+                    "Rainy afternoon",
+                    "Starry night"
+                ]
+            }
+        ]
+    }
+}

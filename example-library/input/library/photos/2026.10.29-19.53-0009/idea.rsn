@@ -1,0 +1,19 @@
+Idea {
+    id: "2026.10.29-19.53-0009",
+    title: "Harbour by lantern light",
+    text: "This photochrom of Mosman Bay at night: lantern-lit ferries, fireworks over the water.",
+    variants: [],
+    tags: [
+        "photochrom",
+        "night"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [
+        "2026.10.29-19.53-0008"
+    ],
+    projects: [
+        "2026.10.29-19.53-0003"
+    ],
+    starred: false
+}

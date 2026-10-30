@@ -1,0 +1,76 @@
+Run {
+    id: "2026.10.29-19.53-0001",
+    label: "r01 · Stained glass",
+    created: "2026-10-29T19:53:43Z",
+    prompt: "Convert <image1> into a stained glass window, composed of vibrant translucent glass panels in deep cobalt, pearl white, and muted ochre, framed by thick, dark leaded lines that catch the light. Light streams from behind, illuminating the scene from within, casting a luminous glow through the glass. Keep the composition, pose, and identity unchanged: the massive wave cresting with crystalline blue foam, the distant snow-capped mountain, and the small boats caught in its fury. Add a tabby cat wearing a surfboard with fins, riding the apex of the wave with focused grace. The sky above is a cloudy dawn, rendered in soft gradient tones of peach and lavender glass, pierced by golden shafts of light. The wave’s texture is defined by layered glass shards — sharp fins of blue and white — while the cat’s fur is rendered in amber and cream panes, catching the light. All materials and textures must be stylized as stained glass, including the boats, the mountain, and the water’s surface, with every detail carved into translucent glass forms.",
+    negative_prompt: "",
+    alpha: false,
+    width: 800,
+    height: 544,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0000",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0000",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:53:43Z",
+            seeds: Seeds {
+                first: 1,
+                count: 2
+            }
+        }
+    ],
+    sweep: Sweep {
+        name: "r01",
+        task: "Lazy Modify Style",
+        preset: "Stained glass",
+        enhanced: true
+    },
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm0",
+            done: "2026-10-29T19:54:46Z",
+            elapsed_s: 27.938,
+            queued_s: 28.645,
+            step_s: 1.2508415
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm0",
+            done: "2026-10-29T19:55:14Z",
+            elapsed_s: 27.68,
+            queued_s: 27.786,
+            step_s: 1.2507392
+        }
+    ]
+}

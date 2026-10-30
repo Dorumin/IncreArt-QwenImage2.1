@@ -1,0 +1,85 @@
+Run {
+    id: "2026.10.29-19.56-0001",
+    label: "r01 · Made of an element",
+    created: "2026-10-29T19:56:09Z",
+    prompt: "Transform <image1> so the subject's whole body is formed from molten gold, swirling and alive with liquid light, holding the subject's shape and features with crystalline precision — the helmet’s visor reflecting starlight, the suit’s seams glowing like molten veins, the boots casting sharp, luminous shadows on the lunar regolith. Rendered in a hyperrealistic, cinematic style with high contrast, the gold radiates a warm, ethereal glow against the stark blackness of space, while the moon’s surface gleams with fine, metallic dust kicked up by the astronaut’s steps. Composition: low-angle shot, subject centered, casting a long, golden shadow that traces the footprints. Lighting: directional sunlight from the upper left, casting sharp highlights on the molten gold and deep, dramatic shadows. Colors: molten gold, lunar gray, and deep space black. Texture: liquid metal with flowing, reflective surfaces, grainy lunar soil, and polished metal sheen on the suit’s joints. Mood: awe-inspiring, divine, otherworldly. Keep the subject recognisable as an astronaut on the moon — no new subjects.",
+    negative_prompt: "",
+    alpha: false,
+    width: 672,
+    height: 672,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0005",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0006",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:56:09Z",
+            seeds: Seeds {
+                first: 1,
+                count: 3
+            }
+        }
+    ],
+    sweep: Sweep {
+        name: "r01",
+        task: "Effortful Modify Style",
+        preset: "Made of an element",
+        enhanced: true
+    },
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm1",
+            done: "2026-10-29T20:00:36Z",
+            elapsed_s: 28.533,
+            queued_s: 18.106,
+            step_s: 1.2792044
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm0",
+            done: "2026-10-29T20:01:27Z",
+            elapsed_s: 29.456,
+            queued_s: 28.759,
+            step_s: 1.3363732
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 3,
+            device: "ROCm1",
+            done: "2026-10-29T20:02:01Z",
+            elapsed_s: 28.012,
+            queued_s: 27.616,
+            step_s: 1.2641817
+        }
+    ]
+}

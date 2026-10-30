@@ -1,0 +1,16 @@
+Idea {
+    id: "2026.10.29-19.53-0007",
+    title: "Earthrise",
+    text: "",
+    variants: [],
+    tags: [
+        "space"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [
+        "2026.10.29-19.53-0006"
+    ],
+    projects: [],
+    starred: false
+}

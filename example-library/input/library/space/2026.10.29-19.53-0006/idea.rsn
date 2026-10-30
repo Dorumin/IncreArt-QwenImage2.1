@@ -1,0 +1,19 @@
+Idea {
+    id: "2026.10.29-19.53-0006",
+    title: "Moonwalk postcard",
+    text: "Apollo 11 as a cheerful 1960s travel postcard: \"Greetings from the Sea of Tranquility\".",
+    variants: [],
+    tags: [
+        "space",
+        "postcard"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [
+        "2026.10.29-19.53-0005"
+    ],
+    projects: [
+        "2026.10.29-19.53-0005"
+    ],
+    starred: true
+}

@@ -5,27 +5,25 @@
 # saved as WebP in docs/readme/gallery/. The page also shows the README's
 # own five shots.
 #
-#   scripts/make-readme-gallery.sh [example-library.zip]
+#   scripts/make-readme-gallery.sh
 #
-# The zip defaults to tmp/release/increart-example-library.zip (from
-# scripts/package-demo-library.sh). The copy is unpacked where a release zip
-# would be, ~/Downloads/increart-v<version>-linux-x86_64/, like the README's
-# shots, as its path shows in them; it's removed afterwards. Build first:
+# The copy of example-library/ is put where a release zip would unpack it,
+# ~/Downloads/increart-v<version>-linux-x86_64/, like the README's shots, as
+# its path shows in them; it's removed afterwards. Build first:
 # cargo build --release -p increart-gui
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-zip=$(realpath "${1:-$root/tmp/release/increart-example-library.zip}")
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/crates/increart-gui/Cargo.toml")
 unpack=$HOME/Downloads/increart-v$version-linux-x86_64
 out=$root/docs/readme/gallery
 
-[[ -f $zip ]] || { echo "no zip at $zip" >&2; exit 1; }
 [[ -e $unpack ]] && { echo "$unpack is in the way" >&2; exit 1; }
 work=$(mktemp -d)
 trap 'rm -rf "$work" "$unpack"' EXIT
 mkdir -p "$unpack"
-unzip -q "$zip" -d "$unpack"
+cp -R "$root/example-library" "$unpack/Example library"
+rm -rf "$unpack/Example library/"{cache,thumbs,library.lock}
 
 # 02 opens the library; a new config, so nothing of this machine's shows
 "$root/scripts/headless.sh" env INCREART_CONFIG="$work/config/config.rsn" INCREART_TOUR="$work/shots" \

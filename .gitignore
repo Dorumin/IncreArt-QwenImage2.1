@@ -4,3 +4,7 @@
 /.Trash-*/
 *.whl
 __pycache__/
+# made when the example library is opened in place
+/example-library/cache/
+/example-library/thumbs/
+/example-library/library.lock

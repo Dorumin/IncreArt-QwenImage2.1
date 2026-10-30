@@ -1,0 +1,14 @@
+Idea {
+    id: "2026.10.29-19.53-0011",
+    title: "Lighthouse keeper robot",
+    text: "A small rusty robot who keeps a lighthouse, polishing the lens at dawn. Storybook watercolour.",
+    variants: [],
+    tags: [
+        "character"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [],
+    projects: [],
+    starred: false
+}

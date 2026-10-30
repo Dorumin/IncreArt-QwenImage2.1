@@ -1,0 +1,17 @@
+Idea {
+    id: "2026.10.29-19.53-0005",
+    title: "National park posters for other planets",
+    text: "Ranger Naturalist Service posters for Olympus Mons, the rings of Saturn, Europa's ice.",
+    variants: [],
+    tags: [
+        "poster",
+        "space"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [],
+    projects: [
+        "2026.10.29-19.53-0002"
+    ],
+    starred: true
+}

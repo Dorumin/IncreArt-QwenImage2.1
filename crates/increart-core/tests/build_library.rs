@@ -614,7 +614,11 @@ fn a_generated_seed_without_its_link_isnt_pending() {
     let report = increart_core::check::check(&lib).unwrap();
     assert_eq!(report.pending, 1);
     assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
-    assert!(report.problems[0].starts_with("projects/new project: 1 generated image(s) have no output link"));
+    assert!(
+        report.problems[0].contains("new project: 1 generated image(s) have no output link"),
+        "{:?}",
+        report.problems
+    );
     assert!(report.summary().contains(", 1 seeds to generate: 1 problem(s)"), "{}", report.summary());
 
     // a library from before deletions were recorded: what's gone is taken
@@ -633,17 +637,29 @@ fn a_generated_seed_without_its_link_isnt_pending() {
 }
 
 /// A library whose `library.rsn` names no link mode (the example library,
-/// zipped with copies) probes one on open and saves it: the copies still
-/// resolve, and new links are made the probed way.
+/// from git or a zip) probes one on open and saves it: copies still
+/// resolve, symlink stand-ins (git's, where it can't make symlinks) become
+/// links, and new links are made the probed way.
 #[test]
 fn a_library_without_a_link_mode_probes_one() {
     let (tmp, mut lib) = setup(Some(LinkMode::Copy));
     let photo = lib.import_bytes(&jpeg_bytes(picture(20, 20, 3)), &original("a.jpg")).unwrap().image;
-    let idea = lib.new_idea(NewIdea { images: vec![photo], ..NewIdea::text("A", "") }).unwrap();
+    let idea = lib.new_idea(NewIdea { images: vec![photo.clone()], ..NewIdea::text("A", "") }).unwrap();
     let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
-    let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 2)).unwrap();
+    let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 3)).unwrap();
     let (_, def) = lib.find_run(&run).unwrap();
     let (_, copied) = lib.write_output(&run, 0, 0, &sdserver_png(1), &recipe(&def, 0, None)).unwrap();
+    let (out, stood_in) = lib.write_output(&run, 0, 2, &sdserver_png(3), &recipe(&def, 2, None)).unwrap();
+    let idea_link = lib.path(lib.scan().unwrap().idea(&idea).unwrap().dir.join("1-a.png"));
+    let depth = |p: &Path| p.strip_prefix(lib.root()).unwrap().components().count() - 1;
+    let up = |p: &Path| "../".repeat(depth(p));
+    fs::write(lib.path(&stood_in), format!("{}output_images/{out}.png", up(&lib.path(&stood_in)))).unwrap();
+    fs::write(&idea_link, format!("{}input_images/{photo}.png", up(&idea_link))).unwrap();
+    // not stand-ins: a path to no image, and one that doesn't reach the store
+    let bogus = lib.path(&stood_in).with_file_name("x.png");
+    fs::write(&bogus, "../../../output_images/2026.01.01-00.00-0000.png").unwrap();
+    let short = lib.path(&stood_in).with_file_name("y.png");
+    fs::write(&short, format!("../output_images/{out}.png")).unwrap();
     drop(lib);
     let meta_path = tmp.path().join("lib/library.rsn");
     let body = fs::read_to_string(&meta_path).unwrap();
@@ -660,9 +676,15 @@ fn a_library_without_a_link_mode_probes_one() {
     assert_eq!(fsutil::is_symlink(&lib.path(&linked)), probed == LinkMode::Symlink);
     resolves(&lib, &copied, Store::Output);
     resolves(&lib, &linked, Store::Output);
+    assert_eq!(resolves(&lib, &stood_in, Store::Output), ImageRef::output(out));
+    assert_eq!(fsutil::is_symlink(&lib.path(&stood_in)), probed == LinkMode::Symlink);
+    assert_eq!(resolves(&lib, &idea_link, Store::Input), ImageRef::input(photo));
+    assert!(fs::read(&bogus).unwrap().starts_with(b"../") && fs::read(&short).unwrap().starts_with(b"../"));
+    fs::remove_file(&bogus).unwrap();
+    fs::remove_file(&short).unwrap();
     let ix = lib.scan().unwrap();
     assert!(ix.problems.is_empty(), "{:?}", ix.problems);
-    assert_eq!(ix.project(&project).unwrap().outputs.len(), 2);
+    assert_eq!(ix.project(&project).unwrap().outputs.len(), 3);
 }
 
 #[test]

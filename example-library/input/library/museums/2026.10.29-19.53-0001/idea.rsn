@@ -1,0 +1,18 @@
+Idea {
+    id: "2026.10.29-19.53-0001",
+    title: "Grande Jatte today",
+    text: "Seurat's Sunday afternoon, present day: phones, scooters, a food truck. Still all dots.",
+    variants: [],
+    tags: [
+        "pointillism"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:19Z",
+    images: [
+        "2026.10.29-19.53-0001"
+    ],
+    projects: [
+        "2026.10.29-19.53-0001"
+    ],
+    starred: false
+}

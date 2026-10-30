@@ -1,0 +1,19 @@
+Idea {
+    id: "2026.10.29-19.53-0003",
+    title: "WPA park poster: Zion",
+    text: "",
+    variants: [],
+    tags: [
+        "poster",
+        "wpa"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [
+        "2026.10.29-19.53-0003"
+    ],
+    projects: [
+        "2026.10.29-19.53-0002"
+    ],
+    starred: true
+}

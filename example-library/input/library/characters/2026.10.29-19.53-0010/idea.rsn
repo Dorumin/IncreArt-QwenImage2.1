@@ -1,0 +1,17 @@
+Idea {
+    id: "2026.10.29-19.53-0010",
+    title: "Mika the courier",
+    text: "Original character. Cheerful bicycle courier, short teal hair, yellow raincoat, a small red fox rides in her front basket. Rainy harbour town.",
+    variants: [],
+    tags: [
+        "character",
+        "anime"
+    ],
+    source: Manual,
+    created: "2026-10-29T19:53:20Z",
+    images: [],
+    projects: [
+        "2026.10.29-19.53-0004"
+    ],
+    starred: true
+}

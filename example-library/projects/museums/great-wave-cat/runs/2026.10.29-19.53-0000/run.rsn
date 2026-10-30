@@ -1,0 +1,76 @@
+Run {
+    id: "2026.10.29-19.53-0000",
+    label: "r01 · Impressionist",
+    created: "2026-10-29T19:53:43Z",
+    prompt: "Convert <image1> into an impressionist painting, small broken dabs of colour, shimmering light and atmosphere, loose visible brushwork. Keep the composition, pose and identity unchanged. Add a tabby cat wearing a surfboard with fins, dynamically riding the crest of the wave, with a soft, cloudy dawn overhead, rendered in dabs of warm ochre, lavender, and pale gold, blending into the cool blues and whites of the wave; the cat’s fur rendered as loose strokes of amber and grey, its eyes catching the dawn’s glow, the surfboard’s surface textured with brushed highlights, the wave’s foam rendered in quick, energetic dabs of white and cerulean, the distant Fuji softened into impressionistic blue-grey and white, all unified by a luminous, hazy atmosphere of early morning light.",
+    negative_prompt: "",
+    alpha: false,
+    width: 800,
+    height: 544,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0000",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0000",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:53:43Z",
+            seeds: Seeds {
+                first: 1,
+                count: 2
+            }
+        }
+    ],
+    sweep: Sweep {
+        name: "r01",
+        task: "Lazy Modify Style",
+        preset: "Impressionist",
+        enhanced: true
+    },
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm0",
+            done: "2026-10-29T19:54:18Z",
+            elapsed_s: 28.75,
+            queued_s: 0,
+            step_s: 1.250785
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm1",
+            done: "2026-10-29T19:54:54Z",
+            elapsed_s: 31.734,
+            queued_s: 32.05,
+            step_s: 1.421733
+        }
+    ]
+}

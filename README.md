@@ -93,16 +93,16 @@ library to explore before you generate anything, with ideas, six projects
 project's prompt has blanks, with prompt enhance's suggestions for them and
 one picked. It's in the start-up list the first time you run IncreArt. It's
 an ordinary library, so changes you make to it are saved, and you can remove
-it from the list with ×. It takes about 50 MB; the Windows zip's copy is
-about 95 MB, because Windows can't unzip the
-links it uses elsewhere, so it holds copies instead.
+it from the list with ×. It takes about 50 MB. It's also in this repository,
+as `example-library/`; open a copy of it, so the checkout stays as it is.
 
 Its source images come from the Library of Congress, The Metropolitan Museum
 of Art, the Art Institute of Chicago and NASA, and all of them are public
 domain or have no known restrictions. `credits.json` in that folder lists
 each one with its source page. `scripts/demo-sources.py` and
 `scripts/demo-library.json` rebuild it from scratch, and
-`scripts/package-demo-library.sh` packages it for the release workflow.
+`scripts/update-example-library.sh` puts it in `example-library/`, where the
+release workflow takes it from.
 
 ## Documentation
 

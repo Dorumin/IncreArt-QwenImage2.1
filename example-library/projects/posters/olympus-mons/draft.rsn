@@ -1,0 +1,71 @@
+GenerateDraft {
+    label: "r02",
+    prompt: "a 1930s WPA travel poster style, like <image1> and <image2>: \"OLYMPUS MONS NATIONAL PARK\", \"RANGER NATURALIST SERVICE\", a towering red volcanic peak dominating the center, two moons glowing in the twilight sky, {foreground} prominently in the foreground, flat graphic design with bold outlines, muted earth tones and deep reds, stylized national park typography, vintage government poster aesthetic, strong vertical composition, dramatic perspective emphasizing the volcano's scale, illustrated with clean lines and solid color blocks, reminiscent of mid-century American travel art",
+    negative_prompt: "",
+    width: 544,
+    height: 800,
+    preset: "Qwen-Image 2.1 (CFG 2, refs)",
+    steps: 20,
+    cfg: 2,
+    seeds: 5,
+    first_seed: 6,
+    alpha: false,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0003",
+            store: Input
+        },
+        ImageRef {
+            id: "2026.10.29-19.53-0004",
+            store: Input
+        }
+    ],
+    images: [
+        Image {
+            image: ImageRef {
+                id: "2026.10.29-19.53-0003",
+                store: Input
+            },
+            reference: true,
+            start: false
+        },
+        Image {
+            image: ImageRef {
+                id: "2026.10.29-19.53-0004",
+                store: Input
+            },
+            reference: true,
+            start: false
+        }
+    ],
+    strength: 0.75,
+    source_idea: "2026.10.29-19.53-0005",
+    sweep: SweepSettings {
+        on: false,
+        source: Selected,
+        slots: {
+            "foreground": "lush green forest canopy"
+        },
+        suggestions: [
+            BlankValues {
+                slot: "foreground",
+                shown: [
+                    "lush green forest canopy",
+                    "dense rocky foothills",
+                    "silhouetted pine treeline",
+                    "wildflower meadow at dusk",
+                    "scattered boulders and shrubs",
+                    "ancient lava flow edge"
+                ],
+                offered: [
+                    "lush green forest canopy",
+                    "dense rocky foothills",
+                    "silhouetted pine treeline",
+                    "wildflower meadow at dusk",
+                    "scattered boulders and shrubs",
+                    "ancient lava flow edge"
+                ]
+            }
+        ]
+    }
+}

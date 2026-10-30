@@ -102,6 +102,56 @@ pub fn read_ref(at: &Path, store: Store) -> Result<Option<ImageRef>> {
     }
 }
 
+/// The store image a symlink's stand-in names: the small file git makes for
+/// a symlink where it can't make one (Windows without Developer Mode),
+/// holding just the target path, `../…/<store>_images/<id>.png`. `None`
+/// for anything else, or when that image isn't in the store.
+pub fn stand_in_ref(root: &Path, at: &Path) -> Option<ImageRef> {
+    let meta = fs::symlink_metadata(at).ok()?;
+    if !meta.is_file() || meta.len() > 512 {
+        return None;
+    }
+    let text = fs::read_to_string(at).ok()?;
+    let target = Path::new(text.trim_end());
+    let mut comps = target.components();
+    let (Some(Component::ParentDir), Some(Component::Normal(file)), Some(Component::Normal(store))) =
+        (comps.next(), comps.next_back(), comps.next_back())
+    else {
+        return None;
+    };
+    if !comps.all(|c| c == Component::ParentDir) {
+        return None;
+    }
+    let store = Store::from_dir(store.to_str()?)?;
+    let id = StoreFormat::of_name(file.to_str()?)?.1.parse().ok()?;
+    let real = root.join(store.dir()).join(file);
+    // the path must land on the store from where the stand-in is
+    let resolved = at.parent()?.join(target);
+    let same = |a: &Path, b: &Path| fs::canonicalize(a).ok().is_some_and(|a| fs::canonicalize(b).is_ok_and(|b| a == b));
+    same(&resolved, &real).then_some(ImageRef { id, store })
+}
+
+/// Replaces every symlink stand-in under `root` (outside the stores and
+/// caches) with a link of kind `mode`. Returns how many.
+pub fn replace_stand_ins(root: &Path, mode: LinkMode) -> Result<usize> {
+    let mut n = 0;
+    for top in fsutil::subdirs(root)? {
+        let name = top.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(name, "input_images" | "output_images" | "thumbs" | "cache") {
+            continue;
+        }
+        for p in fsutil::walk(&top)? {
+            let is_image = p.file_name().and_then(|n| n.to_str()).and_then(StoreFormat::of_name).is_some();
+            let Some(r) = is_image.then(|| stand_in_ref(root, &p)).flatten() else { continue };
+            fs::remove_file(&p).at(&p)?;
+            create(mode, &r.path(root), &p)?;
+            debug_assert_eq!(read_ref(&p, r.store).ok().flatten(), Some(r));
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Recreates every symlink under `dir` after the directory was moved (their
 /// relative targets are only right at the old depth). Other kinds of link
 /// don't need it.

@@ -1,2 +1,4 @@
 # rsn files are parsed (and embedded with include_str!) as LF.
 *.rsn text eol=lf
+# the example library: its bytes as they are on every OS
+example-library/** -text

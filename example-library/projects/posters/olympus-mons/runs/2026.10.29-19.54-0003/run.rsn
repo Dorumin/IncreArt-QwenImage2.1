@@ -1,0 +1,101 @@
+Run {
+    id: "2026.10.29-19.54-0003",
+    label: "r01",
+    created: "2026-10-29T19:54:44Z",
+    prompt: "a 1930s WPA travel poster style, like <image1> and <image2>: \"OLYMPUS MONS NATIONAL PARK\", \"RANGER NATURALIST SERVICE\", a towering red volcanic peak dominating the center, two moons glowing in the twilight sky, lush green forest canopy prominently in the foreground, flat graphic design with bold outlines, muted earth tones and deep reds, stylized national park typography, vintage government poster aesthetic, strong vertical composition, dramatic perspective emphasizing the volcano's scale, illustrated with clean lines and solid color blocks, reminiscent of mid-century American travel art",
+    negative_prompt: "",
+    alpha: false,
+    width: 544,
+    height: 800,
+    sample: Sample {
+        method: "euler",
+        steps: 20,
+        cfg: 2
+    },
+    mode: Generate,
+    refs: [
+        ImageRef {
+            id: "2026.10.29-19.53-0003",
+            store: Input
+        },
+        ImageRef {
+            id: "2026.10.29-19.53-0004",
+            store: Input
+        }
+    ],
+    model: Model {
+        recipe: "qwen-image-21",
+        files: {
+            "diffusion_model": ModelFile {
+                id: "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                sha256: "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+            },
+            "llm": ModelFile {
+                id: "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                sha256: "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+            },
+            "vae": ModelFile {
+                id: "vae/qwen_image_2.1_vae_bf16.safetensors",
+                sha256: "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+            }
+        }
+    },
+    source_idea: "2026.10.29-19.53-0005",
+    revisions: [
+        Revision {
+            rev: 0,
+            created: "2026-10-29T19:54:44Z",
+            seeds: Seeds {
+                first: 1,
+                count: 5
+            }
+        }
+    ],
+    timings: [
+        SeedTiming {
+            rev: 0,
+            seed: 1,
+            device: "ROCm0",
+            done: "2026-10-29T19:57:15Z",
+            elapsed_s: 37.105,
+            queued_s: 27.242,
+            step_s: 1.5925226
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 2,
+            device: "ROCm1",
+            done: "2026-10-29T19:57:28Z",
+            elapsed_s: 35.744,
+            queued_s: 27.04,
+            step_s: 1.5069977
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 3,
+            device: "ROCm0",
+            done: "2026-10-29T19:57:51Z",
+            elapsed_s: 36.1,
+            queued_s: 36.606,
+            step_s: 1.5924764
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 4,
+            device: "ROCm1",
+            done: "2026-10-29T19:58:03Z",
+            elapsed_s: 34.971,
+            queued_s: 35.601,
+            step_s: 1.5069977
+        },
+        SeedTiming {
+            rev: 0,
+            seed: 5,
+            device: "ROCm0",
+            done: "2026-10-29T19:58:27Z",
+            elapsed_s: 36.169,
+            queued_s: 35.786,
+            step_s: 1.564005
+        }
+    ]
+}
