@@ -5797,7 +5797,8 @@ fn opening_a_library_with_lost_output_links_warns() {
 }
 
 /// Export library writes the archive where picked (its extension added);
-/// Open a library archive unpacks one beside itself and switches to it.
+/// Unpack a library archive: into a folder picked after it, then opened (from
+/// the library menu, and from the start-up library screen).
 #[test]
 fn a_library_exported_and_opened_again() {
     use increart_core::archive::ArchiveFormat;
@@ -5816,9 +5817,31 @@ fn a_library_exported_and_opened_again() {
     assert!(away.join("backup.tar.gz").is_file(), "{:?}", h.state.messages);
     assert!(h.state.messages.last().unwrap().text.starts_with("Exported the library to"));
 
-    h.send(Msg::Picked(PickKind::LibraryArchiveIn, vec![away.join("backup.tar.gz")]));
+    // unpacked into a folder picked after the archive (starting beside it)
+    let fx = h.send(Msg::Picked(PickKind::LibraryArchiveIn, vec![away.join("backup.tar.gz")]));
+    assert!(matches!(&fx[..], [Effect::Pick { kind: PickKind::LibraryUnpackInto, start: Some(s) }] if *s == away));
+    let into = h._tmp.path().join("restored");
+    std::fs::create_dir_all(&into).unwrap();
+    h.send(Msg::Picked(PickKind::LibraryUnpackInto, vec![into.clone()]));
     h.settle();
     assert!(h.errors().is_empty(), "{:?}", h.errors());
-    assert_eq!(h.state.library.as_deref(), Some(away.join("lib").as_path()), "{:?}", h.state.messages);
+    assert_eq!(h.state.library.as_deref(), Some(into.join("lib").as_path()), "{:?}", h.state.messages);
     assert_eq!(h.state.index.ideas.len(), 1);
+
+    // from the start-up library screen: unpacked and opened there; the
+    // folder there already is refused, said on the screen
+    h.send(Msg::OtherLibrary(None));
+    assert!(matches!(h.state.phase, Phase::Library(_)));
+    let fx = h.send(Msg::UnpackLibraryArchive);
+    assert!(matches!(&fx[..], [Effect::Pick { kind: PickKind::LibraryArchiveIn, .. }]));
+    h.send(Msg::Picked(PickKind::LibraryArchiveIn, vec![away.join("backup.tar.gz")]));
+    h.send(Msg::Picked(PickKind::LibraryUnpackInto, vec![into.clone()]));
+    h.settle();
+    let Phase::Library(d) = &h.state.phase else { panic!("{:?}", h.state.phase) };
+    assert!(d.error.as_deref().is_some_and(|e| e.contains("there already")), "{:?}", d.error);
+    h.send(Msg::Picked(PickKind::LibraryArchiveIn, vec![away.join("backup.tar.gz")]));
+    h.send(Msg::Picked(PickKind::LibraryUnpackInto, vec![away.clone()]));
+    h.settle();
+    assert_eq!(h.state.phase, Phase::Main);
+    assert_eq!(h.state.library.as_deref(), Some(away.join("lib").as_path()), "{:?}", h.state.messages);
 }

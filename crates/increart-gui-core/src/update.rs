@@ -151,9 +151,9 @@ pub enum Msg {
     Converting(usize, usize),
     /// Export library: asks where, then writes the archive.
     ExportLibrary(increart_core::archive::ArchiveFormat),
-    /// Open a library archive: asks which, unpacks it beside itself and
-    /// opens the library.
-    OpenLibraryArchive,
+    /// Unpack a library archive: asks which and into which folder, unpacks
+    /// it there and opens the library.
+    UnpackLibraryArchive,
     /// An archive's progress: bytes done, of how many.
     Archiving(u64, u64),
     CancelArchive,
@@ -2352,8 +2352,8 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             update(state, Msg::Pick(PickKind::LibraryArchiveOut(format)))
         }
-        Msg::OpenLibraryArchive => {
-            if state.archiving.is_some() {
+        Msg::UnpackLibraryArchive => {
+            if state.archiving.is_some() || matches!(&state.phase, Phase::Library(d) if d.busy) {
                 return vec![];
             }
             update(state, Msg::Pick(PickKind::LibraryArchiveIn))
@@ -2386,6 +2386,11 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             match r {
                 Ok(root) => {
                     state.messages_info(format!("Unpacked {} into {}", archive.display(), root.display()));
+                    // the start-up library screen opens it as it would a folder
+                    if let Phase::Library(d) = &mut state.phase {
+                        d.path = root.to_string_lossy().into_owned();
+                        return update(state, Msg::OpenLibrary);
+                    }
                     update(state, Msg::SwitchLibrary(root.to_string_lossy().into_owned()))
                 }
                 Err(e) if e == ARCHIVE_STOPPED => {
@@ -2393,7 +2398,11 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     vec![]
                 }
                 Err(e) => {
-                    state.messages_error(format!("Opening {}: {e}", archive.display()));
+                    let e = format!("Unpacking {}: {e}", archive.display());
+                    match &mut state.phase {
+                        Phase::Library(d) => d.error = Some(e),
+                        _ => state.messages_error(e),
+                    }
                     vec![]
                 }
             }
@@ -5409,7 +5418,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 },
                 // the library itself: the picker starts beside it, named after it
                 PickKind::LibraryArchiveOut(_) => state.library.clone(),
-                PickKind::LibraryArchiveIn => state.library.as_ref().and_then(|l| l.parent()).map(PathBuf::from),
+                PickKind::LibraryArchiveIn => {
+                    let lib =
+                        state.library.clone().or_else(|| state.config.recent_libraries.first().map(PathBuf::from));
+                    lib.and_then(|l| l.parent().map(PathBuf::from))
+                }
+                PickKind::LibraryUnpackInto => state.unpack_from.as_ref().and_then(|a| a.parent()).map(PathBuf::from),
                 PickKind::ImportFiles | PickKind::IdeaImages | PickKind::GenerateRefs | PickKind::TileFile(_) => None,
             };
             vec![Effect::Pick { kind, start }]
@@ -5455,8 +5469,12 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 vec![Effect::ExportLibrary { root, dest, format }]
             }
             PickKind::LibraryArchiveIn => {
-                let archive = paths.remove(0);
-                let into = archive.parent().map(PathBuf::from).unwrap_or_default();
+                state.unpack_from = Some(paths.remove(0));
+                update(state, Msg::Pick(PickKind::LibraryUnpackInto))
+            }
+            PickKind::LibraryUnpackInto => {
+                let Some(archive) = state.unpack_from.take() else { return vec![] };
+                let into = paths.remove(0);
                 state.archiving = Some(Archiving { archive: archive.clone(), export: false, done: 0, total: 0 });
                 vec![Effect::UnpackArchive { archive, into }]
             }

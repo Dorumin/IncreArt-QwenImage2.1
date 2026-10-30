@@ -633,9 +633,14 @@ fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
                 .collect()
         }
         PickKind::LibraryArchiveIn => d
-            .set_title("Library archive to open (it's unpacked beside itself)")
+            .set_title("Library archive to unpack")
             .add_filter("Library archives", &["zip", "tar.gz", "tgz"])
             .pick_file()
+            .into_iter()
+            .collect(),
+        PickKind::LibraryUnpackInto => d
+            .set_title("Folder to unpack the library into (it gets a folder of its own there)")
+            .pick_folder()
             .into_iter()
             .collect(),
         PickKind::LibraryFolder => d

@@ -43,6 +43,7 @@ pub fn library(
     d: &LibraryDialog,
     recent: &[String],
     back: Option<&std::path::Path>,
+    archiving: Option<&increart_gui_core::Archiving>,
     out: &mut Vec<Msg>,
 ) {
     centered(ui, "library", 560.0, |ui| {
@@ -133,6 +134,18 @@ pub fn library(
                 }
             });
         });
+        // on a row of its own: four don't fit across
+        dialog_buttons(ui, |ui| {
+            let unpack = egui::Button::new(ic(ph::PACKAGE, crate::app::UNPACK_ARCHIVE));
+            let on = !d.busy && archiving.is_none();
+            if ui.add_enabled(on, unpack).on_hover_text(crate::app::UNPACK_ARCHIVE_HOVER).clicked() {
+                out.push(Msg::UnpackLibraryArchive);
+            }
+        });
+        if let Some(a) = archiving {
+            ui.add_space(8.0);
+            crate::app::archive_progress(ui, a, out);
+        }
         let loading = egui::Id::unique("library_loading_since");
         if !d.busy {
             ui.ctx().data_mut(|m| m.remove::<f64>(loading));

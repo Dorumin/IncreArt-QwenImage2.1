@@ -2312,6 +2312,8 @@ pub enum PickKind {
     LibraryArchiveOut(increart_core::archive::ArchiveFormat),
     /// A library archive to unpack and open.
     LibraryArchiveIn,
+    /// The folder to unpack [`AppState::unpack_from`] into.
+    LibraryUnpackInto,
 }
 
 /// Which of a KoboldCpp PE server's files is picked.
@@ -2684,6 +2686,8 @@ pub struct AppState {
     pub converting: Option<(usize, usize)>,
     /// A library archive being written or unpacked.
     pub archiving: Option<Archiving>,
+    /// The archive picked to unpack, while its destination is picked.
+    pub unpack_from: Option<PathBuf>,
     pub alerts: Alerts,
     /// How the library is watched for outside changes (Import tab).
     pub watch_status: String,
@@ -2913,6 +2917,7 @@ impl AppState {
             store: None,
             converting: None,
             archiving: None,
+            unpack_from: None,
             alerts: Alerts { focused: true, ..Default::default() },
             retag: None,
             new_project: None,

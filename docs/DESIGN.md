@@ -141,6 +141,8 @@ Below, two buttons open a wizard each:
   in the recent list) to pick, or a folder typed or browsed to. It says
   whether the folder is a library (has `library.rsn`); an empty or missing
   folder offers **Create a library here instead**.
+- **Unpack a library archive…**: as from the library menu (see Library
+  archives), its progress and Stop under the buttons, a failure said there.
 
 ### Startup: command line
 
@@ -166,8 +168,8 @@ The top bar's right end names the open library (**increart_library ⌄**, the
 full path in its tooltip). Its menu lists the recent libraries (the open one
 ticked), **Open an existing library…** and **Create a new library…** (the
 startup wizards), **Show in the file manager**, and the library archives
-(below): **Export the library to a zip…**, **… to a tar.gz…** and **Open a
-library archive…**. Switching keeps the
+(below): **Export the library to a zip…**, **… to a tar.gz…** and **Unpack
+a library archive…**. Switching keeps the
 servers connected and skips the servers screen: drafts are saved, the engine
 stops (runs with seeds left continue when their library is opened again; while
 runs are generating it asks first), the new library opens, and the engine
@@ -1536,9 +1538,12 @@ A whole library as one file, from the library menu (`archive.rs`):
   then renamed. The library stays usable: the export only reads it, records
   first, then links, then store images, so a seed stored meanwhile is
   either missing from the archive or whole.
-- **Open a library archive…**: a `.zip` or `.tar.gz` (any: these, a release
-  zip, a `tar czf` of a library), unpacked beside itself, then opened (as
-  switching does). Symlinks come out as stand-ins and `library.rsn` loses
+- **Unpack a library archive…** (also on the start-up library screen): a
+  `.zip` or `.tar.gz` (any: these, a release zip, a `tar czf` of a
+  library), then a folder to unpack it into (the picker starts beside the
+  archive); the library becomes a folder of its own there, named as in the
+  archive (or after the archive), and is opened (as switching does). A
+  real library: the archive is left as it is. Symlinks come out as stand-ins and `library.rsn` loses
   its `link_mode`, so opening makes the links the kind this disk takes.
   Refused: an entry outside the archive's folder (an absolute path, `..`, a
   drive), an archive without a library, a folder of that name there already.
