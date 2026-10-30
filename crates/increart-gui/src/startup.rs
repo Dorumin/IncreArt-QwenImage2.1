@@ -106,40 +106,63 @@ pub fn library(
             ui.separator();
         }
         ui.add_space(6.0);
-        dialog_buttons(ui, |ui| {
-            ui.add_enabled_ui(!d.busy, |ui| {
-                // the last used library, named, as the main button (and Enter)
-                // (switching: the last used other than the open one)
-                let main = recent.iter().position(|p| back.is_none_or(|b| b != std::path::Path::new(p)));
-                if let Some((i, path)) = main.map(|i| (i, &recent[i])) {
-                    let name =
-                        std::path::Path::new(path).file_name().map_or(path.clone(), |n| n.to_string_lossy().into());
-                    let open = RichText::new(ic(ph::BOOKS, &format!("Open {name}   ⏎"))).strong().color(ACCENT);
-                    let enter = d.wizard.is_none()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && !ui.ctx().egui_wants_keyboard_input();
-                    if ui.button(open).on_hover_text(path).clicked() || enter {
-                        out.push(Msg::OpenRecentLibrary(i));
-                    }
-                }
-                let create = RichText::new(ic(ph::FOLDER_PLUS, "Create a new library…"));
-                let create = if recent.is_empty() { create.strong() } else { create };
-                if ui.button(create).clicked() {
-                    let first = suggested_libraries().into_iter().next().map(|(_, p)| p).unwrap_or_default();
-                    out.push(Msg::LibraryWizard(Some((LibraryWizard::Create, first))));
-                }
-                // right to left: this sits right of Open an existing library
-                let unpack = egui::Button::new(ic(ph::PACKAGE, crate::app::UNPACK_ARCHIVE));
-                if ui.add_enabled(archiving.is_none(), unpack).on_hover_text(crate::app::UNPACK_ARCHIVE_HOVER).clicked()
-                {
-                    out.push(Msg::UnpackLibraryArchive);
-                }
-                if ui.button(ic(ph::FOLDER_OPEN, "Open an existing library…")).clicked() {
-                    let first = found_libraries(recent).into_iter().next().map(|(_, p)| p).unwrap_or_default();
-                    out.push(Msg::LibraryWizard(Some((LibraryWizard::Open, first))));
-                }
-            });
-        });
+        // the main action on the right: the last used library (Enter), or
+        // with none yet, creating one; the others grouped on the left
+        // (switching: the last used other than the open one)
+        let main = recent.iter().position(|p| back.is_none_or(|b| b != std::path::Path::new(p)));
+        let create = || {
+            let first = suggested_libraries().into_iter().next().map(|(_, p)| p).unwrap_or_default();
+            Msg::LibraryWizard(Some((LibraryWizard::Create, first)))
+        };
+        let create_hover = "A new library: an empty folder for your ideas, projects and images";
+        let (tool, action) = ui
+            .add_enabled_ui(!d.busy, |ui| {
+                dialog_footer(
+                    ui,
+                    |ui| {
+                        let mut msg = None;
+                        // with none yet, it is the main action (on the right)
+                        if main.is_some()
+                            && ui.button(ic(ph::FOLDER_PLUS, "New library…")).on_hover_text(create_hover).clicked()
+                        {
+                            msg = Some(create());
+                        }
+                        let open = ui
+                            .button(ic(ph::FOLDER_OPEN, "Open existing…"))
+                            .on_hover_text("A library folder that isn't in the list");
+                        if open.clicked() {
+                            let first = found_libraries(recent).into_iter().next().map(|(_, p)| p).unwrap_or_default();
+                            msg = Some(Msg::LibraryWizard(Some((LibraryWizard::Open, first))));
+                        }
+                        let unpack = egui::Button::new(ic(ph::PACKAGE, "Unpack archive…"));
+                        let unpack = ui.add_enabled(archiving.is_none(), unpack);
+                        if unpack.on_hover_text(crate::app::UNPACK_ARCHIVE_HOVER).clicked() {
+                            msg = Some(Msg::UnpackLibraryArchive);
+                        }
+                        msg
+                    },
+                    |ui| match main.map(|i| (i, &recent[i])) {
+                        Some((i, path)) => {
+                            let name = std::path::Path::new(path)
+                                .file_name()
+                                .map_or(path.clone(), |n| n.to_string_lossy().into());
+                            let open = RichText::new(ic(ph::BOOKS, &format!("Open {name}   ⏎"))).strong().color(ACCENT);
+                            let enter = d.wizard.is_none()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !ui.ctx().egui_wants_keyboard_input();
+                            (ui.button(open).on_hover_text(path).clicked() || enter)
+                                .then_some(Msg::OpenRecentLibrary(i))
+                        }
+                        None => {
+                            let new =
+                                RichText::new(ic(ph::FOLDER_PLUS, "Create a new library…")).strong().color(ACCENT);
+                            ui.button(new).on_hover_text(create_hover).clicked().then(create)
+                        }
+                    },
+                )
+            })
+            .inner;
+        out.extend(tool.into_iter().chain(action));
         if let Some(a) = archiving {
             ui.add_space(8.0);
             crate::app::archive_progress(ui, a, out);

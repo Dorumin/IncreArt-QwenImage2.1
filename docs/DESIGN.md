@@ -127,21 +127,21 @@ the place of the one before (config `example_library`). Removed, it isn't
 offered again (`example_library_removed`). While it opens, a
 progress bar shows under the buttons (reading every project, run and idea:
 under a second, about 1 s on a cold disk).
-The bottom row's main button names the last used one, **Open
-increart_library ⏎** (the full path in its tooltip); Enter does the same.
+The bottom row: on the right the main button, naming the last used one,
+**Open increart_library ⏎** (the full path in its tooltip; Enter does the
+same), or with no library yet **Create a new library…**; on the left the
+others, **New library…**, **Open existing…** and **Unpack archive…**:
 
-Below, two buttons open a wizard each:
-
-- **Create a new library…**: where should it live? `~/IncreArt`
+- **New library…** (**Create a new library…**): where should it live? `~/IncreArt`
   (preselected), `IncreArt` in the current folder (when that is elsewhere),
   or somewhere else (typed or **Browse…**). **Create library** makes it;
   the folder is created if missing. A non-empty folder is refused before
   trying; one that is already a library offers **Open it instead**.
-- **Open an existing library…**: libraries found in those places (and not
+- **Open existing…**: libraries found in those places (and not
   in the recent list) to pick, or a folder typed or browsed to. It says
   whether the folder is a library (has `library.rsn`); an empty or missing
   folder offers **Create a library here instead**.
-- **Unpack a library archive…**: as from the library menu (see Library
+- **Unpack archive…**: as **Unpack a library archive…** from the library menu (see Library
   archives), its progress and Stop under the buttons, a failure said there.
 
 ### Startup: command line
