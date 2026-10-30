@@ -46,7 +46,7 @@ pub fn library(
     archiving: Option<&increart_gui_core::Archiving>,
     out: &mut Vec<Msg>,
 ) {
-    centered(ui, "library", 560.0, |ui| {
+    centered(ui, "library", 780.0, |ui| {
         ui.heading(ic(ph::BOOKS, if back.is_some() { "Switch library" } else { "Open a library" }));
         if let Some(b) = back {
             ui.horizontal(|ui| {
@@ -128,19 +128,17 @@ pub fn library(
                     let first = suggested_libraries().into_iter().next().map(|(_, p)| p).unwrap_or_default();
                     out.push(Msg::LibraryWizard(Some((LibraryWizard::Create, first))));
                 }
+                // right to left: this sits right of Open an existing library
+                let unpack = egui::Button::new(ic(ph::PACKAGE, crate::app::UNPACK_ARCHIVE));
+                if ui.add_enabled(archiving.is_none(), unpack).on_hover_text(crate::app::UNPACK_ARCHIVE_HOVER).clicked()
+                {
+                    out.push(Msg::UnpackLibraryArchive);
+                }
                 if ui.button(ic(ph::FOLDER_OPEN, "Open an existing library…")).clicked() {
                     let first = found_libraries(recent).into_iter().next().map(|(_, p)| p).unwrap_or_default();
                     out.push(Msg::LibraryWizard(Some((LibraryWizard::Open, first))));
                 }
             });
-        });
-        // on a row of its own: four don't fit across
-        dialog_buttons(ui, |ui| {
-            let unpack = egui::Button::new(ic(ph::PACKAGE, crate::app::UNPACK_ARCHIVE));
-            let on = !d.busy && archiving.is_none();
-            if ui.add_enabled(on, unpack).on_hover_text(crate::app::UNPACK_ARCHIVE_HOVER).clicked() {
-                out.push(Msg::UnpackLibraryArchive);
-            }
         });
         if let Some(a) = archiving {
             ui.add_space(8.0);
