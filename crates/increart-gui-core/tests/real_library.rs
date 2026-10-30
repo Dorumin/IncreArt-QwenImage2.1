@@ -32,6 +32,8 @@ impl Real {
                 // nothing on the GPUs
                 Effect::OpenServers { .. } | Effect::PeAsk { .. } => {}
                 Effect::PlaySound { .. } => {}
+                // never on the desktop
+                Effect::Pick { .. } | Effect::OpenInEditor { .. } => {}
                 f => self.rt.run(f),
             }
         }

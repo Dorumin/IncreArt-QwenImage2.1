@@ -41,7 +41,10 @@ impl Harness {
     fn send(&mut self, msg: Msg) -> Vec<Effect> {
         let fx = update(&mut self.state, msg);
         for f in &fx {
-            self.rt.run(f.clone());
+            // never on the desktop: a test answers a picker with Msg::Picked
+            if !matches!(f, Effect::Pick { .. } | Effect::OpenInEditor { .. }) {
+                self.rt.run(f.clone());
+            }
         }
         fx
     }

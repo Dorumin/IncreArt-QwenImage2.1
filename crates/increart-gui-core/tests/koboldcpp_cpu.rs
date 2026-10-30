@@ -48,6 +48,8 @@ impl App {
         for f in update(&mut self.state, msg) {
             match f {
                 Effect::SaveConfig(..) | Effect::PlaySound { .. } => {}
+                // never on the desktop
+                Effect::Pick { .. } | Effect::OpenInEditor { .. } => {}
                 f => self.rt.run(f),
             }
         }
