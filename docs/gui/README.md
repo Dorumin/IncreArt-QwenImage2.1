@@ -12,7 +12,7 @@ scripts/headless.sh env INCREART_CONFIG=$PWD/tmp/gui-tour/config.rsn \
 ```
 
 **[Gallery](GALLERY.md)**: every screen below, one after another at full
-size (regenerate it with `scripts/make-gui-gallery.py`).
+size (regenerate it with `scripts/make-gui-gallery.sh`).
 
 | | |
 | --- | --- |

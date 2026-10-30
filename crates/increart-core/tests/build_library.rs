@@ -1,5 +1,5 @@
 //! Building libraries entirely through the core API, then checking them with
-//! the independent verifier (scripts/verify-sample-library.py) and a rescan.
+//! the independent verifier (tests/common/verify.rs) and a rescan.
 
 mod common;
 

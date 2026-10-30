@@ -1,6 +1,6 @@
 //! Builds the demo library (README, Example library) from
 //! `scripts/demo-library.json`: imports the public-domain source images
-//! (`scripts/demo-sources.py`) as ideas, creates the projects, then works
+//! (`increart-core`'s `demo_sources` example) as ideas, creates the projects, then works
 //! each project through the app's own Generate form and prompt enhance (the
 //! reducer and runtime, no window): optionally a PE rewrite of the prompt,
 //! then PE's suggestions for its blanks (the first picked; every project

@@ -2884,9 +2884,10 @@ calls while the window is minimized or hidden, with a clock of the app's own
   have no GPU, so the GPU paths are tested by hand.
 - `INCREART_LINK_MODE` (see Links): CI runs the tests on Windows with hard
   links and with copies too.
-- Library format: `scripts/make-sample-library.py` writes a deterministic
-  on-disk sample library (stores, links, IDs, pixel hashes, RSN/JSON chunks)
-  and `scripts/verify-sample-library.py` checks one independently; together
+- Library format: `crates/increart-core/tests/common/sample.rs` writes a
+  deterministic on-disk sample library (stores, links, IDs, pixel hashes,
+  RSN/JSON chunks) file by file, and `verify.rs` beside it checks one
+  independently (its own PNG decoder, the RSN read as text); together
   they are the fixture for `increart-core`'s loaders and writers.
   `increart-core`'s tests parse a freshly generated sample (every RSN file
   must also re-serialize byte for byte), then build a library through the

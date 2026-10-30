@@ -99,7 +99,8 @@ as `example-library/`; open a copy of it, so the checkout stays as it is.
 Its source images come from the Library of Congress, The Metropolitan Museum
 of Art, the Art Institute of Chicago and NASA, and all of them are public
 domain or have no known restrictions. `credits.json` in that folder lists
-each one with its source page. `scripts/demo-sources.py` and
+each one with its source page. `increart-core`'s `demo_sources` example
+(`cargo run -p increart-core --example demo_sources`) and
 `scripts/demo-library.json` rebuild it from scratch, and
 `scripts/update-example-library.sh` puts it in `example-library/`, where the
 release workflow takes it from.

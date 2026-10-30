@@ -1,5 +1,5 @@
 //! KoboldCpp presets by VRAM (docs/vram-tiers.md): the shipped `.kcppt`
-//! templates (`kcppt/`, from `scripts/make-tier-kcppt.py`) are the
+//! templates (`kcppt/`, from the `tier_kcppt` example) are the
 //! settings; the setup wizard picks one per GPU by its memory, plans the
 //! servers and recipe from them, and downloads their model files.
 
