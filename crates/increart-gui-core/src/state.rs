@@ -2272,6 +2272,16 @@ impl GenerateForm {
     }
 }
 
+/// A library archive being written (Export library) or unpacked (Open a
+/// library archive): the archive, and bytes done of how many.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Archiving {
+    pub archive: PathBuf,
+    pub export: bool,
+    pub done: u64,
+    pub total: u64,
+}
+
 /// What a file picker is for; its result comes back as [`crate::Msg::Picked`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickKind {
@@ -2298,6 +2308,10 @@ pub enum PickKind {
     WizardBinary,
     /// The KoboldCpp wizard's models folder.
     WizardModels,
+    /// Where Export library saves its archive, in this format.
+    LibraryArchiveOut(increart_core::archive::ArchiveFormat),
+    /// A library archive to unpack and open.
+    LibraryArchiveIn,
 }
 
 /// Which of a KoboldCpp PE server's files is picked.
@@ -2668,6 +2682,8 @@ pub struct AppState {
     pub store: Option<StoreInfo>,
     /// A store conversion going on: images done, of how many.
     pub converting: Option<(usize, usize)>,
+    /// A library archive being written or unpacked.
+    pub archiving: Option<Archiving>,
     pub alerts: Alerts,
     /// How the library is watched for outside changes (Import tab).
     pub watch_status: String,
@@ -2896,6 +2912,7 @@ impl AppState {
             settings_tab: SettingsTab::Notifications,
             store: None,
             converting: None,
+            archiving: None,
             alerts: Alerts { focused: true, ..Default::default() },
             retag: None,
             new_project: None,

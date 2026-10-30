@@ -924,3 +924,60 @@ fn transparency_is_read_from_the_pixels() {
     assert_eq!(lib.scan().unwrap().transparent.into_iter().collect::<Vec<_>>(), expect);
     drop(tmp);
 }
+
+/// A library exported to each archive format and unpacked again opens with
+/// every link and image, and its links the kind this disk takes; a hard-link
+/// or copy library goes in with each image once.
+#[test]
+fn libraries_go_to_archives_and_back() {
+    use increart_core::archive::{self, ArchiveFormat};
+    for mode in [LinkMode::Symlink, LinkMode::Hardlink, LinkMode::Copy] {
+        let (tmp, mut lib) = setup(Some(mode));
+        let photo = lib.import_bytes(&jpeg_bytes(picture(20, 20, 3)), &original("a.jpg")).unwrap().image;
+        let idea = lib.new_idea(NewIdea { images: vec![photo], ..NewIdea::text("A", "") }).unwrap();
+        let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+        let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 2)).unwrap();
+        let (_, def) = lib.find_run(&run).unwrap();
+        lib.write_output(&run, 0, 0, &sdserver_png(0), &recipe(&def, 0, None)).unwrap();
+        let (_, rel) = lib.write_output(&run, 0, 1, &sdserver_png(1), &recipe(&def, 1, None)).unwrap();
+        lib.review_output(&rel, Some(Verdict::Good)).unwrap();
+        let store_bytes: u64 = ["input_images", "output_images"]
+            .iter()
+            .flat_map(|d| fs::read_dir(lib.path(d)).unwrap().flatten())
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        let before = increart_core::check::check(&lib).unwrap();
+        assert!(before.problems.is_empty(), "{:?}", before.problems);
+
+        for format in [ArchiveFormat::Zip, ArchiveFormat::TarGz] {
+            let dest = tmp.path().join(format!("lib.{}", format.ext()));
+            let size = archive::export(lib.root(), &dest, format, &mut |_, _| true).unwrap();
+            // each image once (and a little for the records)
+            assert!(size < store_bytes + 64 * 1024, "{mode:?} {format:?}: {size} for {store_bytes}");
+            let into = tmp.path().join(format!("out-{}", format.ext()));
+            fs::create_dir_all(&into).unwrap();
+            let root = archive::unpack(&dest, &into, &mut |_, _| true).unwrap();
+            assert_eq!(root, into.join("lib"));
+            assert!(!fs::read_to_string(root.join("library.rsn")).unwrap().contains("link_mode"));
+            assert!(!root.join("cache").exists() && !root.join("library.lock").exists());
+            let back = Library::open(&root).unwrap();
+            assert_eq!(back.link_mode(), link::probe(&root).unwrap());
+            let after = increart_core::check::check(&back).unwrap();
+            assert!(after.problems.is_empty(), "{mode:?} {format:?}: {:?}", after.problems);
+            assert_eq!(after.summary(), before.summary(), "{mode:?} {format:?}");
+            let ix = back.scan().unwrap();
+            for o in &ix.project(&project).unwrap().outputs {
+                resolves(&back, &o.path, Store::Output);
+            }
+            // there already: refused, and nothing left behind
+            let again = archive::unpack(&dest, &into, &mut |_, _| true).unwrap_err();
+            assert!(again.to_string().contains("is there already"), "{again}");
+            assert_eq!(fs::read_dir(&into).unwrap().count(), 1);
+        }
+        // stopped part way: no archive
+        let dest = tmp.path().join("stopped.zip");
+        let e = archive::export(lib.root(), &dest, ArchiveFormat::Zip, &mut |done, _| done == 0).unwrap_err();
+        assert!(archive::is_cancelled(&e), "{e}");
+        assert!(!dest.exists() && !tmp.path().join(".stopped.zip.part").exists());
+    }
+}

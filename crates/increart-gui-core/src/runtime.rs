@@ -49,6 +49,7 @@ struct Shared {
     pe_next: u64,
     /// Set to stop the store conversion going on.
     convert_cancel: Arc<std::sync::atomic::AtomicBool>,
+    archive_cancel: Arc<std::sync::atomic::AtomicBool>,
     download_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// PE asks stopped: dropped if queued (or when they come), cut short
     /// if being answered.
@@ -221,6 +222,37 @@ impl Runtime {
                     .name("store conversion".into())
                     .spawn(move || convert_store(&lib, &shared, to, &cancel, &tx, &wake))
                     .expect("spawn store conversion");
+            }
+            Effect::ExportLibrary { root, dest, format } => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.shared.lock().unwrap().archive_cancel = cancel.clone();
+                std::thread::Builder::new()
+                    .name("export library".into())
+                    .spawn(move || {
+                        let mut progress = archive_progress(&tx, &wake, &cancel);
+                        let r = increart_core::archive::export(&root, &dest, format, &mut progress);
+                        let _ = tx.send(Msg::LibraryExported(r.map(|size| (dest, size)).map_err(archive_error)));
+                        wake();
+                    })
+                    .expect("spawn export library");
+            }
+            Effect::UnpackArchive { archive, into } => {
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.shared.lock().unwrap().archive_cancel = cancel.clone();
+                std::thread::Builder::new()
+                    .name("unpack library".into())
+                    .spawn(move || {
+                        let mut progress = archive_progress(&tx, &wake, &cancel);
+                        let r = increart_core::archive::unpack(&archive, &into, &mut progress);
+                        let _ = tx.send(Msg::ArchiveUnpacked(r.map_err(archive_error)));
+                        wake();
+                    })
+                    .expect("spawn unpack library");
+            }
+            Effect::CancelArchive => {
+                self.shared.lock().unwrap().archive_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Effect::CancelConvert => {
                 self.shared.lock().unwrap().convert_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -566,10 +598,34 @@ const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif",
 /// (rfd's fallback). Empty when cancelled.
 fn pick(kind: PickKind, start: Option<PathBuf>) -> Vec<PathBuf> {
     let mut d = rfd::FileDialog::new();
-    if let Some(s) = start.filter(|s| s.is_dir()) {
+    if let Some(s) = start.clone().filter(|s| s.is_dir()) {
         d = d.set_directory(s);
     }
     match kind {
+        // `start` is the library: beside it, named after it
+        PickKind::LibraryArchiveOut(format) => {
+            let lib = start.unwrap_or_default();
+            if let Some(dir) = lib.parent().filter(|p| p.is_dir()) {
+                d = d.set_directory(dir);
+            }
+            let name = lib.file_name().map_or("library".into(), |n| n.to_string_lossy().into_owned());
+            let (label, exts): (&str, &[&str]) = match format {
+                increart_core::archive::ArchiveFormat::Zip => ("Zip", &["zip"]),
+                increart_core::archive::ArchiveFormat::TarGz => ("tar.gz", &["tar.gz", "tgz"]),
+            };
+            d.set_title("Export the library to")
+                .set_file_name(format!("{name}.{}", format.ext()))
+                .add_filter(label, exts)
+                .save_file()
+                .into_iter()
+                .collect()
+        }
+        PickKind::LibraryArchiveIn => d
+            .set_title("Library archive to open (it's unpacked beside itself)")
+            .add_filter("Library archives", &["zip", "tar.gz", "tgz"])
+            .pick_file()
+            .into_iter()
+            .collect(),
         PickKind::LibraryFolder => d
             .set_title("Library folder (existing, or an empty one for a new library)")
             .pick_folder()
@@ -1201,6 +1257,9 @@ fn work_on(shared: &Arc<Mutex<Shared>>, wake: &Wake, fx: Effect) -> Vec<Msg> {
         | Effect::OpenInEditor { .. }
         | Effect::ConvertStore(_)
         | Effect::CancelConvert
+        | Effect::ExportLibrary { .. }
+        | Effect::UnpackArchive { .. }
+        | Effect::CancelArchive
         | Effect::CheckUsage => {
             unreachable!("handled on their own threads")
         }
@@ -1283,6 +1342,28 @@ fn store_info(lib: &Library) -> Result<crate::state::StoreInfo, String> {
 /// slow part), then installed under it, so library operations and
 /// generating go on meanwhile. Stops when cancelled or another library is
 /// opened; what's done stays done.
+/// An archive thread's progress callback: `Archiving` a few times a second,
+/// stopping once Cancel is pressed.
+fn archive_progress<'a>(
+    tx: &'a Sender<Msg>,
+    wake: &'a Wake,
+    cancel: &'a std::sync::atomic::AtomicBool,
+) -> impl FnMut(u64, u64) -> bool + 'a {
+    let mut last = Instant::now() - Duration::from_secs(1);
+    move |done, total| {
+        if last.elapsed() >= Duration::from_millis(200) {
+            last = Instant::now();
+            let _ = tx.send(Msg::Archiving(done, total));
+            wake();
+        }
+        !cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn archive_error(e: increart_core::Error) -> String {
+    if increart_core::archive::is_cancelled(&e) { crate::update::ARCHIVE_STOPPED.into() } else { e.to_string() }
+}
+
 fn convert_store(
     lib: &Arc<Mutex<Library>>,
     shared: &Arc<Mutex<Shared>>,

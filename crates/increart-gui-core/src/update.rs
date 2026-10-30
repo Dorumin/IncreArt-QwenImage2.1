@@ -149,6 +149,18 @@ pub enum Msg {
     CancelConvert,
     /// A store conversion's progress: images done, of how many.
     Converting(usize, usize),
+    /// Export library: asks where, then writes the archive.
+    ExportLibrary(increart_core::archive::ArchiveFormat),
+    /// Open a library archive: asks which, unpacks it beside itself and
+    /// opens the library.
+    OpenLibraryArchive,
+    /// An archive's progress: bytes done, of how many.
+    Archiving(u64, u64),
+    CancelArchive,
+    /// Export library ended: the archive and its size.
+    LibraryExported(Result<(PathBuf, u64), String>),
+    /// An archive unpacked: the library.
+    ArchiveUnpacked(Result<PathBuf, String>),
     /// A store conversion ended: images converted, left as they were (gone,
     /// or too large for WebP), failed (with why), and whether it was
     /// cancelled.
@@ -925,6 +937,20 @@ pub enum Effect {
     ConvertStore(StoreFormat),
     /// Stops a conversion after the batch it is on.
     CancelConvert,
+    /// Writes the library at `root` to `dest`, on its own thread, reporting
+    /// `Archiving`, then `LibraryExported`.
+    ExportLibrary {
+        root: PathBuf,
+        dest: PathBuf,
+        format: increart_core::archive::ArchiveFormat,
+    },
+    /// Unpacks `archive` into `into`, on its own thread, reporting
+    /// `Archiving`, then `ArchiveUnpacked`.
+    UnpackArchive {
+        archive: PathBuf,
+        into: PathBuf,
+    },
+    CancelArchive,
     /// Composes a tiled image, on its own thread; answers `TilesDone`
     /// (a file is written there too).
     ComposeTiles {
@@ -2318,6 +2344,58 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 vec![Effect::CancelConvert]
             } else {
                 vec![]
+            }
+        }
+        Msg::ExportLibrary(format) => {
+            if state.library.is_none() || state.archiving.is_some() {
+                return vec![];
+            }
+            update(state, Msg::Pick(PickKind::LibraryArchiveOut(format)))
+        }
+        Msg::OpenLibraryArchive => {
+            if state.archiving.is_some() {
+                return vec![];
+            }
+            update(state, Msg::Pick(PickKind::LibraryArchiveIn))
+        }
+        Msg::Archiving(done, total) => {
+            if let Some(a) = &mut state.archiving {
+                (a.done, a.total) = (done, total);
+            }
+            vec![]
+        }
+        Msg::CancelArchive => match state.archiving {
+            Some(_) => vec![Effect::CancelArchive],
+            None => vec![],
+        },
+        Msg::LibraryExported(r) => {
+            state.archiving = None;
+            match r {
+                Ok((path, size)) => state.messages_info(format!(
+                    "Exported the library to {} ({:.1} MB)",
+                    path.display(),
+                    size as f64 / 1e6
+                )),
+                Err(e) if e == ARCHIVE_STOPPED => state.messages_info("Export library stopped"),
+                Err(e) => state.messages_error(format!("Export library: {e}")),
+            }
+            vec![]
+        }
+        Msg::ArchiveUnpacked(r) => {
+            let archive = state.archiving.take().map(|a| a.archive).unwrap_or_default();
+            match r {
+                Ok(root) => {
+                    state.messages_info(format!("Unpacked {} into {}", archive.display(), root.display()));
+                    update(state, Msg::SwitchLibrary(root.to_string_lossy().into_owned()))
+                }
+                Err(e) if e == ARCHIVE_STOPPED => {
+                    state.messages_info("Unpacking stopped");
+                    vec![]
+                }
+                Err(e) => {
+                    state.messages_error(format!("Opening {}: {e}", archive.display()));
+                    vec![]
+                }
             }
         }
         Msg::Converting(done, total) => {
@@ -5329,6 +5407,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     }
                     _ => None,
                 },
+                // the library itself: the picker starts beside it, named after it
+                PickKind::LibraryArchiveOut(_) => state.library.clone(),
+                PickKind::LibraryArchiveIn => state.library.as_ref().and_then(|l| l.parent()).map(PathBuf::from),
                 PickKind::ImportFiles | PickKind::IdeaImages | PickKind::GenerateRefs | PickKind::TileFile(_) => None,
             };
             vec![Effect::Pick { kind, start }]
@@ -5362,6 +5443,22 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     }
                 }
                 update(state, Msg::TileOut(TileTarget::File(path)))
+            }
+            PickKind::LibraryArchiveOut(format) => {
+                let Some(root) = state.library.clone() else { return vec![] };
+                let mut dest = paths.remove(0);
+                if increart_core::archive::ArchiveFormat::of_path(&dest) != Some(format) {
+                    let name = format!("{}.{}", dest.file_name().unwrap_or_default().to_string_lossy(), format.ext());
+                    dest.set_file_name(name);
+                }
+                state.archiving = Some(Archiving { archive: dest.clone(), export: true, done: 0, total: 0 });
+                vec![Effect::ExportLibrary { root, dest, format }]
+            }
+            PickKind::LibraryArchiveIn => {
+                let archive = paths.remove(0);
+                let into = archive.parent().map(PathBuf::from).unwrap_or_default();
+                state.archiving = Some(Archiving { archive: archive.clone(), export: false, done: 0, total: 0 });
+                vec![Effect::UnpackArchive { archive, into }]
             }
             PickKind::ExportDir => {
                 if let Some(e) = &mut state.export {
@@ -6117,6 +6214,9 @@ fn next_label(state: &AppState) -> String {
 }
 
 /// Images in a sweep before Queue asks first.
+/// The error an archive thread answers when it was stopped.
+pub const ARCHIVE_STOPPED: &str = "stopped";
+
 pub const BIG_SWEEP: u64 = 100;
 
 /// The Sweep mode's runs, checked: (form, tag) per chosen preset that the

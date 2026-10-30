@@ -53,7 +53,7 @@ impl Harness {
             if msgs.is_empty() {
                 // a library still opening sends nothing until it's open
                 let opening = matches!(&self.state.phase, Phase::Library(d) if d.busy);
-                if self.state.busy == 0 && self.state.saving == 0 && !opening {
+                if self.state.busy == 0 && self.state.saving == 0 && !opening && self.state.archiving.is_none() {
                     return;
                 }
                 assert!(
@@ -5789,4 +5789,31 @@ fn opening_a_library_with_lost_output_links_warns() {
     update(&mut s, Msg::LibraryOpened(Ok((lib.root().to_path_buf(), ix))));
     let m = s.messages.last().expect("a warning");
     assert!(m.error && m.text.contains("1 generated image(s) have no output link"), "{}", m.text);
+}
+
+/// Export library writes the archive where picked (its extension added);
+/// Open a library archive unpacks one beside itself and switches to it.
+#[test]
+fn a_library_exported_and_opened_again() {
+    use increart_core::archive::ArchiveFormat;
+    let mut h = Harness::new();
+    h.send(Msg::Draft(IdeaDraft { title: "Otter".into(), text: "otter".into(), ..Default::default() }));
+    h.send(Msg::AddIdea(AddIdea::Inbox));
+    h.settle();
+    let fx = h.send(Msg::ExportLibrary(ArchiveFormat::TarGz));
+    assert!(matches!(&fx[..], [Effect::Pick { kind: PickKind::LibraryArchiveOut(ArchiveFormat::TarGz), .. }]));
+    let away = h._tmp.path().join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    let fx = h.send(Msg::Picked(PickKind::LibraryArchiveOut(ArchiveFormat::TarGz), vec![away.join("backup")]));
+    assert!(matches!(&fx[..], [Effect::ExportLibrary { dest, .. }] if dest.ends_with("backup.tar.gz")));
+    h.settle();
+    assert!(h.state.archiving.is_none());
+    assert!(away.join("backup.tar.gz").is_file(), "{:?}", h.state.messages);
+    assert!(h.state.messages.last().unwrap().text.starts_with("Exported the library to"));
+
+    h.send(Msg::Picked(PickKind::LibraryArchiveIn, vec![away.join("backup.tar.gz")]));
+    h.settle();
+    assert!(h.errors().is_empty(), "{:?}", h.errors());
+    assert_eq!(h.state.library.as_deref(), Some(away.join("lib").as_path()), "{:?}", h.state.messages);
+    assert_eq!(h.state.index.ideas.len(), 1);
 }

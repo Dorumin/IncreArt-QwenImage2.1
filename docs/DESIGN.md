@@ -163,7 +163,9 @@ Unknown arguments print the usage and exit with status 2.
 The top bar's right end names the open library (**increart_library ⌄**, the
 full path in its tooltip). Its menu lists the recent libraries (the open one
 ticked), **Open an existing library…** and **Create a new library…** (the
-startup wizards) and **Show in the file manager**. Switching keeps the
+startup wizards), **Show in the file manager**, and the library archives
+(below): **Export the library to a zip…**, **… to a tar.gz…** and **Open a
+library archive…**. Switching keeps the
 servers connected and skips the servers screen: drafts are saved, the engine
 stops (runs with seeds left continue when their library is opened again; while
 runs are generating it asks first), the new library opens, and the engine
@@ -1515,6 +1517,32 @@ the target path; release zips hold stand-ins, which every unzip tool keeps
 path starts with `../`, and it reaches a store image from where it is.
 Copies are taken as they are. Opening a library also makes any of the
 standard folders that are missing (git keeps no empty ones).
+
+### Library archives
+
+A whole library as one file, from the library menu (`archive.rs`):
+
+- **Export the library to a zip…** / **… to a tar.gz…**: a save dialog
+  beside the library, named after it. The archive holds one folder, the
+  library, without `cache/`, `thumbs/` or the lock; `library.rsn` without
+  `link_mode`. Each link goes in as a link to its store image, whatever its
+  kind in the library, so each image is stored once (a hard-link or copy
+  library too): in a tar.gz a **symlink** (`tar` on Linux and macOS makes
+  them; tools on Windows may not), in a zip its **stand-in** (every unzip
+  tool keeps it). PNG and WebP are stored, not compressed again, so the two
+  come out about the same size. Written beside the destination first,
+  then renamed. The library stays usable: the export only reads it, records
+  first, then links, then store images, so a seed stored meanwhile is
+  either missing from the archive or whole.
+- **Open a library archive…**: a `.zip` or `.tar.gz` (any: these, a release
+  zip, a `tar czf` of a library), unpacked beside itself, then opened (as
+  switching does). Symlinks come out as stand-ins and `library.rsn` loses
+  its `link_mode`, so opening makes the links the kind this disk takes.
+  Refused: an entry outside the archive's folder (an absolute path, `..`, a
+  drive), an archive without a library, a folder of that name there already.
+  Unpacked into a hidden folder first, so a failure leaves nothing.
+- While either runs, the menu shows its progress (MB done of how many) and
+  **Stop** in place of the three entries; the result is a message.
 
 Review moves files or idea folders between folders (like Yue2); the folder is
 the source of truth for the verdict on both sides (for ideas: inbox, library

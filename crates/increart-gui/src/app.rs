@@ -482,9 +482,59 @@ fn library_menu(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>, compact: b
             out.push(Msg::ShowInFileManager(root.clone()));
             ui.close();
         }
+        ui.separator();
+        archive_rows(ui, st, out);
+        ui.separator();
         ui.weak("Switching keeps the servers connected.");
     });
     r.response.on_hover_text(format!("Library: {}\nclick to switch libraries", root.display()));
+}
+
+/// Export library (zip, tar.gz) and Open a library archive, or the one
+/// being written or unpacked, with Stop.
+fn archive_rows(ui: &mut egui::Ui, st: &AppState, out: &mut Vec<Msg>) {
+    use increart_core::archive::ArchiveFormat;
+    if let Some(a) = &st.archiving {
+        let name = a.archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let what = if a.export { "exporting to" } else { "unpacking" };
+        let mb = |n: u64| n as f64 / 1e6;
+        let text = if a.total == 0 {
+            format!("{what} {name}…")
+        } else {
+            format!("{what} {name}: {:.0} of {:.0} MB", mb(a.done), mb(a.total))
+        };
+        ui.horizontal(|ui| {
+            let progress = if a.total == 0 { 0.0 } else { a.done as f32 / a.total as f32 };
+            ui.add(egui::ProgressBar::new(progress).desired_width(260.0).text(text));
+            if ui.button("Stop").clicked() {
+                out.push(Msg::CancelArchive);
+            }
+        });
+        return;
+    }
+    let zip = ui.button(ic(ph::FILE_ZIP, "Export the library to a zip…")).on_hover_text(
+        "One file holding the whole library, each image once. Any unzip tool on any OS keeps its links; \
+         opened in IncreArt, they become links again.",
+    );
+    if zip.clicked() {
+        out.push(Msg::ExportLibrary(ArchiveFormat::Zip));
+        ui.close();
+    }
+    let tar = ui.button(ic(ph::FILE_ARCHIVE, "Export the library to a tar.gz…")).on_hover_text(
+        "One file holding the whole library, its links as symlinks: unpack it with tar on Linux or macOS, \
+         or open it in IncreArt on any OS (tools on Windows may not make the symlinks).",
+    );
+    if tar.clicked() {
+        out.push(Msg::ExportLibrary(ArchiveFormat::TarGz));
+        ui.close();
+    }
+    let open = ui
+        .button(ic(ph::PACKAGE, "Open a library archive…"))
+        .on_hover_text("A .zip or .tar.gz of a library: unpacked beside the archive, then opened");
+    if open.clicked() {
+        out.push(Msg::OpenLibraryArchive);
+        ui.close();
+    }
 }
 
 /// The interface zoom, "− 100% +" in the status bar: the buttons step by
