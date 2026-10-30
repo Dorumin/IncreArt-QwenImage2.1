@@ -43,8 +43,8 @@ structure, the workflows and the on-disk model before writing the real
 **It does not:** talk to sd-server or a PE server, read or write the library
 on disk, or persist anything. All data is mock data created at startup; a
 mock backend simulates generation and prompt rewriting. (A separate
-generator, `scripts/make-sample-library.py`, writes a real on-disk sample of
-the library format; see [6.5](#65-on-disk-sample-library).)
+generator, `scripts/make-sample-library.py` at the time, writes a real on-disk
+sample of the library format; see [6.5](#65-on-disk-sample-library).)
 
 ## 2. Running it
 
@@ -730,6 +730,10 @@ Results recorded during POC1:
 
 ### 6.5 On-disk sample library
 
+(Both scripts have since been ported to Rust, as test support in
+`crates/increart-core/tests/common/`: `sample.rs` and `verify.rs`, run by
+hand with `cargo run -p increart-core --example sample_library`.)
+
 `scripts/make-sample-library.py` writes `tmp/sample-library/`: the full
 library layout with the same content as the mock data — `library.rsn`,
 `config/config.rsn`, both image stores (procedural 1024² PNGs with
@@ -810,7 +814,7 @@ Next steps:
 | `tmp/gui-prototype/src/main.rs` | the prototype (git-ignored location) |
 | `tmp/gui-prototype/Cargo.toml` | its dependencies |
 | `scripts/headless.sh` | run any GUI command on a private Xvfb display |
-| `scripts/make-sample-library.py` | write the on-disk sample library |
-| `scripts/verify-sample-library.py` | independently verify a sample library |
+| `crates/increart-core/tests/common/sample.rs` | write the on-disk sample library (was `scripts/make-sample-library.py`) |
+| `crates/increart-core/tests/common/verify.rs` | independently verify a sample library (was `scripts/verify-sample-library.py`) |
 | `tmp/sample-library/` | the generated sample (git-ignored) |
 | `tmp/xvfb-root/` | unpacked Xvfb fallback (git-ignored) |

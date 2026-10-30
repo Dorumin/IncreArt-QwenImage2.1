@@ -74,43 +74,18 @@ fn logs_for_slow() -> std::path::PathBuf {
     std::env::temp_dir().join("increart-test-logs")
 }
 
-/// A stand-in for sd-server: answers `capabilities` on `--listen-port`.
-#[cfg(unix)]
-const STAND_IN: &str = r#"#!/usr/bin/env python3
-import http.server, json, sys
-a = sys.argv
-if "--exit" in a: print("bad device"); sys.exit(3)
-port = int(a[a.index("--listen-port") + 1])
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = json.dumps({"argv": a[1:]}).encode()
-        self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(body)
-    def log_message(self, *x): pass
-print("listening", flush=True)
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
-"#;
-
 #[cfg(unix)]
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 #[test]
-#[cfg(unix)] // the stand-in sd-server is a shell script
+#[cfg(unix)] // the slow stand-in is a shell script
 fn start_connect_and_stop() {
     let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("sd-server");
-    std::fs::write(&bin, STAND_IN).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let shared = SdServerConfig {
-        binary: bin.to_string_lossy().into(),
-        model_dirs: vec!["/models".into()],
-        ..Default::default()
-    };
+    // answers `capabilities` on `--listen-port` (tests/bin/sd-server.rs)
+    let bin = env!("CARGO_BIN_EXE_increart-test-sd-server");
+    let shared = SdServerConfig { binary: bin.into(), model_dirs: vec!["/models".into()], ..Default::default() };
     let port = free_port();
     let start = ServerConfig::Start {
         name: "gpu0".into(),

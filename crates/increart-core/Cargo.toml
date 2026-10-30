@@ -33,3 +33,16 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [dev-dependencies]
 tempfile = "3.27.0"
 tiny_http = "0.12.0"
+# the sample library's own PNG writer and reader (tests/common)
+flate2 = "1.1.10"
+
+[target.'cfg(windows)'.dev-dependencies]
+# hard link identity, for tests/common/verify.rs
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+# A stand-in sd-server for tests/client.rs; not shipped.
+[[bin]]
+name = "increart-test-sd-server"
+path = "tests/bin/sd-server.rs"
+test = false
+doc = false

@@ -100,7 +100,8 @@ links it uses elsewhere, so it holds copies instead.
 Its source images come from the Library of Congress, The Metropolitan Museum
 of Art, the Art Institute of Chicago and NASA, and all of them are public
 domain or have no known restrictions. `credits.json` in that folder lists
-each one with its source page. `scripts/demo-sources.py` and
+each one with its source page. `increart-core`'s `demo_sources` example
+(`cargo run -p increart-core --example demo_sources`) and
 `scripts/demo-library.json` rebuild it from scratch, and
 `scripts/package-demo-library.sh` packages it for the release workflow.
 

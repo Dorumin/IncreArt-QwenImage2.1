@@ -14,8 +14,12 @@ PCIe 5.0 x16), i9-14900K, KoboldCpp 1.123.1. Each tier was emulated on the
 32 GB card with KoboldCpp's own limits, and the card's peak VRAM rise was
 measured. The workload was one 1024×1024 edit with one 1 MP reference,
 euler, 20 steps, CFG 2 (the app's "CFG 2, refs" recipe), plus PE rewrites
-with a 768 px image. Scripts: `scripts/bench-tiers.sh` and
-`scripts/bench-autoswap.py`. Templates: `scripts/make-tier-kcppt.py`.
+with a 768 px image, with `scripts/bench-tiers.sh` and, for the presets
+below, a one-off harness (since removed; it is in git history as
+`scripts/bench-autoswap.py`): one KoboldCpp per template, sampling the
+card's `mem_info_vram_used` every 0.2 s, timing each request swaps
+included. The results are recorded here. Templates:
+`cargo run -p increart-core --example tier_kcppt -- Qwen-Image-2.1.kcppt`.
 Raw results are in `tmp/bench-tiers/`.
 
 ## The presets

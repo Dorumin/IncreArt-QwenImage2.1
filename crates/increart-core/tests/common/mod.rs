@@ -2,9 +2,10 @@
 
 pub mod fake;
 pub mod fake_kobold;
+pub mod sample;
+pub mod verify;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Call first in every test: fsync is slow on overlay filesystems and tests
 /// don't need durability.
@@ -29,23 +30,12 @@ pub fn sample_copy(dir: &Path) {
     increart_core::fsutil::copy_tree(&master.path().join("lib"), dir).unwrap();
 }
 
-/// Writes a fresh sample library (scripts/make-sample-library.py) into `dir`.
+/// Writes a fresh sample library (sample.rs) into `dir`.
 pub fn make_sample(dir: &Path) {
-    let out = Command::new("python3")
-        .arg(workspace().join("scripts/make-sample-library.py"))
-        .arg(dir)
-        .output()
-        .expect("python3 runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    sample::write(dir);
 }
 
-/// Runs scripts/verify-sample-library.py on `dir`; returns its summary line.
+/// Checks the library at `dir` (verify.rs); returns its summary line.
 pub fn verify(dir: &Path) -> String {
-    let out = Command::new("python3")
-        .arg(workspace().join("scripts/verify-sample-library.py"))
-        .arg(dir)
-        .output()
-        .expect("python3 runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8(out.stdout).unwrap()
+    verify::verify(dir)
 }

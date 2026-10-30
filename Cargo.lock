@@ -2179,6 +2179,7 @@ dependencies = [
  "blake3",
  "chrono",
  "crc32fast",
+ "flate2",
  "getrandom 0.3.4",
  "image",
  "libc",

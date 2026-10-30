@@ -1,4 +1,5 @@
-//! The core against the Python-generated sample library: every file parses,
+//! The core against the generated sample library (tests/common/sample.rs,
+//! written without the core): every file parses,
 //! re-serializes byte for byte, and the scan matches what the generator
 //! wrote.
 
