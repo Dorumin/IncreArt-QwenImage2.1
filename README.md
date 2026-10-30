@@ -54,8 +54,8 @@ it anywhere, and run `increart` (`increart.exe` on Windows). It's portable:
 nothing is installed. The builds aren't signed, so Windows and macOS may
 ask you to confirm the first time you run them.
 
-On first run, IncreArt offers the [example library](#example-library) that
-comes in the zip, or a new library of your own, then asks for the servers
+At start-up, IncreArt offers the [example library](#example-library) that
+comes in the zip (it stays in the list until you remove it), or a new library of your own, then asks for the servers
 to use. **Set up KoboldCpp for your GPUs…** in the server dialog is the
 easiest start.
 

@@ -23,9 +23,8 @@ cd increart-<version>-linux-x86_64
 ```
 
 **Expected result:** the folder holds `increart` (`increart.exe` on
-Windows), `README.md`, `LICENSE` and `Example library/`. On first run (no
-`config.rsn` yet) the start-up list offers `Example library`, tagged
-"example".
+Windows), `README.md`, `LICENSE` and `Example library/`. The start-up list offers `Example library`,
+tagged "example".
 
 **Verify:** the window opens. The run-time libraries in 1.1's "run" line
 must be installed on Linux. The Linux build is made on Ubuntu 22.04, so it

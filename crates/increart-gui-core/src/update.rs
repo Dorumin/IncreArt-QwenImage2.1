@@ -1621,7 +1621,7 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if i >= state.config.recent_libraries.len() {
                 return vec![];
             }
-            state.config.recent_libraries.remove(i);
+            state.config.forget_recent_library(i);
             save_config(state)
         }
         Msg::LibraryWizard(w) => {

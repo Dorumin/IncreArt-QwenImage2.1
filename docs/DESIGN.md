@@ -119,10 +119,12 @@ by itself, unless the command line says so (see Startup: command line). The dial
 the tag in a muted accent colour): a click opens one, × removes it from the list
 (the folder is left alone). With none yet it says what a library is.
 Opening a library moves it to the top of the list. Release zips ship an
-example library in an `Example library` folder beside the executable; on
-first run (no `config.rsn` yet) it is put in the list, tagged "example" in
-place of "last used", so it is the main button. Removed with ×, it stays
-removed. While it opens, a
+example library in an `Example library` folder beside the executable; it
+is put in the list, tagged "example" (on first run, in place of "last
+used", so it is the main button), and stays there until removed with ×:
+opening other libraries never pushes it out, and a new release's takes
+the place of the one before (config `example_library`). Removed, it isn't
+offered again (`example_library_removed`). While it opens, a
 progress bar shows under the buttons (reading every project, run and idea:
 under a second, about 1 s on a cold disk).
 The bottom row's main button names the last used one, **Open

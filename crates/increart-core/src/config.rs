@@ -14,6 +14,13 @@ pub struct Config {
     /// Libraries opened before, most recent first (offered at startup).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_libraries: Vec<String>,
+    /// The example library offered beside the app (its path, the last one
+    /// offered): kept in `recent_libraries` until removed from it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub example_library: String,
+    /// The example library was removed from the list: not offered again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub example_library_removed: bool,
     /// Older configs' single last library: read, folded into
     /// `recent_libraries` by [`normalize`](Self::normalize), never written.
     #[serde(skip_serializing)]
@@ -700,11 +707,44 @@ impl Config {
     }
 
     /// Puts `root` first in the recent libraries (once), keeping
-    /// [`MAX_RECENT_LIBRARIES`].
+    /// [`MAX_RECENT_LIBRARIES`] (the example library stays).
     pub fn add_recent_library(&mut self, root: String) {
         self.recent_libraries.retain(|r| *r != root);
         self.recent_libraries.insert(0, root);
-        self.recent_libraries.truncate(MAX_RECENT_LIBRARIES);
+        self.trim_recent_libraries();
+    }
+
+    fn trim_recent_libraries(&mut self) {
+        while self.recent_libraries.len() > MAX_RECENT_LIBRARIES {
+            let Some(i) = self.recent_libraries.iter().rposition(|r| *r != self.example_library) else { break };
+            self.recent_libraries.remove(i);
+        }
+    }
+
+    /// The example library beside the app, `lib`, in the recent list until
+    /// removed from it: one from an earlier release, there, is replaced.
+    pub fn offer_example_library(&mut self, lib: String) {
+        if self.example_library_removed {
+            return;
+        }
+        let old = std::mem::replace(&mut self.example_library, lib.clone());
+        if self.recent_libraries.contains(&lib) {
+            if old != lib {
+                self.recent_libraries.retain(|r| *r != old);
+            }
+        } else if let Some(at) = self.recent_libraries.iter().position(|r| *r == old) {
+            self.recent_libraries[at] = lib;
+        } else {
+            self.recent_libraries.push(lib);
+            self.trim_recent_libraries();
+        }
+    }
+
+    /// Drops `recent_libraries[i]`; the example library isn't offered again.
+    pub fn forget_recent_library(&mut self, i: usize) {
+        if i < self.recent_libraries.len() && self.recent_libraries.remove(i) == self.example_library {
+            self.example_library_removed = true;
+        }
     }
 
     pub fn default_resolution(&self) -> Option<&Resolution> {
@@ -717,7 +757,7 @@ impl Config {
 pub const EXAMPLE_LIBRARY: &str = "Example library";
 
 /// The example library shipped beside the running executable, if any
-/// (offered at startup on first run).
+/// ([`Config::offer_example_library`]).
 pub fn bundled_example_library() -> Option<PathBuf> {
     example_library_in(std::env::current_exe().ok()?.parent()?)
 }
@@ -912,6 +952,29 @@ mod tests {
         }
         assert_eq!(c.recent_libraries.len(), MAX_RECENT_LIBRARIES);
         assert_eq!(c.recent_libraries[0], format!("/{}", MAX_RECENT_LIBRARIES + 1));
+    }
+
+    #[test]
+    fn the_example_library_stays_in_the_list_until_removed() {
+        let mut c = Config::default();
+        c.offer_example_library("/v1/Example library".into());
+        c.add_recent_library("/a".into());
+        c.offer_example_library("/v1/Example library".into());
+        assert_eq!(c.recent_libraries, ["/a", "/v1/Example library"], "offered once, where it was");
+        for i in 0..MAX_RECENT_LIBRARIES + 2 {
+            c.add_recent_library(format!("/{i}"));
+        }
+        assert_eq!(c.recent_libraries.len(), MAX_RECENT_LIBRARIES);
+        assert_eq!(c.recent_libraries.last().unwrap(), "/v1/Example library", "never pushed out");
+        c.offer_example_library("/v2/Example library".into());
+        assert_eq!(c.recent_libraries.last().unwrap(), "/v2/Example library", "a new release's in its place");
+        assert!(!c.recent_libraries.iter().any(|r| r.starts_with("/v1")));
+        let i = c.recent_libraries.len() - 1;
+        c.forget_recent_library(i);
+        c.offer_example_library("/v3/Example library".into());
+        assert!(!c.recent_libraries.iter().any(|r| r.contains("Example")), "removed: not offered again");
+        let back: Config = rsnfmt::from_str(&rsnfmt::to_string(&c)).unwrap();
+        assert!(back.example_library_removed);
     }
 
     #[test]
