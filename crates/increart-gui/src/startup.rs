@@ -742,8 +742,9 @@ fn presets(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Msg
     if st.config.server_presets.is_empty() {
         ui.label("No presets yet.");
         ui.add_space(4.0);
+        // the way to start: the main action while there are no presets
         ui.horizontal(|ui| {
-            if ui.button(RichText::new(ic(ph::MAGIC_WAND, WIZARD)).strong()).clicked() {
+            if ui.button(RichText::new(ic(ph::MAGIC_WAND, WIZARD)).strong().color(ACCENT)).clicked() {
                 out.push(Msg::ServerWizard(true));
             }
         });
