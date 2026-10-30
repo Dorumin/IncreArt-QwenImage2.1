@@ -15,7 +15,7 @@ pub const LIBRARY_FORMAT: u32 = 1;
 /// some left from it): older versions, which read only PNG, refuse it.
 pub const LIBRARY_FORMAT_WEBP: u32 = 2;
 /// See [`LibraryMeta::metadata`].
-pub const METADATA_VERSION: u32 = 1;
+pub const METADATA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Store {
@@ -135,9 +135,13 @@ pub enum LinkMode {
 #[serde(rename = "Library")]
 pub struct LibraryMeta {
     pub format: u32,
-    pub link_mode: LinkMode,
+    /// How new links are made. Missing (a library unzipped by a tool that
+    /// may have turned links into copies) means probe and save on open.
+    #[serde(default, serialize_with = "bare", skip_serializing_if = "Option::is_none")]
+    pub link_mode: Option<LinkMode>,
     /// How far the store images' metadata has been brought up to date
-    /// (1: `increart:blake3` everywhere, `inputs` in output recipes).
+    /// (1: `increart:blake3` everywhere, `inputs` in output recipes; 2: runs
+    /// record their deleted output links).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub metadata: u32,
     /// The format new store images are written in; existing ones change
@@ -326,6 +330,9 @@ pub struct Run {
     /// How long each generated image took (DESIGN.md, Timing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<SeedTiming>,
+    /// Seeds whose output link was deleted: generated, and not missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<Seeds>,
 }
 
 /// One generated image's timing, recorded when it is stored.
@@ -410,6 +417,15 @@ impl Run {
     /// Every `(rev, seed)` of every revision.
     pub fn all_seeds(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         self.revisions.iter().flat_map(|r| (r.seeds.first..r.seeds.first + r.seeds.count).map(move |s| (r.rev, s)))
+    }
+
+    /// Seeds generated (they have a timing) whose output link wasn't deleted:
+    /// each should have a link.
+    pub fn generated_seeds(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        self.all_seeds().filter(|(_, s)| {
+            self.timings.iter().any(|t| t.seed == *s)
+                && !self.deleted.iter().any(|d| (d.first..d.first + d.count).contains(s))
+        })
     }
 
     /// Seeds that are neither cancelled nor failed (generated or still to be).

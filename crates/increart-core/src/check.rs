@@ -1,7 +1,8 @@
 //! A whole-library check (`increart --check-library`): what a scan finds,
 //! plus what it takes on trust: every link reaches its store image, every
 //! image a run or idea names is there, and every store image decodes to the
-//! pixels its `increart:pixels` names.
+//! pixels its `increart:pixels` names. Generated images whose output link
+//! is gone are problems; seeds still to generate are counted.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -20,16 +21,21 @@ pub struct Report {
     pub outputs: usize,
     pub store_images: usize,
     pub links: usize,
+    /// Seeds still to generate (queued when the engine starts).
+    pub pending: usize,
     pub problems: Vec<String>,
 }
 
 impl Report {
     /// One line: the counts, then the problems or "no problems".
     pub fn summary(&self) -> String {
-        let counts = format!(
+        let mut counts = format!(
             "{} ideas, {} projects, {} runs, {} outputs, {} store images, {} links",
             self.ideas, self.projects, self.runs, self.outputs, self.store_images, self.links
         );
+        if self.pending > 0 {
+            counts += &format!(", {} seeds to generate", self.pending);
+        }
         match self.problems.len() {
             0 => format!("{counts}: no problems"),
             n => format!("{counts}: {n} problem(s)"),
@@ -37,11 +43,14 @@ impl Report {
     }
 }
 
-/// Checks the open library `lib` (reads every image; writes nothing).
+/// Checks the open library `lib` (reads every image; writes nothing, though
+/// opening it may have).
 pub fn check(lib: &Library) -> Result<Report> {
     let ix = lib.scan()?;
     let mut r = Report { problems: lib.problems().to_vec(), ..Default::default() };
     r.problems.extend(ix.problems.iter().cloned());
+    r.problems.extend(ix.missing_outputs());
+    r.pending = ix.pending_seeds();
     let mut named: BTreeSet<ImageRef> = BTreeSet::new();
 
     // the links: each resolves (a broken symlink can't be read) to the store

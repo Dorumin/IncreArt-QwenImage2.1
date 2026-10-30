@@ -71,14 +71,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Windows: links as copies (unzipping there can't make symlinks)
-          if [[ $RUNNER_OS == Windows ]]; then
-            gh release download example-library --pattern increart-example-library-windows.zip --dir dl
-            7z x -y -odl dl/increart-example-library-windows.zip > /dev/null
-          else
-            gh release download example-library --pattern increart-example-library.zip --dir dl
-            unzip -q dl/increart-example-library.zip -d dl
-          fi
+          # links as copies, for every OS (no unzip tool loses them)
+          gh release download example-library --pattern increart-example-library.zip --dir dl
+          if [[ $RUNNER_OS == Windows ]]; then 7z x -y -odl dl/increart-example-library.zip > /dev/null
+          else unzip -q dl/increart-example-library.zip -d dl; fi
           test -f "dl/Example library/library.rsn"
       - name: Package
         id: package
@@ -88,21 +84,24 @@ jobs:
           exe=increart${{ runner.os == 'Windows' && '.exe' || '' }}
           cp "target/release/$exe" README.md LICENSE "stage/$name/"
           mv "dl/Example library" "stage/$name/"
-          # zip keeps the executable bit and (-y) the library's symlinks
+          # zip keeps the executable bit
           if [[ $RUNNER_OS == Windows ]]; then (cd stage && 7z a -tzip "../$name.zip" "$name" > /dev/null)
           else (cd stage && zip -qr -y -X "../$name.zip" "$name"); fi
           echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: The zip works
         # unzipped fresh, as a user would: the app runs and finds every link,
-        # image and recipe of the example library intact
+        # image and recipe of the example library intact, and nothing in it
+        # to generate (it would be queued on a model the user may not have)
         run: |
           rm -rf smoke && mkdir smoke
           if [[ $RUNNER_OS == Windows ]]; then 7z x -y -osmoke "${{ steps.package.outputs.zip }}" > /dev/null
           else unzip -q "${{ steps.package.outputs.zip }}" -d smoke; fi
           dir="smoke/${{ steps.package.outputs.name }}"
           "$dir/increart" --version
-          "$dir/increart" --check-library "$dir/Example library"
+          report=$("$dir/increart" --check-library "$dir/Example library") || { echo "$report"; exit 1; }
+          echo "$report"
+          if grep -q 'seeds to generate' <<<"$report"; then echo "the example library has runs to generate" >&2; exit 1; fi
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

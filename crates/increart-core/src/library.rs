@@ -173,7 +173,7 @@ impl Library {
             &root.join(LIBRARY_FILE),
             &LibraryMeta {
                 format: LIBRARY_FORMAT,
-                link_mode,
+                link_mode: Some(link_mode),
                 metadata: METADATA_VERSION,
                 store_format: StoreFormat::Png,
             },
@@ -211,6 +211,11 @@ impl Library {
         }
         lock.set_len(0).at(&lock_path)?;
         writeln!(lock, "{}", std::process::id()).at(&lock_path)?;
+        let mut meta = meta;
+        if meta.link_mode.is_none() {
+            meta.link_mode = Some(link::probe(&root)?);
+            rsnfmt::write(&meta_path, &meta)?;
+        }
 
         let mut lib = Library {
             root,
@@ -223,6 +228,9 @@ impl Library {
             problems: Vec::new(),
         };
         let ix = lib.scan()?;
+        if lib.meta.metadata < 2 {
+            lib.record_deleted_outputs(&ix)?;
+        }
         for e in &ix.ideas {
             lib.ids.observe(IdKind::Idea, &e.idea.id);
         }
@@ -246,8 +254,10 @@ impl Library {
             }
         }
         lib.sync_pixel_index()?;
-        if lib.meta.metadata < METADATA_VERSION {
+        if lib.meta.metadata < 1 {
             lib.upgrade_metadata()?;
+        }
+        if lib.meta.metadata < METADATA_VERSION {
             lib.meta.metadata = METADATA_VERSION;
             rsnfmt::write(&lib.root.join(LIBRARY_FILE), &lib.meta)?;
         }
@@ -391,7 +401,7 @@ impl Library {
 
     /// Replaces a store image's bytes (same pixels, other text chunks).
     fn rewrite_image(&self, path: &Path, new: &[u8]) -> Result<()> {
-        match self.meta.link_mode {
+        match self.link_mode() {
             // the links share the file: rewrite it in place
             LinkMode::Hardlink => {
                 let mut f = OpenOptions::new().write(true).truncate(true).open(path).at(path)?;
@@ -406,7 +416,7 @@ impl Library {
     }
 
     pub fn link_mode(&self) -> LinkMode {
-        self.meta.link_mode
+        self.meta.link_mode.unwrap_or(LinkMode::Copy)
     }
 
     /// Problems found when opening (unreadable files, wrong pixel hashes).
@@ -1221,6 +1231,8 @@ impl Library {
             run.revisions.clear();
             run.cancelled.clear();
             run.failed.clear();
+            run.timings.clear();
+            run.deleted.clear();
             let dir = to.join("runs").join(run.id.as_str());
             fs::create_dir_all(&dir).at(&dir)?;
             rsnfmt::write(&dir.join(RUN_FILE), &run)?;
@@ -1403,6 +1415,7 @@ impl Library {
             failed: vec![],
             sweep: new.sweep,
             timings: vec![],
+            deleted: vec![],
         };
         let run_dir = dir.join("runs").join(id.as_str());
         fs::create_dir_all(&run_dir).at(&run_dir)?;
@@ -1429,10 +1442,11 @@ impl Library {
     }
 
     /// Seeds of a run still to generate: live seeds with no output link in
-    /// the project yet. In `(rev, seed)` order.
+    /// the project yet, and no timing (one generated already). In
+    /// `(rev, seed)` order.
     pub fn pending_seeds(&self, run: &Id) -> Result<Vec<(u32, u64)>> {
         let (dir, r) = self.find_run(run)?;
-        let mut done = HashSet::new();
+        let mut done: HashSet<u64> = r.timings.iter().map(|t| t.seed).collect();
         for verdict in std::iter::once(None).chain(Verdict::ALL.map(Some)) {
             let folder = dir.join(Verdict::output_dir(verdict));
             let Ok(rd) = fs::read_dir(&folder) else { continue };
@@ -1628,14 +1642,42 @@ impl Library {
     }
 
     /// Deletes an output link (e.g. a rejected image): it goes to the trash;
-    /// the image stays in the store until Clean up.
+    /// the image stays in the store until Clean up. Its run records the
+    /// seed as deleted (not to be generated again, and not missing).
     pub fn delete_output_link(&self, link_path: &Path) -> Result<()> {
         let abs = self.root.join(link_path);
         let in_project = abs.ancestors().skip(1).take(3).any(|d| d.join(PROJECT_FILE).is_file());
         if !in_project || !fsutil::exists(&abs) {
             return Err(Error::Refused(format!("{} is not an output link", link_path.display())));
         }
+        let name = abs.file_name().and_then(|n| OutputName::parse(&n.to_string_lossy()));
+        if let Some(n) = name
+            && let Ok((dir, mut run)) = self.find_run(&n.run)
+        {
+            let mut all: Vec<u64> = run.deleted.iter().flat_map(|d| d.first..d.first + d.count).collect();
+            all.push(n.seed);
+            run.deleted = seed_ranges(all);
+            self.save_run(&dir, &run)?;
+        }
         self.dispose(&abs)
+    }
+
+    /// Records as deleted every generated seed whose output link is gone
+    /// (metadata 2: links deleted before deletions were recorded).
+    fn record_deleted_outputs(&self, ix: &Index) -> Result<()> {
+        for p in &ix.projects {
+            for run in &p.runs {
+                let missing: Vec<u64> = p.missing_outputs(run).map(|(_, s)| s).collect();
+                if missing.is_empty() {
+                    continue;
+                }
+                let (dir, mut r) = self.find_run(&run.id)?;
+                r.deleted =
+                    seed_ranges(r.deleted.iter().flat_map(|d| d.first..d.first + d.count).chain(missing).collect());
+                self.save_run(&dir, &r)?;
+            }
+        }
+        Ok(())
     }
 
     /// Links an output image into a collection folder as `<image-id>.png`

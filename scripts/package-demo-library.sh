@@ -4,22 +4,23 @@
 #
 #   scripts/package-demo-library.sh <library> <demo-sources> [out-dir]
 #
-# Each zip holds one folder, "Example library", without the caches (cache/
-# names model files by their absolute paths; thumbnails are made again on
-# open) or the lock, plus the sources' credits.json. Two zips:
+# The zip, increart-example-library.zip (for every OS), holds one folder,
+# "Example library", without the caches (cache/ names model files by their
+# absolute paths; thumbnails are made again on open) or the lock, plus the
+# sources' credits.json. Each link is a copy of its image, as some unzip
+# tools (and Windows) can't make symlinks, and library.rsn names no link
+# mode: the app probes one on first open, so new links are symlinks where
+# they can be.
 #
-#   increart-example-library.zip          Linux and macOS: links kept as
-#                                         symlinks
-#   increart-example-library-windows.zip  Windows: each link a copy of its
-#                                         image (link_mode: Copy), as
-#                                         unzipping can't make symlinks there
+# The library is checked first with `increart --check-library` (the binary
+# in $INCREART, else target/release or target/debug), which brings its
+# metadata up to date: no problems and no seeds left to generate (they would
+# be queued for whoever opens it).
 #
-# Upload both to the `example-library` release, which the release workflow
+# Upload it to the `example-library` release, which the release workflow
 # downloads from:
 #
-#   gh release create example-library --latest=false --title "Example library" \
-#       --notes "Bundled into each release zip." increart-example-library*.zip
-#   gh release upload example-library --clobber increart-example-library*.zip
+#   gh release upload example-library --clobber increart-example-library.zip
 set -euo pipefail
 
 lib=${1:?library folder}
@@ -28,13 +29,25 @@ out=$(realpath -m "${3:-.}")
 [[ -f $lib/library.rsn ]] || { echo "$lib is not a library" >&2; exit 1; }
 [[ -f $sources/credits.json ]] || { echo "no credits.json in $sources" >&2; exit 1; }
 grep -q 'link_mode: Symlink' "$lib/library.rsn" || { echo "expected a symlink library" >&2; exit 1; }
+root=$(dirname "$(realpath "$0")")/..
+increart=${INCREART:-}
+for b in "$root/target/release/increart" "$root/target/debug/increart"; do
+    [[ -n $increart || ! -x $b ]] || increart=$b
+done
+[[ -n $increart ]] || { echo "no increart binary: build it, or set INCREART" >&2; exit 1; }
+report=$("$increart" --check-library "$lib") || { echo "$report" >&2; exit 1; }
+echo "$report"
+if grep -q 'seeds to generate' <<<"$report"; then
+    echo "the library has runs still to generate: finish or cancel them" >&2
+    exit 1
+fi
+grep -q 'metadata: 2' "$lib/library.rsn" || { echo "expected metadata 2 after the check" >&2; exit 1; }
 mkdir -p "$out"
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-dest="$stage/unix/Example library"
-mkdir -p "$stage/unix"
-cp -r "$lib" "$dest"   # symlinks stay symlinks
+dest="$stage/Example library"
+cp -r "$lib" "$dest"   # symlinks stay symlinks, for checking
 rm -rf "$dest/cache" "$dest/thumbs" "$dest/library.lock"
 mkdir -p "$dest/cache" "$dest/thumbs/input" "$dest/thumbs/output"
 cp "$sources/credits.json" "$dest/credits.json"
@@ -50,16 +63,12 @@ if find "$dest" -xtype l | grep .; then
     exit 1
 fi
 
-# Windows: links become copies
-win="$stage/windows/Example library"
-mkdir -p "$stage/windows"
-cp -r "$dest" "$win"
-find "$win" -type l -print0 | while IFS= read -r -d '' l; do
+# each link a copy of its image; the link mode probed on first open
+find "$dest" -type l -print0 | while IFS= read -r -d '' l; do
     cp --remove-destination "$(readlink -f "$l")" "$l"
 done
-sed -i 's/link_mode: Symlink/link_mode: Copy/' "$win/library.rsn"
+sed -i '/link_mode: /d' "$dest/library.rsn"
 
-rm -f "$out/increart-example-library.zip" "$out/increart-example-library-windows.zip"
-(cd "$stage/unix" && zip -qr -y -X "$out/increart-example-library.zip" "Example library")
-(cd "$stage/windows" && zip -qr -X "$out/increart-example-library-windows.zip" "Example library")
-du -h "$out"/increart-example-library*.zip
+rm -f "$out/increart-example-library.zip"
+(cd "$stage" && zip -qr -X "$out/increart-example-library.zip" "Example library")
+du -h "$out/increart-example-library.zip"

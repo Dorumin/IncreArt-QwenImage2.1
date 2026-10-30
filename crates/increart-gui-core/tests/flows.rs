@@ -5737,3 +5737,54 @@ fn queueing_a_preset_no_server_runs_asks_first() {
     update(&mut h.state, Msg::QueueGenerate);
     assert!(h.state.confirm.is_none());
 }
+
+/// Opening a library whose generated images have lost their links (an unzip
+/// that skipped symlinks) says so, and queues nothing for them.
+#[test]
+fn opening_a_library_with_lost_output_links_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut lib = increart_core::Library::create(&tmp.path().join("lib"), None).unwrap();
+    let idea = lib.new_idea(increart_core::NewIdea::text("A", "")).unwrap();
+    let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+    let mut cfg = Config::default();
+    cfg.normalize();
+    let run = increart_core::NewRun {
+        sweep: None,
+        label: "r01".into(),
+        prompt: "x".into(),
+        negative_prompt: String::new(),
+        alpha: false,
+        width: 64,
+        height: 64,
+        sample: increart_core::model::Sample {
+            method: "euler".into(),
+            scheduler: String::new(),
+            steps: 4,
+            cfg: 1.0,
+            flow_shift: None,
+            custom_sigmas: vec![],
+        },
+        mode: increart_core::model::Mode::Generate,
+        refs: vec![],
+        model: increart_core::model::ModelSelection { recipe: "qwen-image-21".into(), files: Default::default() },
+        source_idea: None,
+        first_seed: 0,
+        seeds: 1,
+    };
+    let run = lib.create_run(&project, run).unwrap();
+    let (_, def) = lib.find_run(&run).unwrap();
+    let p = increart_core::request::Provenance { elapsed_s: 30.0, ..Default::default() };
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let (_, at) = lib.write_output(&run, 0, 0, &png, &increart_core::request::recipe(&def, 0, &p)).unwrap();
+    std::fs::remove_file(lib.path(&at)).unwrap();
+    let ix = lib.scan().unwrap();
+    assert_eq!(ix.pending_seeds(), 0);
+
+    let mut s = AppState::new(cfg, None);
+    update(&mut s, Msg::LibraryOpened(Ok((lib.root().to_path_buf(), ix))));
+    let m = s.messages.last().expect("a warning");
+    assert!(m.error && m.text.contains("1 generated image(s) have no output link"), "{}", m.text);
+}

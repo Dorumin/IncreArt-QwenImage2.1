@@ -1626,6 +1626,9 @@ fn apply(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             if let Some(d) = &index.idea_draft {
                 state.draft = IdeaDraft::from_file(d);
             }
+            for m in index.missing_outputs() {
+                state.messages_error(m);
+            }
             state.index = index;
             state.rebuild_usage();
             state.inbox_tab = if state.unreviewed_ideas().is_empty() { InboxTab::NewIdea } else { InboxTab::Grid };

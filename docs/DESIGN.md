@@ -1007,7 +1007,13 @@ sd-server explicitly (never `-1`/random).
 - Adding seeds to an existing run, including seeds for a new revision,
   continues after that run's highest seed, so a run never generates the same
   seed twice.
-- A seed is pending until its output link exists in the project. Cancel
+- A seed is pending until its output link exists in the project, or it has
+  a timing (it was generated: a link deleted, or lost by an unzip tool
+  that skips symlinks, doesn't queue it again). Deleting an output link
+  records its seed in `run.rsn` (`deleted: [Seeds { first, count }]`); a
+  generated seed with neither a link nor that record has lost its link,
+  which opening the library warns about (a message per project) and
+  `--check-library` reports as a problem. Cancel
   records the dropped seeds in `run.rsn` (`cancelled: [Seeds { first, count
   }]`), and a seed that fails for good (bad request, generation error) is
   recorded with its error (`failed: [SeedFailure { rev, seed, error }]`), so
@@ -1183,7 +1189,9 @@ opened without it is upgraded first (inputs, then outputs): only those text
 chunks are added, the pixels aren't re-encoded. A store file is replaced
 atomically, except in hard-link libraries, where it is rewritten in place so
 the links keep sharing it. Images that can't be upgraded are listed as
-problems.
+problems. `metadata: 2`: runs record their deleted output links (`deleted`,
+below); upgrading to it records every generated seed whose link is already
+gone as deleted.
 
 **Use counts.** How often an image was used is derived from the run records:
 the runs naming it as a ref, the runs starting from it, and the images those
@@ -1473,8 +1481,9 @@ target's (`.webp` for an image stored as WebP, see Image stores).
 ### Links
 
 Links are **relative** (e.g. `../../../../output_images/<image-id>.png`), so the
-library can be moved or mounted elsewhere. Their kind is fixed per library in
-`library.rsn` (`link_mode`), chosen when the library is created by trying, in
+library can be moved or mounted elsewhere. Their kind is set per library in
+`library.rsn` (`link_mode`), chosen when the library is created (or first
+opened, when `library.rsn` names none: the example library) by trying, in
 order:
 
 1. **Symlinks**: the default on Linux and macOS. Clearly show which file is
@@ -1496,7 +1505,10 @@ machine shared to Windows over SMB keeps its symlinks: Samba follows links
 that stay inside the share by default, and these do.
 
 The app treats all three the same: it reads a link's image ID from the
-target path (symlink) or from `increart:id` (hard link, copy).
+target path (symlink) or from `increart:id` (hard link, copy), so a library
+can mix them. The example library ships its links as copies, with no
+`link_mode` (every unzip tool keeps them; some skip symlinks): opened, it
+probes one, and its new links are symlinks where they can be.
 
 Review moves files or idea folders between folders (like Yue2); the folder is
 the source of truth for the verdict on both sides (for ideas: inbox, library

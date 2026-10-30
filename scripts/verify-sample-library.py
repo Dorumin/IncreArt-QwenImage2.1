@@ -78,7 +78,8 @@ for p in images("*_images/*"):
 # the library's link mode: Symlink links are symlinks; Hardlink ones share a
 # store file's inode; Copy ones its increart:id and pixels (not every byte:
 # the usage counts are updated in the store file only)
-mode = re.search(r"link_mode: (\w+)", read("library.rsn")).group(1)
+m = re.search(r"link_mode: (\w+)", read("library.rsn"))
+mode = m.group(1) if m else "Copy"  # not saved yet: links made as copies
 outside = [p for p in images("**/*") if not os.path.islink(p) and not p.startswith(("input_images/", "output_images/", "input/inbox_drop/"))]
 if mode != "Symlink":
     def same(p):

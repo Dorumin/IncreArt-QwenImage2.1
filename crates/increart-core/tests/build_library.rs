@@ -591,6 +591,80 @@ fn copy_mode_library() {
     assert!(lib.unreferenced().unwrap().is_empty());
 }
 
+/// A seed generated once (it has a timing) isn't generated again when its
+/// link is gone: deleted, or lost unzipping (a tool that skips symlinks).
+#[test]
+fn a_generated_seed_without_its_link_isnt_pending() {
+    let (_tmp, mut lib) = setup(None);
+    let idea = lib.new_idea(NewIdea::text("A", "")).unwrap();
+    let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+    let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 3)).unwrap();
+    let (_, def) = lib.find_run(&run).unwrap();
+    let (_, deleted) = lib.write_output(&run, 0, 0, &sdserver_png(1), &recipe(&def, 0, None)).unwrap();
+    let (_, lost) = lib.write_output(&run, 0, 1, &sdserver_png(2), &recipe(&def, 1, None)).unwrap();
+    lib.delete_output_link(&deleted).unwrap();
+    fs::remove_file(lib.path(&lost)).unwrap();
+    assert_eq!(lib.pending_seeds(&run).unwrap(), vec![(0, 2)]);
+    let ix = lib.scan().unwrap();
+    let p = ix.project(&project).unwrap();
+    assert_eq!(p.pending_seeds(&p.runs[0]).collect::<Vec<_>>(), vec![(0, 2)]);
+
+    // the deleted one is recorded; the lost one is a problem
+    assert_eq!(p.missing_outputs(&p.runs[0]).collect::<Vec<_>>(), vec![(0, 1)]);
+    let report = increart_core::check::check(&lib).unwrap();
+    assert_eq!(report.pending, 1);
+    assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+    assert!(report.problems[0].starts_with("projects/new project: 1 generated image(s) have no output link"));
+    assert!(report.summary().contains(", 1 seeds to generate: 1 problem(s)"), "{}", report.summary());
+
+    // a library from before deletions were recorded: what's gone is taken
+    // as deleted
+    let root = lib.root().to_path_buf();
+    drop(lib);
+    let meta_path = root.join("library.rsn");
+    let mut meta: LibraryMeta = increart_core::rsnfmt::read(&meta_path).unwrap();
+    meta.metadata = 1;
+    increart_core::rsnfmt::write(&meta_path, &meta).unwrap();
+    let lib = Library::open(&root).unwrap();
+    let report = increart_core::check::check(&lib).unwrap();
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!(lib.find_run(&run).unwrap().1.deleted, vec![Seeds { first: 0, count: 2 }]);
+    assert_eq!(lib.pending_seeds(&run).unwrap(), vec![(0, 2)]);
+}
+
+/// A library whose `library.rsn` names no link mode (the example library,
+/// zipped with copies) probes one on open and saves it: the copies still
+/// resolve, and new links are made the probed way.
+#[test]
+fn a_library_without_a_link_mode_probes_one() {
+    let (tmp, mut lib) = setup(Some(LinkMode::Copy));
+    let photo = lib.import_bytes(&jpeg_bytes(picture(20, 20, 3)), &original("a.jpg")).unwrap().image;
+    let idea = lib.new_idea(NewIdea { images: vec![photo], ..NewIdea::text("A", "") }).unwrap();
+    let (project, _) = lib.create_project(Path::new(""), None, std::slice::from_ref(&idea)).unwrap();
+    let run = lib.create_run(&project, new_run(vec![], Mode::Generate, 2)).unwrap();
+    let (_, def) = lib.find_run(&run).unwrap();
+    let (_, copied) = lib.write_output(&run, 0, 0, &sdserver_png(1), &recipe(&def, 0, None)).unwrap();
+    drop(lib);
+    let meta_path = tmp.path().join("lib/library.rsn");
+    let body = fs::read_to_string(&meta_path).unwrap();
+    fs::write(&meta_path, body.replace("link_mode: Copy,", "")).unwrap();
+    assert!(!fs::read_to_string(&meta_path).unwrap().contains("link_mode"));
+
+    let mut lib = Library::open(&tmp.path().join("lib")).unwrap();
+    let probed = link::probe(lib.root()).unwrap();
+    assert_eq!(lib.link_mode(), probed);
+    let saved: LibraryMeta = increart_core::rsnfmt::read(&meta_path).unwrap();
+    assert_eq!(saved.link_mode, Some(probed));
+    let (_, def) = lib.find_run(&run).unwrap();
+    let (_, linked) = lib.write_output(&run, 0, 1, &sdserver_png(2), &recipe(&def, 1, None)).unwrap();
+    assert_eq!(fsutil::is_symlink(&lib.path(&linked)), probed == LinkMode::Symlink);
+    resolves(&lib, &copied, Store::Output);
+    resolves(&lib, &linked, Store::Output);
+    let ix = lib.scan().unwrap();
+    assert!(ix.problems.is_empty(), "{:?}", ix.problems);
+    assert_eq!(ix.project(&project).unwrap().outputs.len(), 2);
+}
+
 #[test]
 fn inbox_drop_becomes_ideas() {
     let (_tmp, mut lib) = setup(None);

@@ -121,12 +121,23 @@ impl ProjectEntry {
     }
 
     /// Seeds of one of its runs still to generate: live seeds with no output
-    /// link. As [`crate::Library::pending_seeds`], from what was scanned
-    /// (no reading the disk again).
+    /// link and no timing (a generated seed whose link was deleted, or lost
+    /// unzipping, isn't generated again). As
+    /// [`crate::Library::pending_seeds`], from what was scanned (no reading
+    /// the disk again).
     pub fn pending_seeds<'a>(&self, run: &'a Run) -> impl Iterator<Item = (u32, u64)> + 'a {
-        let done: std::collections::HashSet<u64> =
+        let mut done: std::collections::HashSet<u64> =
             self.outputs.iter().filter(|o| o.name.run == run.id).map(|o| o.name.seed).collect();
+        done.extend(run.timings.iter().map(|t| t.seed));
         run.live_seeds().filter(move |(_, s)| !done.contains(s))
+    }
+
+    /// Seeds of one of its runs generated, not deleted, and with no output
+    /// link: links lost (an unzip that skipped symlinks, a file manager).
+    pub fn missing_outputs<'a>(&self, run: &'a Run) -> impl Iterator<Item = (u32, u64)> + 'a {
+        let linked: std::collections::HashSet<u64> =
+            self.outputs.iter().filter(|o| o.name.run == run.id).map(|o| o.name.seed).collect();
+        run.generated_seeds().filter(move |(_, s)| !linked.contains(s))
     }
 }
 
@@ -170,6 +181,29 @@ pub struct Index {
 }
 
 impl Index {
+    /// A line per project whose generated images have lost output links
+    /// ([`ProjectEntry::missing_outputs`]).
+    pub fn missing_outputs(&self) -> Vec<String> {
+        self.projects
+            .iter()
+            .filter_map(|p| {
+                let n: usize = p.runs.iter().map(|r| p.missing_outputs(r).count()).sum();
+                (n > 0).then(|| {
+                    format!(
+                        "{}: {n} generated image(s) have no output link: links lost unzipping? \
+                         (unzip it again with a tool that keeps symlinks, or `unzip`)",
+                        p.dir.display()
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Seeds still to generate, in every run.
+    pub fn pending_seeds(&self) -> usize {
+        self.projects.iter().map(|p| p.runs.iter().map(|r| p.pending_seeds(r).count()).sum::<usize>()).sum()
+    }
+
     pub fn idea(&self, id: &crate::Id) -> Option<&IdeaEntry> {
         self.ideas.iter().find(|e| &e.idea.id == id)
     }
