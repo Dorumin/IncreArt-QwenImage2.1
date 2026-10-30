@@ -171,6 +171,9 @@ const EXTRA_SCENES: &[&str] = &[
     "98f-show-outputs-reveal",
     "98g-presets-group",
     "98h-server-logs",
+    // after 02, with a config whose first preset's server can't start (a
+    // KoboldCpp binary that isn't there): the error under its row
+    "98i-server-start-failed",
     "99-quit-with-unsaved-draft",
     // the README's shots, on the demo library (scripts/demo-library.json),
     // after 02-server-dialog and 03-idea-inbox-grid
@@ -285,6 +288,7 @@ impl Tour {
             "56-server-status" => vec![Msg::ContinueWithoutServers, Msg::ServerStatus(true)],
             "57-no-server-warning" => vec![Msg::ServerStatus(false), Msg::QueueGenerate],
             "98h-server-logs" => vec![Msg::OpenLogs(None)],
+            "98i-server-start-failed" => vec![Msg::OpenPresetNow(0)],
             "58-server-dialog-from-main" => vec![Msg::CloseNoServerWarning, Msg::OpenServerDialog],
             "59-continue-without-servers" => vec![Msg::AskContinueWithoutServers],
             "60-server-settings" => vec![Msg::CancelEdit, Msg::ServerSettings(true)],

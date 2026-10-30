@@ -638,8 +638,8 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
                 ServerProgress::Up => {
                     ui.colored_label(GOOD, ic(ph::CHECK_CIRCLE, "up"));
                 }
-                ServerProgress::Failed(e) => {
-                    ui.colored_label(BAD, ic(ph::WARNING, e));
+                ServerProgress::Failed(_) => {
+                    ui.colored_label(BAD, ic(ph::WARNING, "failed"));
                 }
             }
             if s.is_started() {
@@ -649,6 +649,24 @@ fn progress(ui: &mut egui::Ui, st: &AppState, d: &ServerDialog, out: &mut Vec<Ms
         // the log's last line on its own line, cut to the dialog's width: on the
         // row above it would widen the dialog off centre; kept while opening so
         // the dialog doesn't jump when the first line arrives
+        // why, below the row and wrapped to the dialog's width (on the row it
+        // would widen the dialog off centre); of a long log tail, the last
+        // lines, all of it on hover and in the log
+        if let ServerProgress::Failed(e) = p {
+            let e = e.strip_prefix(&format!("{}: ", s.name())).unwrap_or(e);
+            let lines: Vec<&str> = e.lines().collect();
+            let shown = match lines.len() {
+                0..=3 => e.to_string(),
+                n => format!("{}\n…\n{}", lines[0], lines[n - 2..].join("\n")),
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                let r = ui.add(egui::Label::new(RichText::new(shown).color(BAD)).wrap());
+                if lines.len() > 3 {
+                    r.on_hover_text(e);
+                }
+            });
+        }
         if matches!(p, ServerProgress::Opening) {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);

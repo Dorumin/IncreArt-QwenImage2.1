@@ -2209,6 +2209,16 @@ in the app's state folder (`$XDG_STATE_HOME/increart` when set, else
 `sd-server-<name>.log`, `koboldcpp-<name>.log` (KoboldCpp image servers),
 `pe-<name>.log`. Servers it only connects to have none.
 
+- Each start first adds a line of the app's own to the log:
+  `--- IncreArt, <date time>: <command line>` (the environment it set
+  first, such as `CUDA_VISIBLE_DEVICES=1`; passwords as `***`). A server
+  that can't be started at all gets `--- IncreArt: <why>` after it, so the
+  log says why even when the server wrote nothing: a binary that isn't
+  there is named as such ("koboldcpp not found: it isn't a file in the
+  working folder, and isn't on PATH"; with a folder, "… isn't there").
+- On the Servers screen a failed server's row says **failed**, and why on
+  its own lines under it, wrapped to the dialog's width; of a long log tail
+  the first line and the last two (all of it on hover).
 - **Logs…** (the startup Servers screen's footer, the top bar's Servers
   window) opens the log viewer, a modal; a started server's row there has a
   log button that opens it on that server's log.

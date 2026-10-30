@@ -28,6 +28,39 @@ pub fn background(cmd: &mut Command, group: bool) -> &mut Command {
     cmd
 }
 
+/// Why `program` couldn't be started, for people: a program that isn't
+/// there said as such ("No such file or directory" alone doesn't say which
+/// file).
+pub fn spawn_error(program: &str, e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::NotFound {
+        if std::path::Path::new(program).components().count() > 1 {
+            format!("{program} isn't there")
+        } else {
+            format!("{program} not found: it isn't a file in the working folder, and isn't on PATH")
+        }
+    } else {
+        format!("can't start {program}: {e}")
+    }
+}
+
+/// The line a started server's log gets before its output: when, and the
+/// command line (the environment the app set first; passwords hidden).
+pub fn log_header(cmd: &Command) -> String {
+    let quote = |s: &str| if s.is_empty() || s.contains(char::is_whitespace) { format!("\"{s}\"") } else { s.into() };
+    let mut words: Vec<String> = cmd
+        .get_envs()
+        .filter_map(|(k, v)| Some(format!("{}={}", k.to_string_lossy(), quote(&v?.to_string_lossy()))))
+        .collect();
+    words.push(quote(&cmd.get_program().to_string_lossy()));
+    let mut secret = false;
+    for a in cmd.get_args() {
+        let a = a.to_string_lossy();
+        words.push(if secret { "***".into() } else { quote(&a) });
+        secret = a.ends_with("password");
+    }
+    format!("\n--- IncreArt, {}: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), words.join(" "))
+}
+
 /// Spawns `cmd` so that it stops when the app does, however the app ends.
 /// Linux: the kernel sends it SIGTERM when the app goes. Windows: it joins
 /// a job the system closes, killing it, when the app goes. macOS: a small
@@ -248,6 +281,33 @@ mod imp {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    fn a_missing_program_is_named() {
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            spawn_error("koboldcpp", &missing),
+            "koboldcpp not found: it isn't a file in the working folder, and isn't on PATH"
+        );
+        let path = if cfg!(windows) { r"C:\kcpp\koboldcpp.exe" } else { "/opt/kcpp/koboldcpp" };
+        assert_eq!(spawn_error(path, &missing), format!("{path} isn't there"));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(spawn_error("koboldcpp", &denied).starts_with("can't start koboldcpp: "));
+    }
+
+    #[test]
+    fn the_log_header_shows_the_command_without_passwords() {
+        let mut c = Command::new("koboldcpp");
+        c.env("CUDA_VISIBLE_DEVICES", "1").args(["--port", "5001", "--adminpassword", "s3cret", "--model", "a b.gguf"]);
+        let h = log_header(&c);
+        assert!(h.starts_with("\n--- IncreArt, ") && h.ends_with('\n'), "{h:?}");
+        assert!(
+            h.trim_end()
+                .ends_with(": CUDA_VISIBLE_DEVICES=1 koboldcpp --port 5001 --adminpassword *** --model \"a b.gguf\""),
+            "{h:?}"
+        );
+        assert!(!h.contains("s3cret"));
+    }
 
     /// A long-running stand-in server: this test binary, running the
     /// ignored test below.

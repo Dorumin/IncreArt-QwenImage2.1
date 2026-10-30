@@ -2,7 +2,7 @@
 //! (DESIGN.md, Backend).
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -14,8 +14,9 @@ use crate::sdserver::Client;
 pub enum LaunchError {
     #[error("{name}: no server answers on {url}")]
     NotRunning { name: String, url: String },
-    #[error("{name}: can't start {binary}: {source}")]
-    Spawn { name: String, binary: String, source: std::io::Error },
+    /// Not started at all ([`crate::process::spawn_error`]; also in its log).
+    #[error("{name}: {why}")]
+    Spawn { name: String, why: String },
     #[error("{name}: the server exited ({status}) during start-up; log {}:\n{tail}", log.display())]
     Exited { name: String, status: String, log: PathBuf, tail: String },
     #[error("{name}: opening cancelled")]
@@ -153,17 +154,23 @@ pub fn open_cancellable(
     }
     fs::create_dir_all(log_dir)?;
     let log = log_path(log_dir, server);
-    let out = OpenOptions::new().create(true).append(true).open(&log)?;
-    let start = out.metadata()?.len();
-    let mut cmd = Command::new(&shared.binary);
+    let mut out = OpenOptions::new().create(true).append(true).open(&log)?;
+    let mut cmd = Command::new(shared.binary.trim());
     cmd.args(command_args(server, shared))
         .envs(command_env(server))
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
-        .stderr(out);
+        .stderr(out.try_clone()?);
     crate::process::background(&mut cmd, false);
-    let child = if shared.leave_running { cmd.spawn() } else { crate::process::spawn_with_app(cmd) }
-        .map_err(|source| LaunchError::Spawn { name: name.clone(), binary: shared.binary.clone(), source })?;
+    out.write_all(crate::process::log_header(&cmd).as_bytes())?;
+    let start = out.metadata()?.len();
+    let program = shared.binary.trim().to_string();
+    let spawned = if shared.leave_running { cmd.spawn() } else { crate::process::spawn_with_app(cmd) };
+    let child = spawned.map_err(|e| {
+        let why = crate::process::spawn_error(&program, &e);
+        let _ = writeln!(out, "--- IncreArt: {why}");
+        LaunchError::Spawn { name: name.clone(), why }
+    })?;
     proc.child = Some(child);
     proc.log = Some(log.clone());
     wait_up(proc, log, start, wait, cancel)
@@ -217,10 +224,8 @@ fn open_kobold(
         return Err(LaunchError::NotRunning { name, url: k.base_url() });
     };
     fs::create_dir_all(log_dir)?;
-    let start = fs::metadata(&log).map_or(0, |m| m.len());
-    let child = crate::kobold::spawn(&binary, &args, &env, &log, !shared.leave_running).map_err(|e| {
-        LaunchError::Spawn { name: name.clone(), binary: binary.clone(), source: std::io::Error::other(e) }
-    })?;
+    let (child, start) = crate::kobold::spawn(&binary, &args, &env, &log, !shared.leave_running)
+        .map_err(|why| LaunchError::Spawn { name: name.clone(), why })?;
     proc.child = Some(child);
     proc.log = Some(log.clone());
     wait_up(proc, log, start, wait, cancel)

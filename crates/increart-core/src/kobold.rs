@@ -292,21 +292,30 @@ pub fn spawn(
     env: &[(String, String)],
     log: &Path,
     with_app: bool,
-) -> Result<Child, String> {
+) -> Result<(Child, u64), String> {
+    use std::io::Write;
+    let log_error = |e: std::io::Error| format!("can't write its log {}: {e}", log.display());
     if let Some(dir) = log.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(dir).map_err(log_error)?;
     }
-    let out = OpenOptions::new().create(true).append(true).open(log).map_err(|e| e.to_string())?;
-    let err = out.try_clone().map_err(|e| e.to_string())?;
+    let mut out = OpenOptions::new().create(true).append(true).open(log).map_err(log_error)?;
     let mut cmd = command(binary)?;
     crate::process::background(&mut cmd, true)
         .args(args)
         .envs(env.iter().cloned())
         .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err);
-    if with_app { crate::process::spawn_with_app(cmd) } else { cmd.spawn() }
-        .map_err(|e| format!("can't start {binary}: {e}"))
+        .stdout(out.try_clone().map_err(log_error)?)
+        .stderr(out.try_clone().map_err(log_error)?);
+    // the command line first, and then where the server's output starts
+    out.write_all(crate::process::log_header(&cmd).as_bytes()).map_err(log_error)?;
+    let start = out.metadata().map_err(log_error)?.len();
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let child = if with_app { crate::process::spawn_with_app(cmd) } else { cmd.spawn() }.map_err(|e| {
+        let why = crate::process::spawn_error(&program, &e);
+        let _ = writeln!(out, "--- IncreArt: {why}");
+        why
+    })?;
+    Ok((child, start))
 }
 
 #[cfg(test)]
@@ -364,15 +373,33 @@ mod tests {
         use std::time::{Duration, Instant};
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("logs/k.log");
-        let child = spawn("sh", &["-c".into(), "echo up; sleep 30".into()], &[], &log, false).unwrap();
+        let (child, start) = spawn("sh", &["-c".into(), "echo up; sleep 30".into()], &[], &log, false).unwrap();
+        let output = || fs::read_to_string(&log).unwrap_or_default()[start as usize..].to_string();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while fs::read_to_string(&log).unwrap_or_default().is_empty() && Instant::now() < deadline {
+        while output().is_empty() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(fs::read_to_string(&log).unwrap(), "up\n");
+        assert_eq!(output(), "up\n");
+        let header = &fs::read_to_string(&log).unwrap()[..start as usize];
+        assert!(
+            header.starts_with("\n--- IncreArt, ") && header.ends_with(": sh -c \"echo up; sleep 30\"\n"),
+            "{header:?}"
+        );
         let t = Instant::now();
         crate::process::stop(child);
         assert!(t.elapsed() < Duration::from_secs(4), "stopped by TERM, not waited out");
+    }
+
+    #[test]
+    fn a_binary_that_isnt_there_is_said_in_its_log_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("k.log");
+        let missing = dir.path().join("no").join("koboldcpp");
+        let why = spawn(&missing.to_string_lossy(), &["--port".into(), "5001".into()], &[], &log, false).unwrap_err();
+        assert_eq!(why, format!("{} isn't there", missing.display()));
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.contains(" --port 5001\n"), "{text:?}");
+        assert!(text.ends_with(&format!("--- IncreArt: {why}\n")), "{text:?}");
     }
 
     #[cfg(unix)]
